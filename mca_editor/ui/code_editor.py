@@ -1,0 +1,1165 @@
+"""
+MCA Editor - Code Editor Widget.
+
+Custom code editor with syntax highlighting, line numbers, auto-complete,
+brace matching, and other IDE features. Inspired by Charcoal Editor 2.
+
+Dependencies:
+    - PySide6 (QPlainTextEdit, QSyntaxHighlighter, QPainter, etc.)
+"""
+
+import re
+import logging
+
+from PySide6.QtWidgets import QPlainTextEdit, QWidget, QTextEdit
+from PySide6.QtCore import Qt, QRect, QSize, Signal
+from PySide6.QtGui import (
+    QColor, QPainter, QTextFormat, QFont, QSyntaxHighlighter,
+    QTextCharFormat, QTextCursor
+)
+
+# Module-level logger for editor operations.
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Syntax Highlighting
+# =============================================================================
+
+class PythonHighlighter(QSyntaxHighlighter):
+    """
+    Python syntax highlighter matching the dark theme style.
+
+    Highlights keywords, builtins, decorators, numbers, strings,
+    function/class definitions, function calls, operators, and comments.
+
+    :param QTextDocument parent: The document to highlight.
+    """
+
+    def __init__(self, parent=None):
+        """
+        Initialize the highlighter and build all rules.
+
+        :param QTextDocument parent: The document to highlight.
+        """
+        super().__init__(parent)
+        self._rules = []
+        self._build_rules()
+
+    def _make_format(self, color, bold=False, italic=False):
+        """
+        Create a QTextCharFormat with the given style.
+
+        :param str color: Hex color string.
+        :param bool bold: Whether the text should be bold.
+        :param bool italic: Whether the text should be italic.
+        :return: Configured text format.
+        :rtype: QTextCharFormat
+        """
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        if bold:
+            fmt.setFontWeight(QFont.Weight.Bold)
+        if italic:
+            fmt.setFontItalic(True)
+        return fmt
+
+    def _build_rules(self):
+        """Build all syntax highlighting rules as (regex, format) pairs."""
+        # --- Keywords ---
+        keyword_fmt = self._make_format("#569cd6", bold=True)
+        keywords = [
+            "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally",
+            "for", "from", "global", "if", "import", "in", "is", "lambda",
+            "nonlocal", "not", "or", "pass", "raise", "return", "try",
+            "while", "with", "yield"
+        ]
+        for kw in keywords:
+            self._rules.append((re.compile(r"\b{}\b".format(kw)), keyword_fmt))
+
+        # --- Builtins ---
+        builtin_fmt = self._make_format("#4ec9b0")
+        builtins = [
+            "True", "False", "None", "self", "cls",
+            "print", "range", "len", "type", "int", "float", "str",
+            "list", "dict", "tuple", "set", "bool", "bytes",
+            "isinstance", "issubclass", "hasattr", "getattr", "setattr",
+            "super", "property", "staticmethod", "classmethod",
+            "enumerate", "zip", "map", "filter", "sorted", "reversed",
+            "open", "input", "abs", "all", "any", "min", "max", "sum",
+        ]
+        for b in builtins:
+            self._rules.append((re.compile(r"\b{}\b".format(b)), builtin_fmt))
+
+        # --- Decorators ---
+        decorator_fmt = self._make_format("#d7ba7d")
+        self._rules.append((re.compile(r"@\w+"), decorator_fmt))
+
+        # --- Numbers (decimal and hex) ---
+        number_fmt = self._make_format("#b5cea8")
+        self._rules.append((re.compile(r"\b\d+\.?\d*([eE][+-]?\d+)?\b"), number_fmt))
+        self._rules.append((re.compile(r"\b0[xX][0-9a-fA-F]+\b"), number_fmt))
+
+        # --- Function definitions (highlight the name after 'def') ---
+        func_fmt = self._make_format("#dcdcaa")
+        self._rules.append((re.compile(r"\bdef\s+(\w+)"), func_fmt))
+
+        # --- Class definitions (highlight the name after 'class') ---
+        class_fmt = self._make_format("#4ec9b0", bold=True)
+        self._rules.append((re.compile(r"\bclass\s+(\w+)"), class_fmt))
+
+        # --- Function calls (word followed by opening paren) ---
+        call_fmt = self._make_format("#dcdcaa")
+        self._rules.append((re.compile(r"\b(\w+)\s*\("), call_fmt))
+
+        # --- Operators ---
+        operator_fmt = self._make_format("#d4d4d4")
+        self._rules.append((re.compile(r"[+\-*/%=<>!&|^~]"), operator_fmt))
+
+        # --- Single-line strings (double and single quoted, with f-string support) ---
+        string_fmt = self._make_format("#ce9178")
+        self._rules.append((re.compile(r'f?"[^"\\]*(\\.[^"\\]*)*"'), string_fmt))
+        self._rules.append((re.compile(r"f?'[^'\\]*(\\.[^'\\]*)*'"), string_fmt))
+
+        # --- Comments (must be last to override other rules) ---
+        comment_fmt = self._make_format("#6a9955", italic=True)
+        self._rules.append((re.compile(r"#[^\n]*"), comment_fmt))
+
+    def highlightBlock(self, text):
+        """
+        Apply highlighting rules to a single block of text.
+
+        :param str text: The text content of the block.
+        """
+        for pattern, fmt in self._rules:
+            for match in pattern.finditer(text):
+                # For patterns with capture groups (def name, class name),
+                # highlight the captured group instead of the full match.
+                if match.lastindex and match.lastindex >= 1:
+                    start = match.start(1)
+                    length = match.end(1) - start
+                else:
+                    start = match.start()
+                    length = match.end() - start
+                self.setFormat(start, length, fmt)
+
+        # Handle multi-line triple-quoted strings separately.
+        self._highlight_multiline_strings(text)
+
+    def _highlight_multiline_strings(self, text):
+        """
+        Handle triple-quote string highlighting across multiple blocks.
+
+        Uses block state to track whether we are inside a triple-quoted
+        string from a previous line.
+
+        :param str text: The text content of the current block.
+        """
+        string_fmt = self._make_format("#ce9178")
+
+        # State: 0 = normal, 1 = in triple double-quote, 2 = in triple single-quote
+        state = self.previousBlockState()
+        if state == -1:
+            state = 0
+
+        i = 0
+        start = 0
+        while i < len(text):
+            if state == 0:
+                # Look for opening triple quotes.
+                if text[i:i + 3] == '"""':
+                    state = 1
+                    start = i
+                    i += 3
+                elif text[i:i + 3] == "'''":
+                    state = 2
+                    start = i
+                    i += 3
+                else:
+                    i += 1
+            elif state == 1:
+                # Inside triple double-quote, look for closing.
+                if text[i:i + 3] == '"""':
+                    self.setFormat(start, i + 3 - start, string_fmt)
+                    state = 0
+                    i += 3
+                else:
+                    i += 1
+            elif state == 2:
+                # Inside triple single-quote, look for closing.
+                if text[i:i + 3] == "'''":
+                    self.setFormat(start, i + 3 - start, string_fmt)
+                    state = 0
+                    i += 3
+                else:
+                    i += 1
+
+        # If we ended still inside a triple-quote, highlight to end of line.
+        if state != 0:
+            self.setFormat(start, len(text) - start, string_fmt)
+
+        self.setCurrentBlockState(state)
+
+
+class MELHighlighter(QSyntaxHighlighter):
+    """
+    MEL (Maya Embedded Language) syntax highlighter.
+
+    Highlights keywords, variables, numbers, strings, proc definitions,
+    and comments.
+
+    :param QTextDocument parent: The document to highlight.
+    """
+
+    def __init__(self, parent=None):
+        """
+        Initialize the MEL highlighter.
+
+        :param QTextDocument parent: The document to highlight.
+        """
+        super().__init__(parent)
+        self._rules = []
+        self._build_rules()
+
+    def _make_format(self, color, bold=False, italic=False):
+        """
+        Create a QTextCharFormat with the given style.
+
+        :param str color: Hex color string.
+        :param bool bold: Whether the text should be bold.
+        :param bool italic: Whether the text should be italic.
+        :return: Configured text format.
+        :rtype: QTextCharFormat
+        """
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        if bold:
+            fmt.setFontWeight(QFont.Weight.Bold)
+        if italic:
+            fmt.setFontItalic(True)
+        return fmt
+
+    def _build_rules(self):
+        """Build MEL-specific syntax highlighting rules."""
+        # --- Keywords ---
+        keyword_fmt = self._make_format("#569cd6", bold=True)
+        keywords = [
+            "if", "else", "for", "while", "do", "in", "break", "continue",
+            "return", "switch", "case", "default", "proc", "global", "local",
+            "string", "int", "float", "vector", "matrix", "source", "catch",
+            "true", "false", "yes", "no", "on", "off"
+        ]
+        for kw in keywords:
+            self._rules.append((re.compile(r"\b{}\b".format(kw)), keyword_fmt))
+
+        # --- MEL variables ($ prefix) ---
+        var_fmt = self._make_format("#9cdcfe")
+        self._rules.append((re.compile(r"\$\w+"), var_fmt))
+
+        # --- Numbers ---
+        number_fmt = self._make_format("#b5cea8")
+        self._rules.append((re.compile(r"\b\d+\.?\d*\b"), number_fmt))
+
+        # --- Strings ---
+        string_fmt = self._make_format("#ce9178")
+        self._rules.append((re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), string_fmt))
+
+        # --- Proc definitions (highlight the procedure name) ---
+        proc_fmt = self._make_format("#dcdcaa")
+        self._rules.append((re.compile(r"\bproc\s+\w*\s*(\w+)"), proc_fmt))
+
+        # --- Comments (// style) ---
+        comment_fmt = self._make_format("#6a9955", italic=True)
+        self._rules.append((re.compile(r"//[^\n]*"), comment_fmt))
+
+    def highlightBlock(self, text):
+        """
+        Apply MEL highlighting rules to a single block.
+
+        :param str text: The text content of the block.
+        """
+        for pattern, fmt in self._rules:
+            for match in pattern.finditer(text):
+                if match.lastindex and match.lastindex >= 1:
+                    start = match.start(1)
+                    length = match.end(1) - start
+                else:
+                    start = match.start()
+                    length = match.end() - start
+                self.setFormat(start, length, fmt)
+
+
+# =============================================================================
+# Line Number Area
+# =============================================================================
+
+class LineNumberArea(QWidget):
+    """
+    Line number gutter widget for the code editor.
+
+    Delegates all painting to the parent editor's paint_line_numbers method.
+
+    :param MCACodeEditor editor: The parent code editor widget.
+    """
+
+    def __init__(self, editor):
+        """
+        Initialize the line number area.
+
+        :param MCACodeEditor editor: The parent code editor.
+        """
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        """
+        Return the preferred width based on the editor's line count.
+
+        :return: Size hint for the gutter.
+        :rtype: QSize
+        """
+        return QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        """
+        Delegate painting to the editor.
+
+        :param QPaintEvent event: The paint event.
+        """
+        self._editor.paint_line_numbers(event)
+
+
+# =============================================================================
+# Code Editor
+# =============================================================================
+
+# Bracket pairs for matching.
+MATCHING_BRACKETS = {
+    "(": ")", ")": "(",
+    "[": "]", "]": "[",
+    "{": "}", "}": "{",
+}
+
+
+class MCACodeEditor(QPlainTextEdit):
+    """
+    Full-featured code editor widget.
+
+    Mirrors Charcoal Editor 2 capabilities:
+        - Line numbers with current line highlight
+        - Syntax highlighting (Python, MEL, extensible)
+        - Brace matching
+        - Auto-indent and smart indent
+        - Word/brace matching highlights
+        - Auto-close brackets and quotes
+        - Tab/space handling
+        - Toggle comment (Ctrl+/)
+
+    :param QWidget parent: Optional parent widget.
+    """
+
+    # --- Signals ---
+    execute_requested = Signal()           # Execute full script
+    execute_selected_requested = Signal()  # Execute selected text
+    execute_line_requested = Signal()      # Execute current line
+    file_modified = Signal(bool)           # Document modified state changed
+    cursor_position_changed_info = Signal(int, int)  # line, column
+
+    def __init__(self, parent=None):
+        """
+        Initialize the code editor with all features.
+
+        :param QWidget parent: Optional parent widget.
+        """
+        super().__init__(parent)
+
+        # --- Configuration ---
+        self._language = "python"
+        self._file_path = None
+        self._is_temporary = True
+        self._tab_size = 4
+        self._use_spaces = True
+        self._auto_close_brackets = True
+        self._auto_close_quotes = True
+        self._show_indent_guides = True
+        self._highlight_matching_words = True
+
+        # Setup monospace font for code editing.
+        font = QFont("JetBrains Mono, Consolas, Courier New", 12)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.setFont(font)
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * self._tab_size)
+
+        # Line number gutter.
+        self._line_number_area = LineNumberArea(self)
+
+        # Syntax highlighter (set based on language).
+        self._highlighter = None
+        self.set_language("python")
+
+        # Connect internal signals for UI updates.
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self.cursorPositionChanged.connect(self._on_cursor_position_changed)
+        self.modificationChanged.connect(self.file_modified.emit)
+
+        # Initial gutter width calculation.
+        self._update_line_number_area_width(0)
+        self._setup_editor_style()
+
+    def _setup_editor_style(self):
+        """Configure editor appearance to match the dark theme."""
+        self.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+                border: none;
+            }
+        """)
+        # Wider cursor for visibility on dark backgrounds.
+        self.setCursorWidth(2)
+
+    # --- Language / Highlighter ----------------------------------------------
+
+    def set_language(self, language):
+        """
+        Set the editor language and swap the syntax highlighter.
+
+        :param str language: Language identifier ('python', 'mel', etc.).
+        """
+        self._language = language.lower()
+
+        # Detach the old highlighter before creating a new one.
+        if self._highlighter:
+            self._highlighter.setDocument(None)
+
+        if self._language == "python":
+            self._highlighter = PythonHighlighter(self.document())
+        elif self._language == "mel":
+            self._highlighter = MELHighlighter(self.document())
+        else:
+            self._highlighter = None
+
+    @property
+    def language(self):
+        """
+        The current language mode.
+
+        :rtype: str
+        """
+        return self._language
+
+    @property
+    def file_path(self):
+        """
+        The file path associated with this editor, or None for temp buffers.
+
+        :rtype: str or None
+        """
+        return self._file_path
+
+    @file_path.setter
+    def file_path(self, path):
+        """
+        Set the file path and auto-detect language from extension.
+
+        :param str path: Absolute file path, or None for temp buffers.
+        """
+        self._file_path = path
+        self._is_temporary = path is None
+
+        # Auto-detect language from file extension.
+        if path:
+            if path.endswith(".py"):
+                self.set_language("python")
+            elif path.endswith(".mel"):
+                self.set_language("mel")
+            elif path.endswith(".cs"):
+                self.set_language("csharp")
+            elif path.endswith(".lua"):
+                self.set_language("lua")
+
+    @property
+    def is_temporary(self):
+        """
+        Whether this editor is a temporary buffer (not backed by a file).
+
+        :rtype: bool
+        """
+        return self._is_temporary
+
+    # --- Line Numbers --------------------------------------------------------
+
+    def line_number_area_width(self):
+        """
+        Calculate the required width for the line number gutter.
+
+        Width adapts to the number of digits in the highest line number.
+
+        :return: Pixel width for the gutter.
+        :rtype: int
+        """
+        digits = max(1, len(str(self.blockCount())))
+        # 8px left padding + digit width + 12px right padding.
+        space = 8 + self.fontMetrics().horizontalAdvance("9") * (digits + 1) + 12
+        return space
+
+    def _update_line_number_area_width(self, _):
+        """Adjust viewport margins to make room for the gutter."""
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect, dy):
+        """
+        Update the line number area when the editor scrolls or resizes.
+
+        :param QRect rect: The area that needs updating.
+        :param int dy: Vertical scroll delta.
+        """
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(
+                0, rect.y(),
+                self._line_number_area.width(),
+                rect.height()
+            )
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width(0)
+
+    def paint_line_numbers(self, event):
+        """
+        Paint line numbers in the gutter area.
+
+        The current line number is highlighted brighter than the rest.
+
+        :param QPaintEvent event: The paint event from the gutter widget.
+        """
+        painter = QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), QColor(30, 30, 30))
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
+
+        current_line = self.textCursor().blockNumber()
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                # Highlight the current line number brighter.
+                if block_number == current_line:
+                    painter.setPen(QColor(200, 200, 200))
+                else:
+                    painter.setPen(QColor(90, 90, 90))
+                painter.drawText(
+                    0, top,
+                    self._line_number_area.width() - 8,
+                    self.fontMetrics().height(),
+                    Qt.AlignmentFlag.AlignRight, number
+                )
+
+            block = block.next()
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+            block_number += 1
+
+        painter.end()
+
+    def resizeEvent(self, event):
+        """
+        Reposition the line number area on editor resize.
+
+        :param QResizeEvent event: The resize event.
+        """
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self._line_number_area.setGeometry(
+            QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height())
+        )
+
+    # --- Cursor Position & Highlights ----------------------------------------
+
+    def _on_cursor_position_changed(self):
+        """Update cursor info, current line highlight, and bracket matching."""
+        # Emit position info for the status bar.
+        cursor = self.textCursor()
+        self.cursor_position_changed_info.emit(
+            cursor.blockNumber() + 1,
+            cursor.columnNumber() + 1
+        )
+
+        # Build the list of extra selections (highlights).
+        extra_selections = []
+
+        # Current line highlight (subtle background change).
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(QColor(40, 40, 40))
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extra_selections.append(selection)
+
+        # Matching bracket highlights.
+        extra_selections.extend(self._find_matching_bracket())
+
+        # Matching word highlights (all occurrences of word under cursor).
+        if self._highlight_matching_words:
+            extra_selections.extend(self._find_matching_words())
+
+        self.setExtraSelections(extra_selections)
+
+    def _find_matching_bracket(self):
+        """
+        Find and highlight matching bracket pair at cursor position.
+
+        :return: List of ExtraSelection items for the bracket pair.
+        :rtype: list
+        """
+        selections = []
+        cursor = self.textCursor()
+        text = cursor.block().text()
+        pos = cursor.positionInBlock()
+
+        # Check character at cursor or just before cursor.
+        char = None
+        if pos < len(text) and text[pos] in MATCHING_BRACKETS:
+            char = text[pos]
+            search_pos = cursor.position()
+        elif pos > 0 and text[pos - 1] in MATCHING_BRACKETS:
+            char = text[pos - 1]
+            search_pos = cursor.position() - 1
+
+        if char:
+            match_char = MATCHING_BRACKETS[char]
+            is_forward = char in "([{"
+            match_pos = self._find_bracket_match(search_pos, char, match_char, is_forward)
+
+            if match_pos >= 0:
+                # Highlight both the bracket and its match.
+                bracket_bg = QColor(100, 100, 60)
+                for bp in [search_pos, match_pos]:
+                    sel = QTextEdit.ExtraSelection()
+                    sel.format.setBackground(bracket_bg)
+                    sel.cursor = self.textCursor()
+                    sel.cursor.setPosition(bp)
+                    sel.cursor.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.KeepAnchor
+                    )
+                    selections.append(sel)
+
+        return selections
+
+    def _find_bracket_match(self, pos, open_char, close_char, forward):
+        """
+        Search the document for a matching bracket.
+
+        :param int pos: Position of the bracket to match.
+        :param str open_char: The opening bracket character.
+        :param str close_char: The closing bracket character.
+        :param bool forward: True to search forward, False for backward.
+        :return: Position of the matching bracket, or -1 if not found.
+        :rtype: int
+        """
+        doc = self.document()
+        depth = 0
+
+        if forward:
+            i = pos + 1
+            end = doc.characterCount()
+            while i < end:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(i)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+                ch = cursor.selectedText()
+                if ch == open_char:
+                    depth += 1
+                elif ch == close_char:
+                    if depth == 0:
+                        return i
+                    depth -= 1
+                i += 1
+        else:
+            i = pos - 1
+            while i >= 0:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(i)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+                ch = cursor.selectedText()
+                if ch == close_char:
+                    depth += 1
+                elif ch == open_char:
+                    if depth == 0:
+                        return i
+                    depth -= 1
+                i -= 1
+
+        return -1
+
+    def _find_matching_words(self):
+        """
+        Highlight all occurrences of the word under the cursor.
+
+        :return: List of ExtraSelection items for matching words.
+        :rtype: list
+        """
+        selections = []
+        cursor = self.textCursor()
+
+        # Get word under cursor.
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        word = cursor.selectedText().strip()
+
+        # Skip very short words to avoid noisy highlighting.
+        if not word or len(word) < 2:
+            return selections
+
+        doc = self.document()
+        highlight_color = QColor(55, 55, 45)
+
+        # Find all occurrences of the word in the document.
+        search_cursor = QTextCursor(doc)
+        while True:
+            search_cursor = doc.find(word, search_cursor)
+            if search_cursor.isNull():
+                break
+            # Only match whole words (not substrings).
+            found_cursor = QTextCursor(search_cursor)
+            found_cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+            if found_cursor.selectedText() == word:
+                sel = QTextEdit.ExtraSelection()
+                sel.format.setBackground(highlight_color)
+                sel.cursor = search_cursor
+                selections.append(sel)
+
+        return selections
+
+    # --- Key Handling --------------------------------------------------------
+
+    def keyPressEvent(self, event):
+        """
+        Handle key presses for execution shortcuts, auto-close, and indentation.
+
+        Key bindings mirror Charcoal Editor 2:
+            - Ctrl+Shift+Enter: Execute full script
+            - Ctrl+Enter: Execute selected text
+            - Ctrl+Alt+Enter: Execute current line
+            - Ctrl+/: Toggle comment
+            - Tab: Indent (spaces or tab character)
+            - Shift+Tab: Unindent
+
+        :param QKeyEvent event: The key press event.
+        """
+        # --- Execute shortcuts (like Charcoal Editor 2) ---
+        # Key_Return = main Enter, Key_Enter = numpad Enter.
+        # Numpad keys carry KeypadModifier on Windows; strip it for clean
+        # modifier comparison but remember it so bare numpad Enter executes.
+        is_enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        is_numpad = bool(event.modifiers() & Qt.KeyboardModifier.KeypadModifier)
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+
+        if mods == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            if is_enter:
+                self.execute_requested.emit()
+                return
+
+        if mods == Qt.KeyboardModifier.ControlModifier:
+            if is_enter:
+                self.execute_selected_requested.emit()
+                return
+
+        if mods == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier):
+            if is_enter:
+                self.execute_line_requested.emit()
+                return
+
+        # --- Numpad Enter (no Ctrl/Shift/Alt): execute selected text or all ---
+        if is_numpad and is_enter and mods == Qt.KeyboardModifier.NoModifier:
+            self.execute_selected_requested.emit()
+            return
+
+        # --- Toggle comment (Ctrl+/) ---
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Slash:
+            self._toggle_comment()
+            return
+
+        # --- Tab handling ---
+        if event.key() == Qt.Key.Key_Tab:
+            if self.textCursor().hasSelection():
+                self._indent_selection()
+            else:
+                # Insert spaces instead of a tab character.
+                if self._use_spaces:
+                    spaces = self._tab_size - (self.textCursor().columnNumber() % self._tab_size)
+                    self.insertPlainText(" " * spaces)
+                else:
+                    super().keyPressEvent(event)
+            return
+
+        if event.key() == Qt.Key.Key_Backtab:
+            self._unindent_selection()
+            return
+
+        # --- Auto-close brackets ---
+        # Guard: event.text() is empty for non-printable keys (arrows, etc.)
+        # and "" in "([{" is True in Python, which would cause a KeyError.
+        if self._auto_close_brackets and event.text() and event.text() in "([{":
+            closing = {"(": ")", "[": "]", "{": "}"}[event.text()]
+            super().keyPressEvent(event)
+            self.insertPlainText(closing)
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Left)
+            self.setTextCursor(cursor)
+            return
+
+        # --- Skip over auto-closed brackets ---
+        # If the user types a closing bracket and the character immediately
+        # to the right of the cursor is that same bracket (from auto-close),
+        # just move the cursor over it instead of inserting a duplicate.
+        if self._auto_close_brackets and event.text() and event.text() in ")]}":
+            cursor = self.textCursor()
+            if not cursor.atEnd():
+                peek = QTextCursor(cursor)
+                peek.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+                if peek.selectedText() == event.text():
+                    # Skip over the existing closing bracket.
+                    cursor.movePosition(QTextCursor.MoveOperation.Right)
+                    self.setTextCursor(cursor)
+                    return
+
+        # --- Auto-close quotes ---
+        # Guard: same empty-string-in-string check as brackets above.
+        if self._auto_close_quotes and event.text() and event.text() in "'\"":
+            cursor = self.textCursor()
+            # Check if we're closing an existing quote (skip over it instead).
+            if not cursor.atEnd():
+                next_cursor = QTextCursor(cursor)
+                next_cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+                if next_cursor.selectedText() == event.text():
+                    cursor.movePosition(QTextCursor.MoveOperation.Right)
+                    self.setTextCursor(cursor)
+                    return
+            # Insert the quote and its closing pair.
+            super().keyPressEvent(event)
+            self.insertPlainText(event.text())
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Left)
+            self.setTextCursor(cursor)
+            return
+
+        # --- Enter key with auto-indent (main keyboard only) ---
+        # Numpad Enter is handled above as "execute"; only main Enter inserts newlines.
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not is_numpad:
+            self._handle_newline()
+            return
+
+        # Default key handling for everything else.
+        super().keyPressEvent(event)
+
+    def _handle_newline(self):
+        """
+        Handle Enter key with smart indentation.
+
+        Preserves the current line's indentation and adds an extra
+        indent level after colons (Python) or opening braces (MEL).
+        """
+        cursor = self.textCursor()
+        block_text = cursor.block().text()
+
+        # Capture current indentation.
+        indent = ""
+        for ch in block_text:
+            if ch in " \t":
+                indent += ch
+            else:
+                break
+
+        # Check if we need to increase indent after a block opener.
+        stripped = block_text.rstrip()
+        if self._language == "python" and stripped.endswith(":"):
+            # Python: increase indent after colon.
+            if self._use_spaces:
+                indent += " " * self._tab_size
+            else:
+                indent += "\t"
+        elif self._language == "mel" and stripped.endswith("{"):
+            # MEL: increase indent after opening brace.
+            if self._use_spaces:
+                indent += " " * self._tab_size
+            else:
+                indent += "\t"
+
+        # Insert newline with preserved/increased indent.
+        cursor.insertText("\n" + indent)
+        self.setTextCursor(cursor)
+
+    def _toggle_comment(self):
+        """
+        Toggle line comment for selected lines.
+
+        Uses '#' for Python and '//' for MEL.
+        Determines whether to comment or uncomment based on the first
+        selected line.
+        """
+        cursor = self.textCursor()
+
+        # Choose comment style based on language.
+        if self._language == "python":
+            comment_str = "# "
+        elif self._language == "mel":
+            comment_str = "// "
+        else:
+            comment_str = "# "
+
+        cursor.beginEditBlock()
+
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+
+        cursor.setPosition(start)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+
+        # Determine if we're commenting or uncommenting based on first line.
+        first_line = cursor.block().text()
+        stripped = first_line.lstrip()
+        is_commenting = not stripped.startswith(comment_str.rstrip())
+
+        cursor.setPosition(start)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+
+        # Process each line in the selection.
+        while cursor.position() <= end and cursor.position() < self.document().characterCount() - 1:
+            line_text = cursor.block().text()
+
+            if is_commenting:
+                # Insert comment after the existing indentation.
+                indent_len = len(line_text) - len(line_text.lstrip())
+                cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.MoveAnchor, indent_len
+                )
+                cursor.insertText(comment_str)
+                end += len(comment_str)
+            else:
+                # Remove comment prefix.
+                idx = line_text.find(comment_str)
+                if idx < 0:
+                    # Try without trailing space.
+                    idx = line_text.find(comment_str.rstrip())
+                    if idx >= 0:
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                        cursor.movePosition(
+                            QTextCursor.MoveOperation.Right,
+                            QTextCursor.MoveMode.MoveAnchor, idx
+                        )
+                        cursor.movePosition(
+                            QTextCursor.MoveOperation.Right,
+                            QTextCursor.MoveMode.KeepAnchor,
+                            len(comment_str.rstrip())
+                        )
+                        cursor.removeSelectedText()
+                        end -= len(comment_str.rstrip())
+                else:
+                    cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                    cursor.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.MoveAnchor, idx
+                    )
+                    cursor.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.KeepAnchor,
+                        len(comment_str)
+                    )
+                    cursor.removeSelectedText()
+                    end -= len(comment_str)
+
+            if not cursor.movePosition(QTextCursor.MoveOperation.NextBlock):
+                break
+
+        cursor.endEditBlock()
+
+    def _indent_selection(self):
+        """Indent all selected lines by one level."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+
+        cursor.setPosition(start)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+
+        indent = " " * self._tab_size if self._use_spaces else "\t"
+
+        while cursor.position() <= end:
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.insertText(indent)
+            end += len(indent)
+            if not cursor.movePosition(QTextCursor.MoveOperation.NextBlock):
+                break
+
+        cursor.endEditBlock()
+
+    def _unindent_selection(self):
+        """Unindent all selected lines by one level (Shift+Tab)."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+
+        cursor.setPosition(start)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+
+        while cursor.position() <= end:
+            line_text = cursor.block().text()
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+
+            if self._use_spaces:
+                # Remove up to tab_size leading spaces.
+                remove = min(self._tab_size, len(line_text) - len(line_text.lstrip(" ")))
+                if remove > 0:
+                    cursor.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.KeepAnchor, remove
+                    )
+                    cursor.removeSelectedText()
+                    end -= remove
+            else:
+                # Remove a single leading tab.
+                if line_text.startswith("\t"):
+                    cursor.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.KeepAnchor, 1
+                    )
+                    cursor.removeSelectedText()
+                    end -= 1
+
+            if not cursor.movePosition(QTextCursor.MoveOperation.NextBlock):
+                break
+
+        cursor.endEditBlock()
+
+    # --- Code Outline --------------------------------------------------------
+
+    def get_code_outline(self):
+        """
+        Parse the current document for an outline of classes, functions,
+        and methods (Python) or procs (MEL).
+
+        :return: List of outline items, each a dict with 'type', 'name',
+                 'line', and 'indent'.
+        :rtype: list
+        """
+        outline = []
+        doc = self.document()
+
+        if self._language == "python":
+            class_re = re.compile(r"^(\s*)class\s+(\w+)")
+            func_re = re.compile(r"^(\s*)def\s+(\w+)")
+
+            for i in range(doc.blockCount()):
+                block = doc.findBlockByNumber(i)
+                text = block.text()
+
+                class_match = class_re.match(text)
+                if class_match:
+                    indent = len(class_match.group(1))
+                    outline.append({
+                        "type": "class",
+                        "name": class_match.group(2),
+                        "line": i + 1,
+                        "indent": indent,
+                    })
+                    continue
+
+                func_match = func_re.match(text)
+                if func_match:
+                    indent = len(func_match.group(1))
+                    outline.append({
+                        "type": "method" if indent > 0 else "function",
+                        "name": func_match.group(2),
+                        "line": i + 1,
+                        "indent": indent,
+                    })
+
+        elif self._language == "mel":
+            proc_re = re.compile(r"^\s*(?:global\s+)?proc\s+\w*\s*(\w+)")
+
+            for i in range(doc.blockCount()):
+                block = doc.findBlockByNumber(i)
+                text = block.text()
+                match = proc_re.match(text)
+                if match:
+                    outline.append({
+                        "type": "proc",
+                        "name": match.group(1),
+                        "line": i + 1,
+                        "indent": 0,
+                    })
+
+        return outline
+
+    # --- Execution Helpers ---------------------------------------------------
+
+    def get_all_text(self):
+        """
+        Get all text in the editor.
+
+        :return: Full editor content.
+        :rtype: str
+        """
+        return self.toPlainText()
+
+    def get_selected_text(self):
+        """
+        Get selected text, or all text if nothing is selected.
+
+        :return: Selected or full text.
+        :rtype: str
+        """
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            # Replace paragraph separators with newlines.
+            return cursor.selectedText().replace("\u2029", "\n")
+        return self.toPlainText()
+
+    def get_current_line_text(self):
+        """
+        Get the text of the current line (for single-line execution).
+
+        :return: Stripped text of the current line.
+        :rtype: str
+        """
+        cursor = self.textCursor()
+        return cursor.block().text().strip()
+
+    def go_to_line(self, line_number):
+        """
+        Move the cursor to a specific line number and center it.
+
+        :param int line_number: 1-based line number.
+        """
+        block = self.document().findBlockByNumber(line_number - 1)
+        if block.isValid():
+            cursor = QTextCursor(block)
+            self.setTextCursor(cursor)
+            self.centerCursor()

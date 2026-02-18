@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+.env/
+
+# --- IDE / Editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# --- Qt / PySide6 ---
+*.qmlc
+*.jsc
+*.ui.autosave
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Testing ---
+.pytest_cache/
+htmlcov/
+.coverage
+.tox/
+
+# --- Distribution ---
+*.spec
+*.manifest
+
+# --- Logs ---
+*.log
+
+# --- Claude Code ---
+.claude/
