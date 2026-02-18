@@ -1,12 +1,12 @@
 """
-MCA Editor - UI sub-package.
+MCA Editor - UI sub-package (backward-compat re-exports).
 
-Provides all user interface components: main window, code editor,
-output window, sidebar panels, and AI assistant panel.
+All widget functionality has moved to ``mca_qt.widgets``.
+The main window has moved to ``mca_qt.editor_panel`` and
+``mca_standalone.standalone_window``.
 """
 
-from .main_window import MCAMainWindow
-from .code_editor import MCACodeEditor
-from .output_window import OutputWindow
-from .sidebar import MCASidebar
-from .ai_panel import AIPanel
+from mca_qt.widgets.code_editor import MCACodeEditor
+from mca_qt.widgets.output_window import OutputWindow
+from mca_qt.widgets.sidebar import MCASidebar
+from mca_qt.widgets.ai_panel import AIPanel

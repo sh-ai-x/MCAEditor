@@ -1,10 +1,10 @@
 """
-MCA Editor - Adapters sub-package.
+MCA Editor - Adapters sub-package (backward-compat re-exports).
 
-Provides DCC adapter base classes, the Maya adapter, and the
-adapter manager for connection routing and lifecycle management.
+All adapter functionality has moved to ``mca_core.adapters``.
+This module re-exports for backward compatibility.
 """
 
-from .base_adapter import DCCAdapter, DCCType, ConnectionState
-from .maya_adapter import MayaAdapter
-from .adapter_manager import AdapterManager
+from mca_core.adapters.base_adapter import DCCAdapter, DCCType, ConnectionState
+from mca_core.adapters.maya_adapter import MayaAdapter
+from mca_core.adapters.adapter_manager import AdapterManager

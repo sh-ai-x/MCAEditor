@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcaeditor"
+version = "0.1.0"
+description = "Cross-DCC Script IDE — spiritual successor to Charcoal Editor 2"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Nathan Comes" },
+]
+keywords = ["maya", "script-editor", "ide", "dcc", "pyside6", "charcoal-editor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "PySide6>=6.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "cython>=3.0",
+    "build",
+    "pytest",
+]
+
+[project.scripts]
+mcaeditor = "mca_standalone.main:main"
+mcaeditor-install-maya = "mca_maya.install:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "mca_core*",
+    "mca_qt*",
+    "mca_standalone*",
+    "mca_maya*",
+    "mca_editor*",
+]
+exclude = [
+    "tests*",
+    "Docs*",
+    ".venv*",
+]
