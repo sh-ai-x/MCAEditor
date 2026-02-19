@@ -411,22 +411,29 @@ class MayaAdapter(DCCAdapter):
         if not self.is_connected:
             return completions
 
-        # MEL completions via commandHelp.
+        # MEL completions — query maya.cmds via the Python port.
+        # The MEL-only `commandHelp` procedure doesn't exist in all Maya
+        # versions, so we use dir(maya.cmds) which reliably lists every
+        # command Maya exposes (MEL and Python share the same command set).
         if language == "mel" or (language is None and "." not in partial):
             try:
-                result = self._send_command(
-                    'stringArrayToString(`commandHelp -list "{}*"`, "\\n")'.format(partial),
-                    self._mel_port
-                )
+                code = (
+                    'import json, maya.cmds; '
+                    'json.dumps([c for c in sorted(dir(maya.cmds)) '
+                    'if c.startswith("{}") and not c.startswith("_")][:50])'
+                ).format(partial)
+                result = self._send_command(code, self._python_port)
                 if result:
-                    for cmd in result.strip().split("\n"):
-                        cmd = cmd.strip()
-                        if cmd:
+                    try:
+                        items = json.loads(result.strip())
+                        for item in items:
                             completions.append({
-                                "label": cmd,
+                                "label": item,
                                 "detail": "MEL command",
-                                "insert_text": cmd,
+                                "insert_text": item,
                             })
+                    except json.JSONDecodeError:
+                        pass
             except Exception:
                 pass
 

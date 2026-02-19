@@ -13,10 +13,11 @@ import logging
 
 from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QLabel, QPushButton, QFileDialog,
+    QLabel, QPushButton, QFileDialog, QLineEdit,
     Qt, Signal, QFileSystemWatcher,
     QColor,
 )
+from mca_qt.icons import folder_closed, folder_open, python_logo, maya_logo, text_icon
 
 # Module-level logger for sidebar operations.
 logger = logging.getLogger(__name__)
@@ -243,25 +244,29 @@ class OpenEditorsPanel(QWidget):
         """
         self._tree.clear()
 
-        # Language-to-label mapping for display.
-        lang_labels = {
-            "python": "Py",
-            "mel": "MEL",
-            "csharp": "C#",
-            "lua": "Lua",
+        # Map language identifiers to their icons.
+        lang_icons = {
+            "python": python_logo,
+            "mel": maya_logo,
+            "text": text_icon,
         }
 
         for i, tab in enumerate(tabs):
-            label = lang_labels.get(tab.get("language", ""), "?")
             name = tab.get("name", "Untitled")
             # Show a dot for modified buffers.
             if tab.get("modified", False):
-                name = "[*] {}".format(name)
+                name = "* {}".format(name)
 
             item = QTreeWidgetItem()
-            item.setText(0, "[{}] {}".format(label, name))
+            item.setText(0, name)
             item.setToolTip(0, tab.get("path", "Temporary buffer"))
             item.setData(0, Qt.ItemDataRole.UserRole, i)
+
+            # Set the language icon (falls back to text icon for unknown languages).
+            language = tab.get("language", "")
+            icon_fn = lang_icons.get(language, text_icon)
+            item.setIcon(0, icon_fn())
+
             self._tree.addTopLevelItem(item)
 
     def _on_item_clicked(self, item, column):
@@ -295,6 +300,10 @@ class WorkspacePanel(QWidget):
     file_open_requested = Signal(str)
     # Emitted when a new file is created.
     file_created = Signal(str)
+    # Emitted when the user clicks the "New" header button.
+    new_tab_requested = Signal()
+    # Emitted when the user clicks the "Open" header button.
+    open_file_requested = Signal()
 
     def __init__(self, parent=None):
         """
@@ -326,6 +335,37 @@ class WorkspacePanel(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
+        # Shared style for the small header buttons.
+        _header_btn_style = """
+            QPushButton {
+                background: transparent;
+                color: #969696;
+                border: none;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background-color: #3e3e42;
+            }
+        """
+
+        # "New" button — requests a new tab from the editor panel.
+        new_btn = QPushButton("New")
+        new_btn.setFixedSize(32, 22)
+        new_btn.setToolTip("New Tab")
+        new_btn.setStyleSheet(_header_btn_style)
+        new_btn.clicked.connect(self.new_tab_requested.emit)
+        header_layout.addWidget(new_btn)
+
+        # "Open" button — requests a file-open dialog from the editor panel.
+        open_btn = QPushButton("Open")
+        open_btn.setFixedSize(36, 22)
+        open_btn.setToolTip("Open File")
+        open_btn.setStyleSheet(_header_btn_style)
+        open_btn.clicked.connect(self.open_file_requested.emit)
+        header_layout.addWidget(open_btn)
+
         # Add folder button.
         add_btn = QPushButton("+")
         add_btn.setFixedSize(22, 22)
@@ -348,6 +388,26 @@ class WorkspacePanel(QWidget):
 
         layout.addWidget(header)
 
+        # --- Search field (filters the file tree by name) ---
+        self._search_field = QLineEdit()
+        self._search_field.setPlaceholderText("Search files...")
+        self._search_field.setFixedHeight(24)
+        self._search_field.setStyleSheet("""
+            QLineEdit {
+                background-color: #3c3c3c;
+                color: #d4d4d4;
+                border: none;
+                border-bottom: 1px solid #3f3f46;
+                padding: 3px 8px;
+                font-size: 11px;
+            }
+            QLineEdit:focus {
+                border-bottom-color: #007acc;
+            }
+        """)
+        self._search_field.textChanged.connect(self.filter_files)
+        layout.addWidget(self._search_field)
+
         # --- Tree widget for file browsing ---
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
@@ -363,6 +423,8 @@ class WorkspacePanel(QWidget):
             }
         """)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        self._tree.itemCollapsed.connect(self._on_item_collapsed)
         layout.addWidget(self._tree)
 
         # --- Empty state message ---
@@ -417,7 +479,8 @@ class WorkspacePanel(QWidget):
         for folder in self._workspace_folders:
             folder_name = os.path.basename(folder)
             root_item = QTreeWidgetItem()
-            root_item.setText(0, "[DIR] {}".format(folder_name))
+            root_item.setText(0, folder_name)
+            root_item.setIcon(0, folder_open())
             root_item.setData(0, Qt.ItemDataRole.UserRole, folder)
             root_item.setForeground(0, QColor("#cccccc"))
             root_item.setExpanded(True)
@@ -453,7 +516,8 @@ class WorkspacePanel(QWidget):
         for d in dirs:
             full_path = os.path.join(folder_path, d)
             item = QTreeWidgetItem()
-            item.setText(0, "[DIR] {}".format(d))
+            item.setText(0, d)
+            item.setIcon(0, folder_closed())
             item.setData(0, Qt.ItemDataRole.UserRole, full_path)
             item.setForeground(0, QColor("#cccccc"))
             parent_item.addChild(item)
@@ -487,6 +551,26 @@ class WorkspacePanel(QWidget):
         if path and os.path.isfile(path):
             self.file_open_requested.emit(path)
 
+    def _on_item_expanded(self, item):
+        """
+        Swap to the open folder icon when a folder is expanded.
+
+        :param QTreeWidgetItem item: The expanded item.
+        """
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            item.setIcon(0, folder_open())
+
+    def _on_item_collapsed(self, item):
+        """
+        Swap to the closed folder icon when a folder is collapsed.
+
+        :param QTreeWidgetItem item: The collapsed item.
+        """
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            item.setIcon(0, folder_closed())
+
     def _on_directory_changed(self, path):
         """
         Refresh the tree when a watched directory changes.
@@ -516,6 +600,91 @@ class WorkspacePanel(QWidget):
         self._refresh_tree()
         self._update_empty_state()
 
+    # --- File Search Filtering -----------------------------------------------
+
+    def filter_files(self, text):
+        """
+        Show/hide tree items based on a filename search string.
+
+        When *text* is empty, all items are unhidden (full tree restored).
+        Otherwise, file items whose name does not contain *text*
+        (case-insensitive) are hidden. Folder items are hidden only if
+        none of their descendants match; folders with visible children
+        are auto-expanded so matches are obvious.
+
+        Uses ``QTreeWidgetItem.setHidden()`` for speed — no tree rebuild.
+
+        :param str text: The search filter text.
+        """
+        root = self._tree.invisibleRootItem()
+
+        if not text:
+            # Empty search — unhide everything.
+            self._set_all_visible(root)
+            return
+
+        # Filter each top-level workspace folder independently.
+        # We never call setHidden on the invisible root itself.
+        search = text.lower()
+        for i in range(root.childCount()):
+            self._apply_filter(root.child(i), search)
+
+    def _set_all_visible(self, parent):
+        """
+        Recursively unhide all descendant items.
+
+        :param QTreeWidgetItem parent: The parent item to start from
+            (typically the invisible root).
+        """
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            child.setHidden(False)
+            self._set_all_visible(child)
+
+    def _is_folder_item(self, item):
+        """
+        Check whether a tree item represents a directory.
+
+        Uses the stored file path in UserRole rather than childCount,
+        because empty folders have childCount == 0 but are still folders.
+
+        :param QTreeWidgetItem item: The tree item to check.
+        :return: True if the item represents a directory.
+        :rtype: bool
+        """
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        return path is not None and os.path.isdir(path)
+
+    def _apply_filter(self, item, search):
+        """
+        Recursively hide/show items based on filename match.
+
+        Files are matched by name. Folders are shown if any descendant
+        file matches (and auto-expanded), hidden otherwise.
+
+        :param QTreeWidgetItem item: Current tree item.
+        :param str search: Lowercase search string.
+        :return: True if this item or any descendant is visible.
+        :rtype: bool
+        """
+        if self._is_folder_item(item):
+            # Folder — visible only if a descendant matches.
+            any_child_visible = False
+            for i in range(item.childCount()):
+                if self._apply_filter(item.child(i), search):
+                    any_child_visible = True
+
+            item.setHidden(not any_child_visible)
+            # Expand folders that contain matches so the user sees them.
+            if any_child_visible:
+                item.setExpanded(True)
+            return any_child_visible
+
+        # File leaf — match against the display text (includes name).
+        visible = search in item.text(0).lower()
+        item.setHidden(not visible)
+        return visible
+
 
 # =============================================================================
 # Combined Sidebar
@@ -535,6 +704,8 @@ class MCASidebar(QWidget):
     file_open_requested = Signal(str)
     outline_item_clicked = Signal(int)
     editor_selected = Signal(int)
+    new_tab_requested = Signal()
+    open_file_requested = Signal()
 
     def __init__(self, parent=None):
         """
@@ -554,6 +725,8 @@ class MCASidebar(QWidget):
         # Workspace panel (visible in Advanced mode only).
         self.workspace_panel = WorkspacePanel()
         self.workspace_panel.file_open_requested.connect(self.file_open_requested.emit)
+        self.workspace_panel.new_tab_requested.connect(self.new_tab_requested.emit)
+        self.workspace_panel.open_file_requested.connect(self.open_file_requested.emit)
         layout.addWidget(self.workspace_panel, stretch=3)
 
         # Open editors panel (always visible).

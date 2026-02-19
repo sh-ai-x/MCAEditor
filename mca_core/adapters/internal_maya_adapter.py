@@ -266,24 +266,23 @@ class InternalMayaAdapter(DCCAdapter):
         """
         completions = []
 
-        # MEL completions via commandHelp.
+        # MEL completions via dir(maya.cmds).
+        # The MEL-only `commandHelp` procedure doesn't exist in all Maya
+        # versions, so we use dir(maya.cmds) which reliably lists every
+        # command Maya exposes (MEL and Python share the same command set).
         if language == "mel" or (language is None and "." not in partial):
             try:
                 import maya.cmds
-                # Use MEL's commandHelp via Python.
-                import maya.mel
-                result = maya.mel.eval(
-                    'stringArrayToString(`commandHelp -list "{}*"`, "\\n")'.format(partial)
-                )
-                if result:
-                    for cmd in result.strip().split("\n"):
-                        cmd = cmd.strip()
-                        if cmd:
-                            completions.append({
-                                "label": cmd,
-                                "detail": "MEL command",
-                                "insert_text": cmd,
-                            })
+                cmds_list = [
+                    c for c in sorted(dir(maya.cmds))
+                    if c.startswith(partial) and not c.startswith("_")
+                ]
+                for cmd in cmds_list[:50]:
+                    completions.append({
+                        "label": cmd,
+                        "detail": "MEL command",
+                        "insert_text": cmd,
+                    })
             except Exception:
                 pass
 

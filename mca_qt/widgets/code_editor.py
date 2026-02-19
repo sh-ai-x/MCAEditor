@@ -13,9 +13,9 @@ import logging
 
 from mca_qt.qt_compat import (
     QPlainTextEdit, QWidget, QTextEdit,
-    Qt, QRect, QSize, Signal,
+    Qt, QRect, QSize, Signal, QTimer, QEvent,
     QColor, QPainter, QTextFormat, QFont, QSyntaxHighlighter,
-    QTextCharFormat, QTextCursor,
+    QTextCharFormat, QTextCursor, QToolTip,
 )
 
 # Module-level logger for editor operations.
@@ -366,6 +366,7 @@ class MCACodeEditor(QPlainTextEdit):
     file_modified = Signal(bool)           # Document modified state changed
     cursor_position_changed_info = Signal(int, int)  # line, column
     completion_requested = Signal(bool)    # Auto-complete trigger (arg = is_manual)
+    zoom_requested = Signal(int)           # Ctrl+scroll zoom: +1 (in) or -1 (out)
 
     def __init__(self, parent=None):
         """
@@ -392,6 +393,11 @@ class MCACodeEditor(QPlainTextEdit):
         # per-language auto-complete toggles during key handling.
         self._settings = None
 
+        # --- Diagnostics (inline error/warning markers) ---
+        # Populated by set_diagnostics() after the analyzer runs.
+        self._diagnostics = []       # Full list of diagnostic dicts from analyzer.
+        self._diagnostic_lines = {}  # {line_number: severity} for fast gutter lookup.
+
         # Setup monospace font for code editing.
         font = QFont("JetBrains Mono, Consolas, Courier New", 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -410,6 +416,15 @@ class MCACodeEditor(QPlainTextEdit):
         self.updateRequest.connect(self._update_line_number_area)
         self.cursorPositionChanged.connect(self._on_cursor_position_changed)
         self.modificationChanged.connect(self.file_modified.emit)
+
+        # --- Debounced analysis timer ---
+        # Runs code analysis 500ms after the user stops typing to avoid
+        # burning CPU on every keystroke in large files.
+        self._analysis_timer = QTimer()
+        self._analysis_timer.setSingleShot(True)
+        self._analysis_timer.setInterval(500)  # 500ms debounce.
+        self._analysis_timer.timeout.connect(self._run_analysis)
+        self.textChanged.connect(self._analysis_timer.start)
 
         # Initial gutter width calculation.
         self._update_line_number_area_width(0)
@@ -447,6 +462,9 @@ class MCACodeEditor(QPlainTextEdit):
             self._highlighter = PythonHighlighter(self.document())
         elif self._language == "mel":
             self._highlighter = MELHighlighter(self.document())
+        elif self._language == "text":
+            # Plain text mode — no syntax highlighting.
+            self._highlighter = None
         else:
             self._highlighter = None
 
@@ -484,6 +502,8 @@ class MCACodeEditor(QPlainTextEdit):
                 self.set_language("python")
             elif path.endswith(".mel"):
                 self.set_language("mel")
+            elif path.endswith(".txt"):
+                self.set_language("text")
             elif path.endswith(".cs"):
                 self.set_language("csharp")
             elif path.endswith(".lua"):
@@ -580,6 +600,24 @@ class MCACodeEditor(QPlainTextEdit):
                     Qt.AlignmentFlag.AlignRight, number
                 )
 
+                # --- Diagnostic gutter dot ---
+                # Draw a smooth colored circle in the left margin if this
+                # line has a diagnostic (red for errors, yellow for warnings).
+                line_1based = block_number + 1
+                if line_1based in self._diagnostic_lines:
+                    severity = self._diagnostic_lines[line_1based]
+                    dot_color = QColor("#f44747") if severity == "error" else QColor("#cca700")
+                    # Enable anti-aliasing so the circle looks smooth.
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(dot_color)
+                    # 10px dot centered vertically in the line, 1px from left edge.
+                    dot_size = 10
+                    dot_y = top + (self.fontMetrics().height() - dot_size) // 2
+                    painter.drawEllipse(1, int(dot_y), dot_size, dot_size)
+                    # Restore default rendering for text drawing.
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
             block = block.next()
             top = bottom
             bottom = top + round(self.blockBoundingRect(block).height())
@@ -628,6 +666,9 @@ class MCACodeEditor(QPlainTextEdit):
         # Matching word highlights (all occurrences of word under cursor).
         if self._highlight_matching_words:
             extra_selections.extend(self._find_matching_words())
+
+        # Diagnostic underlines (wavy red/yellow lines under errors/warnings).
+        extra_selections.extend(self._build_diagnostic_selections())
 
         self.setExtraSelections(extra_selections)
 
@@ -763,7 +804,175 @@ class MCACodeEditor(QPlainTextEdit):
 
         return selections
 
+    # --- Diagnostics (Inline Error/Warning Markers) -------------------------
+
+    def set_diagnostics(self, diagnostics):
+        """
+        Set the current list of diagnostics and refresh all visual markers.
+
+        Called by ``_run_analysis()`` after the analyzer finishes. Rebuilds
+        the per-line severity lookup, repaints gutter dots, and refreshes
+        wavy underlines.
+
+        :param list diagnostics: List of diagnostic dicts from the analyzer.
+            Each dict has keys: line, col, end_col, severity, message.
+        """
+        self._diagnostics = diagnostics
+
+        # Build a fast lookup: {line_number: highest_severity}.
+        # "error" takes priority over "warning" if both exist on the same line.
+        self._diagnostic_lines = {}
+        for diag in diagnostics:
+            line = diag["line"]
+            severity = diag["severity"]
+            existing = self._diagnostic_lines.get(line)
+            # Only upgrade — never downgrade from error to warning.
+            if existing != "error":
+                self._diagnostic_lines[line] = severity
+
+        # Repaint the gutter so dots appear/disappear.
+        self._line_number_area.update()
+
+        # Rebuild extra selections to include/remove wavy underlines.
+        self._on_cursor_position_changed()
+
+    def _build_diagnostic_selections(self):
+        """
+        Build extra-selection items for wavy underlines on diagnostic lines.
+
+        For each diagnostic, creates a QTextEdit.ExtraSelection with a
+        wave underline in the appropriate color (red for errors, yellow
+        for warnings). If column info is available, underlines only the
+        affected span; otherwise underlines the whole line's text.
+
+        :return: List of ExtraSelection items for diagnostic underlines.
+        :rtype: list
+        """
+        selections = []
+        doc = self.document()
+
+        for diag in self._diagnostics:
+            line = diag["line"]
+            col = diag.get("col", 0)
+            end_col = diag.get("end_col")
+            severity = diag["severity"]
+
+            # Find the text block for this line (1-based -> 0-based).
+            block = doc.findBlockByNumber(line - 1)
+            if not block.isValid():
+                continue
+
+            block_text = block.text()
+            if not block_text.strip():
+                # Skip blank lines — nothing visible to underline.
+                continue
+
+            sel = QTextEdit.ExtraSelection()
+
+            # Set underline color based on severity.
+            if severity == "error":
+                underline_color = QColor("#f44747")
+            else:
+                underline_color = QColor("#cca700")
+
+            fmt = QTextCharFormat()
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+            fmt.setUnderlineColor(underline_color)
+            sel.format = fmt
+
+            # Position the cursor to select the diagnostic span.
+            cursor = QTextCursor(block)
+            if end_col is not None and col < end_col:
+                # Column range available — underline just that span.
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.MoveAnchor, col
+                )
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor, end_col - col
+                )
+            else:
+                # No column range — underline the entire non-whitespace text.
+                leading_spaces = len(block_text) - len(block_text.lstrip())
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.MoveAnchor, leading_spaces
+                )
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.EndOfBlock,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+
+            sel.cursor = cursor
+            selections.append(sel)
+
+        return selections
+
+    def _run_analysis(self):
+        """
+        Run code analysis on the current editor content.
+
+        Only analyzes Python files; clears diagnostics for other languages.
+        Called by the debounced ``_analysis_timer`` after 500ms of idle time.
+        """
+        if self._language != "python":
+            self.set_diagnostics([])
+            return
+
+        from mca_core.analyzer import analyze_python
+
+        code = self.toPlainText()
+        diagnostics = analyze_python(code)
+        self.set_diagnostics(diagnostics)
+
+    def event(self, evt):
+        """
+        Intercept ToolTip events to show diagnostic messages on hover.
+
+        When the mouse hovers over a line that has diagnostics, shows
+        a tooltip with all diagnostic messages for that line.
+
+        :param QEvent evt: The event to handle.
+        :return: True if the event was handled, False to pass through.
+        :rtype: bool
+        """
+        if evt.type() == QEvent.Type.ToolTip:
+            pos = evt.pos()
+            cursor = self.cursorForPosition(pos)
+            line = cursor.blockNumber() + 1
+
+            # Collect all diagnostic messages for this line.
+            msgs = [d["message"] for d in self._diagnostics if d["line"] == line]
+            if msgs:
+                QToolTip.showText(evt.globalPos(), "\n".join(msgs), self)
+            else:
+                QToolTip.hideText()
+            return True
+
+        return super().event(evt)
+
     # --- Key Handling --------------------------------------------------------
+
+    def wheelEvent(self, event):
+        """
+        Handle Ctrl+scroll wheel for font size zoom.
+
+        Emits ``zoom_requested(+1)`` for scroll-up (zoom in) and
+        ``zoom_requested(-1)`` for scroll-down (zoom out). Without
+        Ctrl held, scrolling behaves normally.
+
+        :param QWheelEvent event: The wheel event.
+        """
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_requested.emit(1)
+            elif delta < 0:
+                self.zoom_requested.emit(-1)
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def keyPressEvent(self, event):
         """

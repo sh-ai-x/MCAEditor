@@ -2,12 +2,11 @@
 MCA Editor - Settings Dialog.
 
 Full-featured settings/preferences dialog with a category list on the left
-and stacked content pages on the right.  Mirrors the layout and options of
-Charcoal Editor 2's Preferences window, re-branded as "Settings".
+and stacked content pages on the right.
 
 Pages:
-    General, Keyboard, Tabs and Spacing, Fonts and Colors,
-    Code Editor, Output, MEL, Python, Pylint
+    General, Keyboard, Indentation, Appearance,
+    Editor Behavior, Output, MEL, Python, Code Analysis
 
 Dependencies:
     - PySide6 (QDialog, QListWidget, QStackedWidget, etc.)
@@ -139,14 +138,14 @@ class SettingsDialog(QDialog):
     # Ordered list of category names shown in the left panel.
     CATEGORIES = [
         "General",
+        "Appearance",
+        "Code Analysis",
+        "Editor Behavior",
+        "Indentation",
         "Keyboard",
-        "Tabs and Spacing",
-        "Fonts and Colors",
-        "Code Editor",
-        "Output",
         "MEL",
+        "Output",
         "Python",
-        "Pylint",
     ]
 
     def __init__(self, settings, action_registry=None, parent=None):
@@ -198,7 +197,7 @@ class SettingsDialog(QDialog):
         self._category_list = QListWidget()
         self._category_list.setFixedWidth(140)
         self._category_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        # Style the category list to match the dark Charcoal look.
+        # Dark theme styling for the category list.
         self._category_list.setStyleSheet(
             "QListWidget { background-color: #2d2d30; border: 1px solid #3f3f46; }"
             "QListWidget::item { padding: 5px 8px; color: #d0d0d0; }"
@@ -219,15 +218,16 @@ class SettingsDialog(QDialog):
         root_layout.addLayout(body, 1)
 
         # --- Build each page and add to the stack ---
+        # Order must match CATEGORIES so list index maps to page index.
         self._build_general_page()
-        self._build_keyboard_page()
-        self._build_tabs_spacing_page()
         self._build_fonts_colors_page()
-        self._build_code_editor_page()
-        self._build_output_page()
-        self._build_mel_page()
-        self._build_python_page()
         self._build_pylint_page()
+        self._build_code_editor_page()
+        self._build_tabs_spacing_page()
+        self._build_keyboard_page()
+        self._build_mel_page()
+        self._build_output_page()
+        self._build_python_page()
 
         # Connect list selection to page switching.
         self._category_list.currentRowChanged.connect(self._pages.setCurrentIndex)
@@ -269,65 +269,65 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        # -- Main Window group --
-        mw_group = QGroupBox("Main Window")
+        # -- Startup & Saving group --
+        mw_group = QGroupBox("Startup and Saving")
         mw_layout = QVBoxLayout(mw_group)
         mw_layout.setSpacing(6)
 
         # Row 1: two checkboxes side-by-side.
         row1 = QHBoxLayout()
-        self._chk_save_on_execute = QCheckBox("Save all on execute")
-        self._chk_save_on_exit = QCheckBox("Save all on exit")
+        self._chk_save_on_execute = QCheckBox("Auto-save before execution")
+        self._chk_save_on_exit = QCheckBox("Auto-save on exit")
         row1.addWidget(self._chk_save_on_execute)
         row1.addWidget(self._chk_save_on_exit)
         mw_layout.addLayout(row1)
 
         # Row 2: two checkboxes.
         row2 = QHBoxLayout()
-        self._chk_check_modified = QCheckBox("Check for modified files")
-        self._chk_override_script_editor = QCheckBox("Override Script Editor button")
+        self._chk_check_modified = QCheckBox("Detect external file changes")
+        self._chk_override_script_editor = QCheckBox("Replace Maya Script Editor")
         row2.addWidget(self._chk_check_modified)
         row2.addWidget(self._chk_override_script_editor)
         mw_layout.addLayout(row2)
 
         # Full-width checkboxes.
-        self._chk_always_show = QCheckBox("Always show Code Editor and Output on startup")
+        self._chk_always_show = QCheckBox("Restore editor and output panels on startup")
         mw_layout.addWidget(self._chk_always_show)
 
         self._chk_confirm_close_buffer = QCheckBox(
-            "Display confirmation dialog when closing an internal buffer"
+            "Confirm before closing unsaved buffers"
         )
         mw_layout.addWidget(self._chk_confirm_close_buffer)
 
         self._chk_confirm_unsaved = QCheckBox(
-            "Display unsaved files dialog when exiting"
+            "Warn about unsaved changes on exit"
         )
         mw_layout.addWidget(self._chk_confirm_unsaved)
 
         layout.addWidget(mw_group)
 
-        # -- Tab Bar group --
-        tb_group = QGroupBox("Tab Bar")
+        # -- Tabs group --
+        tb_group = QGroupBox("Tabs")
         tb_layout = QVBoxLayout(tb_group)
         tb_layout.setSpacing(6)
 
         # Row 1.
         tb_row1 = QHBoxLayout()
-        self._chk_show_tab_bar = QCheckBox("Show Tab Bar")
-        self._chk_show_close_btn = QCheckBox("Show close button on each tab")
+        self._chk_show_tab_bar = QCheckBox("Visible tab bar")
+        self._chk_show_close_btn = QCheckBox("Close button on tabs")
         tb_row1.addWidget(self._chk_show_tab_bar)
         tb_row1.addWidget(self._chk_show_close_btn)
         tb_layout.addLayout(tb_row1)
 
         # Row 2.
         tb_row2 = QHBoxLayout()
-        self._chk_mini_toolbar = QCheckBox("Show mini toolbar")
-        self._chk_mouse_wheel_tabs = QCheckBox("Mouse wheel changes active tab")
+        self._chk_mini_toolbar = QCheckBox("Compact toolbar")
+        self._chk_mouse_wheel_tabs = QCheckBox("Scroll wheel switches tabs")
         tb_row2.addWidget(self._chk_mini_toolbar)
         tb_row2.addWidget(self._chk_mouse_wheel_tabs)
         tb_layout.addLayout(tb_row2)
 
-        self._chk_lock_tabs = QCheckBox("Lock tabs")
+        self._chk_lock_tabs = QCheckBox("Prevent tab reordering")
         tb_layout.addWidget(self._chk_lock_tabs)
 
         layout.addWidget(tb_group)
@@ -365,7 +365,6 @@ class SettingsDialog(QDialog):
         sc_row = QHBoxLayout()
         self._shortcut_display = QComboBox()
         self._shortcut_display.setMinimumWidth(300)
-        self._shortcut_display.setEnabled(False)  # Read-only display of current shortcut.
         sc_row.addWidget(self._shortcut_display, 1)
 
         self._remove_shortcut_btn = QPushButton("Remove")
@@ -528,7 +527,7 @@ class SettingsDialog(QDialog):
     # --- Tabs and Spacing Page ----------------------------------------
 
     def _build_tabs_spacing_page(self):
-        """Build the Tabs and Spacing page (language selector, tab size, indent)."""
+        """Build the Indentation page (language selector, tab size, indent)."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -542,13 +541,13 @@ class SettingsDialog(QDialog):
         lang_layout.addWidget(self._lang_combo)
         layout.addWidget(lang_group)
 
-        # Tab group.
-        tab_group = QGroupBox("Tab")
+        # Tab Width group.
+        tab_group = QGroupBox("Tab Width")
         tab_layout = QVBoxLayout(tab_group)
 
         # Tab Size spinner.
         size_row = QHBoxLayout()
-        size_row.addWidget(QLabel("Tab Size:"))
+        size_row.addWidget(QLabel("Spaces per tab:"))
         self._tab_size_spin = QSpinBox()
         self._tab_size_spin.setRange(1, 16)
         self._tab_size_spin.setFixedWidth(60)
@@ -556,7 +555,7 @@ class SettingsDialog(QDialog):
         size_row.addStretch()
         tab_layout.addLayout(size_row)
 
-        self._chk_replace_tabs = QCheckBox("Replace tabs with spaces")
+        self._chk_replace_tabs = QCheckBox("Insert spaces instead of tabs")
         tab_layout.addWidget(self._chk_replace_tabs)
 
         layout.addWidget(tab_group)
@@ -574,19 +573,19 @@ class SettingsDialog(QDialog):
     # --- Fonts and Colors Page ----------------------------------------
 
     def _build_fonts_colors_page(self):
-        """Build the Fonts and Colors page (font picker, display items, color pickers)."""
+        """Build the Appearance page (font picker, display items, color pickers)."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
-        # "Show settings for" dropdown.
+        # Target selector dropdown.
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Show settings for:"))
+        top_row.addWidget(QLabel("Apply to:"))
         self._fc_target_combo = QComboBox()
-        self._fc_target_combo.addItems(["Code Editor", "Output"])
+        self._fc_target_combo.addItems(["Editor", "Output Panel"])
         top_row.addWidget(self._fc_target_combo, 1)
-        self._fc_defaults_btn = QPushButton("Use Defaults")
+        self._fc_defaults_btn = QPushButton("Defaults")
         self._fc_defaults_btn.setFixedWidth(100)
         top_row.addWidget(self._fc_defaults_btn)
         layout.addLayout(top_row)
@@ -608,7 +607,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(font_row)
 
         # Show only fixed width checkbox.
-        self._chk_fixed_width = QCheckBox("Show only fixed width")
+        self._chk_fixed_width = QCheckBox("Monospaced fonts only")
         self._chk_fixed_width.stateChanged.connect(self._on_fixed_width_changed)
         layout.addWidget(self._chk_fixed_width)
 
@@ -624,7 +623,7 @@ class SettingsDialog(QDialog):
             "QListWidget::item { padding: 3px 6px; color: #d0d0d0; }"
             "QListWidget::item:selected { background-color: #094771; color: #ffffff; }"
         )
-        # All the display item categories matching CE2.
+        # Display item categories for syntax theme customization.
         display_items = [
             "Plain Text", "Selected Text", "Matching Selection",
             "Find/Replace Selected", "Find/Replace Matching",
@@ -697,26 +696,26 @@ class SettingsDialog(QDialog):
     # --- Code Editor Page ---------------------------------------------
 
     def _build_code_editor_page(self):
-        """Build the Code Editor settings page (behavioral options)."""
+        """Build the Editor Behavior settings page."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        options_group = QGroupBox("Options")
+        options_group = QGroupBox("Editing")
         opt_layout = QVBoxLayout(options_group)
         opt_layout.setSpacing(6)
 
-        self._chk_backspace_tab = QCheckBox("Backspace to tab stop")
+        self._chk_backspace_tab = QCheckBox("Backspace unindents to previous tab stop")
         opt_layout.addWidget(self._chk_backspace_tab)
 
-        self._chk_indent_guides = QCheckBox("Display Indentation Guides")
+        self._chk_indent_guides = QCheckBox("Show indentation guides")
         opt_layout.addWidget(self._chk_indent_guides)
 
-        self._chk_ctrl_wheel = QCheckBox("Ctrl+Mouse Wheel changes font size")
+        self._chk_ctrl_wheel = QCheckBox("Ctrl+Scroll to zoom")
         opt_layout.addWidget(self._chk_ctrl_wheel)
 
-        self._chk_limit_match = QCheckBox("Limit matching selection highlight to words")
+        self._chk_limit_match = QCheckBox("Highlight whole words only when matching")
         opt_layout.addWidget(self._chk_limit_match)
 
         layout.addWidget(options_group)
@@ -732,9 +731,10 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        # Buffer Size.
-        buf_group = QGroupBox("Buffer Size")
+        # History group.
+        buf_group = QGroupBox("Output History")
         buf_layout = QHBoxLayout(buf_group)
+        buf_layout.addWidget(QLabel("Max lines:"))
         self._output_buffer_spin = QSpinBox()
         self._output_buffer_spin.setRange(100, 100000)
         self._output_buffer_spin.setSingleStep(500)
@@ -743,26 +743,26 @@ class SettingsDialog(QDialog):
         buf_layout.addStretch()
         layout.addWidget(buf_group)
 
-        # Options group.
-        opt_group = QGroupBox("Options")
+        # Behavior group.
+        opt_group = QGroupBox("Behavior")
         opt_layout = QVBoxLayout(opt_group)
         opt_layout.setSpacing(6)
 
-        self._chk_out_ctrl_wheel = QCheckBox("Ctrl+Mouse Wheel changes font size")
+        self._chk_out_ctrl_wheel = QCheckBox("Ctrl+Scroll to zoom")
         opt_layout.addWidget(self._chk_out_ctrl_wheel)
 
-        self._chk_out_limit_match = QCheckBox("Limit matching selection highlight to words")
+        self._chk_out_limit_match = QCheckBox("Highlight whole words only when matching")
         opt_layout.addWidget(self._chk_out_limit_match)
 
         self._chk_out_double_click = QCheckBox(
-            "Double-click selection includes leading $ (e.g. MEL variables)"
+            "Double-click selects MEL variable prefix ($)"
         )
         opt_layout.addWidget(self._chk_out_double_click)
 
-        self._chk_out_disable_echo = QCheckBox("Disable Echo All Commands on startup")
+        self._chk_out_disable_echo = QCheckBox("Suppress Maya echo-all on startup")
         opt_layout.addWidget(self._chk_out_disable_echo)
 
-        self._chk_out_word_wrap = QCheckBox("Word wrap")
+        self._chk_out_word_wrap = QCheckBox("Wrap long lines")
         opt_layout.addWidget(self._chk_out_word_wrap)
 
         layout.addWidget(opt_group)
@@ -784,7 +784,7 @@ class SettingsDialog(QDialog):
         )
         self._highlight_list.setFixedHeight(140)
 
-        # Each highlight item is checkable to match CE2's toggleable list.
+        # Each highlight item is checkable so users can toggle categories.
         highlight_items = [
             ("Errors (Python)", "output_highlight_errors_py"),
             ("Errors (MEL)", "output_highlight_errors_mel"),
@@ -822,43 +822,43 @@ class SettingsDialog(QDialog):
         gen_layout = QVBoxLayout(gen_group)
         gen_layout.setSpacing(6)
 
-        self._chk_mel_errors = QCheckBox("Display errors and warnings")
+        self._chk_mel_errors = QCheckBox("Show inline errors and warnings")
         gen_layout.addWidget(self._chk_mel_errors)
 
-        self._chk_mel_smart_indent = QCheckBox("Smart indent (requires auto-indent)")
+        self._chk_mel_smart_indent = QCheckBox("Context-aware indentation")
         gen_layout.addWidget(self._chk_mel_smart_indent)
 
-        self._chk_mel_indent_bracket = QCheckBox("Indent to bracket (requires auto-indent)")
+        self._chk_mel_indent_bracket = QCheckBox("Align to opening bracket")
         gen_layout.addWidget(self._chk_mel_indent_bracket)
 
-        self._chk_mel_close_bracket = QCheckBox("Insert closing bracket")
+        self._chk_mel_close_bracket = QCheckBox("Auto-close brackets")
         gen_layout.addWidget(self._chk_mel_close_bracket)
 
-        self._chk_mel_close_quotes = QCheckBox("Insert closing quotes")
+        self._chk_mel_close_quotes = QCheckBox("Auto-close quotes")
         gen_layout.addWidget(self._chk_mel_close_quotes)
 
-        self._chk_mel_trim_ws = QCheckBox("Trim trailing whitespace on save")
+        self._chk_mel_trim_ws = QCheckBox("Strip trailing whitespace on save")
         gen_layout.addWidget(self._chk_mel_trim_ws)
 
-        self._chk_mel_newline = QCheckBox("Ensure newline at end of file on save")
+        self._chk_mel_newline = QCheckBox("Ensure final newline on save")
         gen_layout.addWidget(self._chk_mel_newline)
 
-        self._chk_mel_dollar = QCheckBox("Double-click selection includes leading $")
+        self._chk_mel_dollar = QCheckBox("Include $ prefix in double-click selection")
         gen_layout.addWidget(self._chk_mel_dollar)
 
-        self._chk_mel_ac_quickhelp = QCheckBox("Auto-complete updates Quick Help")
+        self._chk_mel_ac_quickhelp = QCheckBox("Show Quick Help on auto-complete")
         gen_layout.addWidget(self._chk_mel_ac_quickhelp)
 
         layout.addWidget(gen_group)
 
-        # Auto-Complete group.
-        ac_group = QGroupBox("Auto-Complete")
+        # Completion Triggers group.
+        ac_group = QGroupBox("Completion Triggers")
         ac_layout = QHBoxLayout(ac_group)
 
-        self._chk_mel_ac_ctrl = QCheckBox("CTRL + Space")
+        self._chk_mel_ac_ctrl = QCheckBox("Ctrl+Space")
         ac_layout.addWidget(self._chk_mel_ac_ctrl)
 
-        self._chk_mel_ac_letters = QCheckBox("On letters and '_'")
+        self._chk_mel_ac_letters = QCheckBox("While typing")
         ac_layout.addWidget(self._chk_mel_ac_letters)
 
         layout.addWidget(ac_group)
@@ -880,80 +880,80 @@ class SettingsDialog(QDialog):
         gen_layout = QVBoxLayout(gen_group)
         gen_layout.setSpacing(6)
 
-        self._chk_py_errors = QCheckBox("Display errors and warnings")
+        self._chk_py_errors = QCheckBox("Show inline errors and warnings")
         gen_layout.addWidget(self._chk_py_errors)
 
-        self._chk_py_smart_indent = QCheckBox("Smart indent (requires auto-indent)")
+        self._chk_py_smart_indent = QCheckBox("Context-aware indentation")
         gen_layout.addWidget(self._chk_py_smart_indent)
 
-        self._chk_py_indent_bracket = QCheckBox("Indent to bracket (requires auto-indent)")
+        self._chk_py_indent_bracket = QCheckBox("Align to opening bracket")
         gen_layout.addWidget(self._chk_py_indent_bracket)
 
-        self._chk_py_close_bracket = QCheckBox("Insert closing bracket")
+        self._chk_py_close_bracket = QCheckBox("Auto-close brackets")
         gen_layout.addWidget(self._chk_py_close_bracket)
 
-        self._chk_py_close_quotes = QCheckBox("Insert closing quotes")
+        self._chk_py_close_quotes = QCheckBox("Auto-close quotes")
         gen_layout.addWidget(self._chk_py_close_quotes)
 
-        self._chk_py_trim_ws = QCheckBox("Trim trailing whitespace on save")
+        self._chk_py_trim_ws = QCheckBox("Strip trailing whitespace on save")
         gen_layout.addWidget(self._chk_py_trim_ws)
 
-        self._chk_py_newline = QCheckBox("Ensure newline at end of file on save")
+        self._chk_py_newline = QCheckBox("Ensure final newline on save")
         gen_layout.addWidget(self._chk_py_newline)
 
-        self._chk_py_hide_pyc = QCheckBox("Hide .pyc files in workspace (__pycache__)")
+        self._chk_py_hide_pyc = QCheckBox("Hide .pyc and __pycache__ in workspace")
         gen_layout.addWidget(self._chk_py_hide_pyc)
 
-        self._chk_py_pymel = QCheckBox("Import PyMEL on load")
+        self._chk_py_pymel = QCheckBox("Pre-import PyMEL at startup")
         gen_layout.addWidget(self._chk_py_pymel)
 
-        self._chk_py_ac_quickhelp = QCheckBox("Auto-complete updates Quick Help")
+        self._chk_py_ac_quickhelp = QCheckBox("Show Quick Help on auto-complete")
         gen_layout.addWidget(self._chk_py_ac_quickhelp)
 
         self._chk_py_confirm_module = QCheckBox(
-            "Show confirm dialog before overwriting Python module state"
+            "Confirm before overwriting module state"
         )
         gen_layout.addWidget(self._chk_py_confirm_module)
 
         self._chk_py_disable_revert = QCheckBox(
-            'Disable "Revert Module State on Execute" on startup'
+            "Skip module state revert on startup"
         )
         gen_layout.addWidget(self._chk_py_disable_revert)
 
         layout.addWidget(gen_group)
 
-        # Auto-Complete group.
-        ac_group = QGroupBox("Auto-Complete")
+        # Completion Triggers group.
+        ac_group = QGroupBox("Completion Triggers")
         ac_layout = QHBoxLayout(ac_group)
 
-        self._chk_py_ac_ctrl = QCheckBox("CTRL + Space")
+        self._chk_py_ac_ctrl = QCheckBox("Ctrl+Space")
         ac_layout.addWidget(self._chk_py_ac_ctrl)
 
-        self._chk_py_ac_letters = QCheckBox("On letters and '_'")
+        self._chk_py_ac_letters = QCheckBox("While typing")
         ac_layout.addWidget(self._chk_py_ac_letters)
 
-        self._chk_py_ac_dot = QCheckBox("On '.'")
+        self._chk_py_ac_dot = QCheckBox("After dot (.)")
         ac_layout.addWidget(self._chk_py_ac_dot)
 
         layout.addWidget(ac_group)
 
-        # Auto-Complete Options group.
-        aco_group = QGroupBox("Auto-Complete Options")
+        # Completion Sources group.
+        aco_group = QGroupBox("Completion Sources")
         aco_layout = QHBoxLayout(aco_group)
 
-        self._chk_py_ac_keywords = QCheckBox("Include Keywords")
+        self._chk_py_ac_keywords = QCheckBox("Python keywords")
         aco_layout.addWidget(self._chk_py_ac_keywords)
 
-        self._chk_py_ac_builtins = QCheckBox("Include Built-ins")
+        self._chk_py_ac_builtins = QCheckBox("Built-in functions")
         aco_layout.addWidget(self._chk_py_ac_builtins)
 
-        self._chk_py_native_maya = QCheckBox("Native Maya Fallback")
+        self._chk_py_native_maya = QCheckBox("Maya introspection fallback")
         aco_layout.addWidget(self._chk_py_native_maya)
 
         layout.addWidget(aco_group)
 
-        # Forced Imports.
-        fi_group = QGroupBox("Forced Imports")
+        # Pre-loaded Modules.
+        fi_group = QGroupBox("Pre-loaded Modules")
         fi_layout = QVBoxLayout(fi_group)
         self._py_forced_imports = QLineEdit()
         self._py_forced_imports.setPlaceholderText("Comma-separated module names...")
@@ -966,24 +966,24 @@ class SettingsDialog(QDialog):
     # --- Pylint Page --------------------------------------------------
 
     def _build_pylint_page(self):
-        """Build the Pylint settings page."""
+        """Build the Code Analysis settings page."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        # Pylint Code Analysis group.
-        analysis_group = QGroupBox("Pylint Code Analysis")
+        # Pylint Integration group.
+        analysis_group = QGroupBox("Pylint Integration")
         analysis_layout = QVBoxLayout(analysis_group)
-        self._chk_pylint_enabled = QCheckBox("Enable Pylint")
+        self._chk_pylint_enabled = QCheckBox("Enable pylint analysis")
         analysis_layout.addWidget(self._chk_pylint_enabled)
         layout.addWidget(analysis_group)
 
         # Executable Path group.
-        exe_group = QGroupBox("Pylint Executable Path")
+        exe_group = QGroupBox("Pylint Executable")
         exe_layout = QHBoxLayout(exe_group)
         self._pylint_exe_input = QLineEdit()
-        self._pylint_exe_input.setPlaceholderText("Path to pylint executable...")
+        self._pylint_exe_input.setPlaceholderText("Path to pylint binary...")
         exe_layout.addWidget(self._pylint_exe_input, 1)
         self._pylint_exe_browse = QPushButton("...")
         self._pylint_exe_browse.setFixedWidth(30)
@@ -992,38 +992,38 @@ class SettingsDialog(QDialog):
         layout.addWidget(exe_group)
 
         # Configuration Path group.
-        cfg_group = QGroupBox("Configuration Path (pylintrc)")
+        cfg_group = QGroupBox("Pylint Configuration")
         cfg_layout = QHBoxLayout(cfg_group)
         self._pylint_cfg_input = QLineEdit()
-        self._pylint_cfg_input.setPlaceholderText("Path to pylintrc file...")
+        self._pylint_cfg_input.setPlaceholderText("Path to .pylintrc or setup.cfg...")
         cfg_layout.addWidget(self._pylint_cfg_input, 1)
         self._pylint_cfg_browse = QPushButton("...")
         self._pylint_cfg_browse.setFixedWidth(30)
         self._pylint_cfg_browse.clicked.connect(self._browse_pylint_cfg)
         cfg_layout.addWidget(self._pylint_cfg_browse)
-        self._pylint_cfg_default = QPushButton("Default")
+        self._pylint_cfg_default = QPushButton("Reset")
         self._pylint_cfg_default.setFixedWidth(60)
         self._pylint_cfg_default.clicked.connect(lambda: self._pylint_cfg_input.clear())
         cfg_layout.addWidget(self._pylint_cfg_default)
         layout.addWidget(cfg_group)
 
         # Additional Python Paths group.
-        paths_group = QGroupBox("Additional Python Paths")
+        paths_group = QGroupBox("Extra Import Paths")
         paths_layout = QVBoxLayout(paths_group)
         self._pylint_paths_input = QLineEdit()
-        self._pylint_paths_input.setPlaceholderText("Semicolon-separated additional paths...")
+        self._pylint_paths_input.setPlaceholderText("Semicolon-separated paths for pylint to search...")
         paths_layout.addWidget(self._pylint_paths_input)
         layout.addWidget(paths_group)
 
         # Options group.
-        opts_group = QGroupBox("Options")
+        opts_group = QGroupBox("Analysis Options")
         opts_layout = QVBoxLayout(opts_group)
         opts_layout.setSpacing(6)
 
-        self._chk_pylint_minimal = QCheckBox("Use minimal checkers (overrides pylintrc)")
+        self._chk_pylint_minimal = QCheckBox("Minimal checker set (faster, overrides config)")
         opts_layout.addWidget(self._chk_pylint_minimal)
 
-        self._chk_pylint_log = QCheckBox("Log output errors (debug)")
+        self._chk_pylint_log = QCheckBox("Log analysis errors to output (debug)")
         opts_layout.addWidget(self._chk_pylint_log)
 
         layout.addWidget(opts_group)

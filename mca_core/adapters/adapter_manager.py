@@ -16,6 +16,7 @@ Dependencies:
 import logging
 import platform
 import subprocess
+import threading
 
 from .base_adapter import DCCAdapter, DCCType, ConnectionState
 from .maya_adapter import MayaAdapter
@@ -262,12 +263,51 @@ class AdapterManager:
 
     # --- Auto-detection ------------------------------------------------------
 
-    def detect_running_dccs(self):
+    def detect_running_dccs(self, callback=None):
         """
         Detect running DCC applications by scanning process lists.
 
         Scans for all known DCC process names, even those without
         adapters (useful for informational display).
+
+        If *callback* is provided, the scan runs in a background thread
+        and calls ``callback(detected_list)`` when finished.  Otherwise
+        the scan runs synchronously and returns the results directly.
+
+        :param callable callback: Optional function receiving the results list.
+            When provided, the scan runs in a background thread and this
+            method returns an empty list immediately.
+        :return: List of dicts with 'type', 'name', 'port', 'connected'.
+            Empty list when *callback* is used (results delivered via callback).
+        :rtype: list
+        """
+        if callback is not None:
+            # Run the heavy subprocess call off the main thread so the UI
+            # doesn't freeze while tasklist/ps enumerates every process.
+            thread = threading.Thread(
+                target=self._detect_running_dccs_worker,
+                args=(callback,),
+                daemon=True,
+            )
+            thread.start()
+            return []
+
+        return self._detect_running_dccs_sync()
+
+    def _detect_running_dccs_worker(self, callback):
+        """
+        Background thread target for async DCC detection.
+
+        Runs the synchronous scan and delivers results via *callback*.
+
+        :param callable callback: Function to call with the results list.
+        """
+        detected = self._detect_running_dccs_sync()
+        callback(detected)
+
+    def _detect_running_dccs_sync(self):
+        """
+        Synchronous DCC process scan (may take several seconds on Windows).
 
         :return: List of dicts with 'type', 'name', 'port', 'connected'.
         :rtype: list

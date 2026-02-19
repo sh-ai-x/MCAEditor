@@ -55,7 +55,7 @@ if PYSIDE_VERSION == 6:
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
         QSplitter, QTabWidget, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
-        QFrame, QMenuBar,
+        QFrame, QMenuBar, QMenu, QToolTip,
     )
 
     # QtCore
@@ -72,6 +72,7 @@ if PYSIDE_VERSION == 6:
         QPalette, QColor, QFont, QFontDatabase, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor, QAction, QActionGroup,
+        QIcon, QPixmap, QPen, QPainterPath,
     )
 
 
@@ -87,7 +88,7 @@ else:
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
         QSplitter, QTabWidget, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
-        QFrame, QMenuBar,
+        QFrame, QMenuBar, QMenu, QToolTip,
     )
 
     # In PySide2, QAction and QActionGroup live in QtWidgets.
@@ -104,6 +105,7 @@ else:
         QPalette, QColor, QFont, QFontDatabase, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor,
+        QIcon, QPixmap, QPen, QPainterPath,
     )
 
     # -----------------------------------------------------------------------
@@ -202,6 +204,10 @@ else:
         _patch_enum_group(Qt, "HighDpiScaleFactorRoundingPolicy", [
             "PassThrough", "Round", "Ceil", "Floor", "RoundPreferFloor",
         ])
+        _patch_enum_group(Qt, "ContextMenuPolicy", [
+            "NoContextMenu", "DefaultContextMenu", "ActionsContextMenu",
+            "CustomContextMenu", "PreventContextMenu",
+        ])
 
         # --- QPalette enums ---
         _patch_enum_group(QPalette, "ColorRole", [
@@ -271,6 +277,37 @@ else:
             "Copy", "Cut", "Paste", "Undo", "Redo", "SelectAll",
             "Find", "FindNext", "FindPrevious", "Save", "New", "Open",
             "Close", "Print", "ZoomIn", "ZoomOut",
+        ])
+
+        # --- Qt.AspectRatioMode / Qt.TransformationMode (used by icon scaling) ---
+        _patch_enum_group(Qt, "AspectRatioMode", [
+            "IgnoreAspectRatio", "KeepAspectRatio", "KeepAspectRatioByExpanding",
+        ])
+        _patch_enum_group(Qt, "TransformationMode", [
+            "FastTransformation", "SmoothTransformation",
+        ])
+
+        # --- QPainter.RenderHint (used by diagnostic gutter dots for anti-aliasing) ---
+        _patch_enum_group(QPainter, "RenderHint", [
+            "Antialiasing", "TextAntialiasing", "SmoothPixmapTransform",
+        ])
+
+        # --- Qt.PenStyle enums (used by diagnostic gutter dots) ---
+        _patch_enum_group(Qt, "PenStyle", [
+            "NoPen", "SolidLine", "DashLine", "DotLine",
+        ])
+
+        # --- QTextCharFormat.UnderlineStyle (used by diagnostic underlines) ---
+        _patch_enum_group(QTextCharFormat, "UnderlineStyle", [
+            "NoUnderline", "SingleUnderline", "DashUnderline",
+            "DotLine", "DashDotLine", "DashDotDotLine", "WaveUnderline",
+            "SpellCheckUnderline",
+        ])
+
+        # --- QEvent.Type enums (used by diagnostic tooltip hover) ---
+        _patch_enum_group(QEvent, "Type", [
+            "ToolTip", "MouseMove", "KeyPress", "KeyRelease",
+            "FocusIn", "FocusOut", "Enter", "Leave",
         ])
 
         logger.debug("PySide2 enum compatibility patches applied")

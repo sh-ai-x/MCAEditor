@@ -239,9 +239,6 @@ _COMPLETER_STYLESHEET = """
         background-color: #094771;
         color: #ffffff;
     }
-    QListWidget::item:hover {
-        background-color: #2a2d2e;
-    }
 """
 
 # Maximum number of visible rows before scrolling.

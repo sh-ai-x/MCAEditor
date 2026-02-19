@@ -34,6 +34,68 @@ COLOR_RESULT = "#dcdcaa"       # Return values / results (yellow)
 COLOR_TIMESTAMP = "#666666"    # Timestamp prefix (dim gray)
 
 
+# --- Output Text Edit (Maya-safe) -------------------------------------------
+
+class _OutputTextEdit(QPlainTextEdit):
+    """
+    Read-only text edit with explicit copy/select-all handling.
+
+    Inside Maya, the standard Ctrl+C shortcut can be intercepted by
+    Maya's ``cutCopyPaste.mel`` hotkey system before Qt processes it,
+    resulting in a "Nothing is selected" MEL error instead of copying
+    the selected output text. This subclass overrides ``keyPressEvent``
+    to handle Ctrl+C and Ctrl+A explicitly, then accepts the event so
+    it never propagates to Maya's hotkey layer.
+
+    Also sets ``TextSelectableByMouse | TextSelectableByKeyboard``
+    interaction flags to ensure mouse selection always transfers
+    keyboard focus to this widget.
+    """
+
+    def __init__(self, parent=None):
+        """
+        Initialize with read-only mode and text selection flags.
+
+        :param QWidget parent: Optional parent widget.
+        """
+        super().__init__(parent)
+        self.setReadOnly(True)
+
+        # Explicit interaction flags ensure that clicking to select text
+        # also gives this widget keyboard focus, which is critical for
+        # the Maya hotkey filter to recognize focus is inside our editor.
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+
+    def keyPressEvent(self, event):
+        """
+        Handle Ctrl+C (copy) and Ctrl+A (select all) explicitly.
+
+        This ensures copy works even when Maya's hotkey system or the
+        application-level event filter routes the event in an unexpected
+        way. The event is accepted to prevent further propagation.
+
+        :param QKeyEvent event: The key press event.
+        """
+        # Only intercept when Ctrl is the sole modifier.
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_C:
+                # Copy selected text to clipboard (no-op if nothing selected).
+                self.copy()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_A:
+                # Select all output text.
+                self.selectAll()
+                event.accept()
+                return
+
+        # Everything else goes to the base implementation.
+        super().keyPressEvent(event)
+
+
 # --- Output Window Widget ---------------------------------------------------
 
 class OutputWindow(QWidget):
@@ -49,6 +111,9 @@ class OutputWindow(QWidget):
     # Emitted when the user clicks an error line (filename, line_number).
     line_clicked = Signal(str, int)
 
+    # Emitted when error or warning counts change. Args: (error_count, warning_count).
+    counts_changed = Signal(int, int)
+
     def __init__(self, parent=None):
         """
         Initialize the output window.
@@ -57,6 +122,11 @@ class OutputWindow(QWidget):
         """
         super().__init__(parent)
         self._show_timestamps = False
+
+        # Running tallies of errors and warnings since last clear.
+        self._error_count = 0
+        self._warning_count = 0
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -100,8 +170,9 @@ class OutputWindow(QWidget):
         layout.addWidget(header)
 
         # --- Text Output Area ---
-        self._output = QPlainTextEdit()
-        self._output.setReadOnly(True)
+        # _OutputTextEdit handles read-only mode and explicit Ctrl+C/Ctrl+A
+        # to prevent Maya's hotkey system from intercepting copy operations.
+        self._output = _OutputTextEdit()
         self._output.setMaximumBlockCount(10000)  # Prevent unbounded memory growth
 
         # Monospace font for consistent output formatting.
@@ -185,17 +256,25 @@ class OutputWindow(QWidget):
         """
         Write error text in red.
 
+        Increments the error counter and emits ``counts_changed``.
+
         :param str text: The error message.
         """
+        self._error_count += 1
         self._append_formatted(text, self._fmt_error)
+        self.counts_changed.emit(self._error_count, self._warning_count)
 
     def write_warning(self, text):
         """
         Write warning text in orange.
 
+        Increments the warning counter and emits ``counts_changed``.
+
         :param str text: The warning message.
         """
+        self._warning_count += 1
         self._append_formatted(text, self._fmt_warning)
+        self.counts_changed.emit(self._error_count, self._warning_count)
 
     def write_success(self, text):
         """
@@ -240,11 +319,45 @@ class OutputWindow(QWidget):
         """
         self._append_formatted(code, self._fmt_info)
 
+    # --- Bulk Write (for history loading) --------------------------------------
+
+    def write_bulk(self, text):
+        """
+        Insert a large block of text in a single cursor operation.
+
+        Used by ``_load_maya_history()`` to batch-insert the entire Maya
+        session log without per-line repaints. Much faster than calling
+        ``write_output()`` for each line — hundreds of lines insert in
+        one paint cycle instead of hundreds of separate repaints.
+
+        Disables widget updates during the insert, then scrolls to the
+        bottom afterward.
+
+        :param str text: The full text block to insert.
+        """
+        if not text:
+            return
+
+        # Suspend repaints while we do the bulk insert.
+        self._output.setUpdatesEnabled(False)
+
+        cursor = self._output.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text, self._fmt_normal)
+        self._output.setTextCursor(cursor)
+
+        # Re-enable updates and scroll to the bottom.
+        self._output.setUpdatesEnabled(True)
+        self._output.ensureCursorVisible()
+
     # --- Clear & Configuration -----------------------------------------------
 
     def clear(self):
-        """Clear all output text."""
+        """Clear all output text and reset error/warning counters."""
         self._output.clear()
+        self._error_count = 0
+        self._warning_count = 0
+        self.counts_changed.emit(self._error_count, self._warning_count)
 
     def set_show_timestamps(self, show):
         """

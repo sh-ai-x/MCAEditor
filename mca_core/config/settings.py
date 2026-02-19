@@ -53,6 +53,7 @@ class MCASettings:
         "last_workspace": "",
         "recent_files": [],
         "recent_workspaces": [],
+        "workspace_folders": [],
         "auto_save_on_execute": True,        # Save all files before executing.
         "save_all_on_exit": True,            # Save all open files when closing.
         "check_modified_files": True,        # Warn if files changed on disk.

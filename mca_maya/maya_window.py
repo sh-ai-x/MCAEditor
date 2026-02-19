@@ -35,7 +35,10 @@ except ImportError:
     from PySide2.QtCore import QObject, QEvent
     from PySide2.QtWidgets import QApplication, QWidget as _QWidget
 
-from mca_qt.qt_compat import QWidget, QVBoxLayout, QMenuBar, Qt, QKeySequence
+import struct
+import sys
+
+from mca_qt.qt_compat import QWidget, QVBoxLayout, QHBoxLayout, QMenuBar, QLabel, QFrame, Qt, QKeySequence
 from mca_qt.editor_panel import MCAEditorPanel
 from mca_qt.theme import GLOBAL_STYLESHEET
 from mca_core.config.settings import MCASettings
@@ -280,12 +283,23 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Set up the panel's status callback to print to Maya's script editor.
         self._panel.set_status_callback(self._maya_status_callback)
 
-        # Layout: menu bar on top (fixed height), panel fills the rest.
+        # Build the blue status bar that mirrors the standalone window.
+        self._status_bar = self._build_status_bar()
+
+        # Layout: menu bar on top, panel fills the middle, status bar at bottom.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._menubar, 0)  # 0 stretch — stays at natural height.
-        layout.addWidget(self._panel, 1)    # 1 stretch — expands to fill space.
+        layout.addWidget(self._menubar, 0)   # 0 stretch — stays at natural height.
+        layout.addWidget(self._panel, 1)     # 1 stretch — expands to fill space.
+        layout.addWidget(self._status_bar, 0)  # 0 stretch — stays at natural height.
+
+        # Connect panel signals to the status bar labels.
+        self._panel.cursor_position_changed.connect(self._on_cursor_pos)
+        self._panel.language_changed.connect(self._on_language_changed)
+        self._panel.mode_changed.connect(self._on_mode_changed)
+        self._panel.status_message.connect(self._on_status_message)
+        self._panel.output_counts_changed.connect(self._on_counts_changed)
 
         # Install an application-level event filter to prevent Maya's
         # hotkeys from intercepting keystrokes while typing in our editor.
@@ -302,10 +316,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._output_callback_id = None
         self._install_output_hook()
 
-        # Load Maya's script editor history so the user sees all startup
-        # logs, plugin load messages, and prior output — just like opening
-        # Maya's built-in Script Editor for the first time in a session.
-        self._load_maya_history()
+        # Defer history loading so the window appears immediately. The
+        # history can be large (hundreds of lines) and inserting it
+        # synchronously in __init__ blocks the UI for several seconds.
+        # QTimer.singleShot(0) queues it after the event loop processes
+        # the pending show/paint events, so the window is visible first.
+        from mca_qt.qt_compat import QTimer
+        QTimer.singleShot(0, self._load_maya_history)
 
         logger.info("MCA Maya Editor window initialized")
 
@@ -337,8 +354,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         plugin loads, warnings, errors, etc.). We read its text, display
         it in our output window, then delete the temporary widget.
 
-        This is how Charcoal Editor 2 and similar tools show the full
-        Maya log even when opened mid-session.
+        Uses ``write_bulk()`` for a single batched insert instead of
+        per-line ``write_output()`` calls — this is orders of magnitude
+        faster for large histories (hundreds of lines in one paint cycle
+        instead of one repaint per line).
+
+        This method is called via ``QTimer.singleShot(0, ...)`` so the
+        window appears instantly and history loads after the first paint.
         """
         try:
             # Create an invisible window with a cmdScrollFieldReporter.
@@ -361,16 +383,18 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not history or not history.strip():
             return
 
-        # Write the history to our output window as standard output.
-        # Each line goes through write_output so it gets proper formatting.
-        output = self._panel._output
-        line_count = 0
-        for line in history.splitlines():
-            if line.strip():
-                output.write_output(line)
-                line_count += 1
+        # Filter out blank lines — the raw reporter text has empty lines
+        # between entries that create distracting double-spacing.
+        lines = [line for line in history.splitlines() if line.strip()]
+        if not lines:
+            return
 
-        logger.info("Loaded %d lines of Maya session history", line_count)
+        # Batch-insert the entire history in a single cursor operation.
+        # This avoids hundreds of individual write_output() calls, each
+        # of which triggers cursor movement + ensureCursorVisible + repaint.
+        cleaned = "\n".join(lines) + "\n"
+        self._panel._output.write_bulk(cleaned)
+        logger.info("Loaded %d lines of Maya session history", len(lines))
 
     def _on_maya_output(self, message, message_type, client_data):
         """
@@ -402,6 +426,125 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         else:
             # kDisplay and any other types — standard output.
             output.write_output(text)
+
+    # --- Status Bar ----------------------------------------------------------
+
+    def _build_status_bar(self):
+        """
+        Build a blue status bar matching the standalone window's QStatusBar.
+
+        Since MCAMayaWindow is a QWidget (not QMainWindow), we use a
+        simple QFrame with an HBoxLayout instead of QStatusBar.
+
+        :return: The status bar frame widget.
+        :rtype: QFrame
+        """
+        bar = QFrame(self)
+        bar.setFixedHeight(24)
+        bar.setStyleSheet(
+            "QFrame { background-color: #007acc; }"
+        )
+
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(8, 0, 8, 0)
+        bar_layout.setSpacing(0)
+
+        # Shared label style — white text on the blue bar.
+        label_style = "color: white; padding: 0 8px; font-size: 11px;"
+
+        # Python version (static, set once at startup) — left-aligned.
+        bits = struct.calcsize("P") * 8
+        py_ver = "Python {}.{}.{} ({}-bit)".format(*sys.version_info[:3], bits)
+        py_label = QLabel(py_ver)
+        py_label.setStyleSheet(label_style)
+        bar_layout.addWidget(py_label)
+
+        # Error count indicator (circled-X symbol) — left-aligned.
+        self._error_label = QLabel("\u2297 0")
+        self._error_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._error_label)
+
+        # Warning count indicator (warning triangle symbol) — left-aligned.
+        self._warning_label = QLabel("\u26a0 0")
+        self._warning_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._warning_label)
+
+        # Status message area (stretches to fill remaining space between
+        # the left-side info labels and the right-side position/lang labels).
+        self._status_message_label = QLabel("")
+        self._status_message_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._status_message_label, 1)
+
+        # Cursor position (right side, permanent).
+        self._pos_label = QLabel("Ln 1, Col 1")
+        self._pos_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._pos_label)
+
+        # Current language.
+        self._lang_label = QLabel("Python")
+        self._lang_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._lang_label)
+
+        # Encoding (always UTF-8 for now).
+        encoding_label = QLabel("UTF-8")
+        encoding_label.setStyleSheet(label_style)
+        bar_layout.addWidget(encoding_label)
+
+        # Editor mode indicator.
+        self._mode_label = QLabel("Simple")
+        self._mode_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._mode_label)
+
+        return bar
+
+    def _on_cursor_pos(self, line, col):
+        """
+        Update the cursor position label.
+
+        :param int line: Current line number (1-based).
+        :param int col: Current column number (1-based).
+        """
+        self._pos_label.setText("Ln {}, Col {}".format(line, col))
+
+    def _on_language_changed(self, language):
+        """
+        Update the language label in the status bar.
+
+        :param str language: The display name of the current language.
+        """
+        self._lang_label.setText(language)
+
+    def _on_mode_changed(self, mode_label):
+        """
+        Update the mode label in the status bar.
+
+        :param str mode_label: 'Simple' or 'Advanced'.
+        """
+        self._mode_label.setText(mode_label)
+
+    def _on_status_message(self, message, duration_ms):
+        """
+        Show a temporary status message on the left side of the bar.
+
+        The message auto-clears after *duration_ms* milliseconds.
+
+        :param str message: The status message text.
+        :param int duration_ms: How long to display before clearing.
+        """
+        self._status_message_label.setText(message)
+        # Auto-clear after the specified duration.
+        from mca_qt.qt_compat import QTimer
+        QTimer.singleShot(duration_ms, lambda: self._status_message_label.setText(""))
+
+    def _on_counts_changed(self, errors, warnings):
+        """
+        Update the error and warning count labels in the status bar.
+
+        :param int errors: Current error count.
+        :param int warnings: Current warning count.
+        """
+        self._error_label.setText("\u2297 {}".format(errors))
+        self._warning_label.setText("\u26a0 {}".format(warnings))
 
     # --- Status Callback (prints to Maya's output) --------------------------
 
