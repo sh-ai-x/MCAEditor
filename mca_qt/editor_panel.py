@@ -42,6 +42,7 @@ from mca_qt.widgets.sidebar import MCASidebar
 from mca_qt.widgets.ai_panel import AIPanel
 from mca_qt.widgets.settings_dialog import SettingsDialog
 from mca_qt.widgets.connection_dialog import ConnectionDialog
+from mca_qt.widgets.completer import CodeCompleter, CompletionProvider
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 
 # Module-level logger.
@@ -106,6 +107,11 @@ class MCAEditorPanel(QWidget):
         self._local_namespace = {"__builtins__": __builtins__}
         # Status callback — set by the host window.
         self._status_callback = None
+
+        # Shared completion provider — one instance used by all editor tabs.
+        self._completion_provider = CompletionProvider(
+            self._settings, self._adapter_manager
+        )
 
         # Menu-dependent action references (set when build_menus is called).
         # Initialized here so _apply_editor_mode doesn't crash before menus exist.
@@ -859,6 +865,9 @@ class MCAEditorPanel(QWidget):
         editor.cursor_position_changed_info.connect(self._update_cursor_pos)
         editor.file_modified.connect(lambda mod: self._on_editor_modified(editor, mod))
 
+        # Attach a code completer to the new buffer.
+        self._attach_completer(editor)
+
         lang_map = {"python": "Python", "mel": "MEL"}
         tab_name = lang_map.get(editor.language, "Python")
 
@@ -907,6 +916,9 @@ class MCAEditorPanel(QWidget):
         editor.execute_line_requested.connect(self._execute_line)
         editor.cursor_position_changed_info.connect(self._update_cursor_pos)
         editor.file_modified.connect(lambda mod: self._on_editor_modified(editor, mod))
+
+        # Attach a code completer to the opened file's editor.
+        self._attach_completer(editor)
 
         tab_name = os.path.basename(filepath)
         idx = self._tab_widget.addTab(editor, tab_name)
@@ -1024,6 +1036,23 @@ class MCAEditorPanel(QWidget):
                 "language": editor.language,
             })
         self._sidebar.open_editors_panel.update_editors(tabs)
+
+    def _attach_completer(self, editor):
+        """
+        Create a CodeCompleter for an editor and wire up the signal.
+
+        Each editor tab gets its own completer widget, but all share
+        the same CompletionProvider so adapter/settings state is consistent.
+
+        :param MCACodeEditor editor: The editor to attach a completer to.
+        """
+        completer = CodeCompleter(editor, self._completion_provider, self._settings)
+        editor._settings = self._settings
+        editor.set_completer(completer)
+        # Connect the editor's completion_requested signal to the completer.
+        editor.completion_requested.connect(
+            lambda manual: completer.trigger(manual=manual)
+        )
 
     def _update_outline(self, editor):
         """Update the code outline panel."""

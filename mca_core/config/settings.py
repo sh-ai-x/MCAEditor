@@ -94,7 +94,7 @@ class MCASettings:
 
         # --- Code Editor ---
         "auto_complete": True,
-        "auto_complete_delay_ms": 300,
+        "auto_complete_delay_ms": 150,
         "auto_close_brackets": True,
         "auto_close_quotes": True,
         "matching_word_highlight": True,

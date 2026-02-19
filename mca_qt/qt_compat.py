@@ -60,7 +60,7 @@ if PYSIDE_VERSION == 6:
 
     # QtCore
     from PySide6.QtCore import (
-        Qt, QSize, Signal, QRect, QTimer, QFileSystemWatcher,
+        Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
         QEvent, QObject,
     )
 
@@ -95,7 +95,7 @@ else:
 
     # QtCore
     from PySide2.QtCore import (
-        Qt, QSize, Signal, QRect, QTimer, QFileSystemWatcher,
+        Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
         QEvent, QObject,
     )
 
@@ -186,7 +186,10 @@ else:
             "WA_DeleteOnClose",
         ])
         _patch_enum_group(Qt, "WindowType", [
-            "Window", "Dialog", "Widget",
+            "Window", "Dialog", "Widget", "ToolTip", "FramelessWindowHint",
+        ])
+        _patch_enum_group(Qt, "ScrollBarPolicy", [
+            "ScrollBarAsNeeded", "ScrollBarAlwaysOff", "ScrollBarAlwaysOn",
         ])
         _patch_enum_group(Qt, "FocusPolicy", [
             "NoFocus", "TabFocus", "ClickFocus", "StrongFocus", "WheelFocus",

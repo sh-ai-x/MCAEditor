@@ -365,6 +365,7 @@ class MCACodeEditor(QPlainTextEdit):
     execute_line_requested = Signal()      # Execute current line
     file_modified = Signal(bool)           # Document modified state changed
     cursor_position_changed_info = Signal(int, int)  # line, column
+    completion_requested = Signal(bool)    # Auto-complete trigger (arg = is_manual)
 
     def __init__(self, parent=None):
         """
@@ -384,6 +385,12 @@ class MCACodeEditor(QPlainTextEdit):
         self._auto_close_quotes = True
         self._show_indent_guides = True
         self._highlight_matching_words = True
+
+        # Completer reference — set by the panel via set_completer().
+        self._completer = None
+        # Settings reference — set by the panel so the editor can check
+        # per-language auto-complete toggles during key handling.
+        self._settings = None
 
         # Setup monospace font for code editing.
         font = QFont("JetBrains Mono, Consolas, Courier New", 12)
@@ -490,6 +497,17 @@ class MCACodeEditor(QPlainTextEdit):
         :rtype: bool
         """
         return self._is_temporary
+
+    # --- Completer -----------------------------------------------------------
+
+    def set_completer(self, completer):
+        """
+        Attach a CodeCompleter popup to this editor.
+
+        :param CodeCompleter completer: The completer widget to attach,
+            or None to detach.
+        """
+        self._completer = completer
 
     # --- Line Numbers --------------------------------------------------------
 
@@ -749,18 +767,27 @@ class MCACodeEditor(QPlainTextEdit):
 
     def keyPressEvent(self, event):
         """
-        Handle key presses for execution shortcuts, auto-close, and indentation.
+        Handle key presses for completions, execution shortcuts, auto-close,
+        and indentation.
 
         Key bindings mirror Charcoal Editor 2:
+            - Ctrl+Space: Trigger auto-complete
             - Ctrl+Shift+Enter: Execute full script
             - Ctrl+Enter: Execute selected text
             - Ctrl+Alt+Enter: Execute current line
             - Ctrl+/: Toggle comment
-            - Tab: Indent (spaces or tab character)
+            - Tab: Accept completion (when popup active) or indent
             - Shift+Tab: Unindent
 
         :param QKeyEvent event: The key press event.
         """
+        # --- Completer key forwarding ---
+        # When the popup is active, navigation keys (Up/Down/Tab/Enter/Escape)
+        # are consumed by the completer instead of the editor.
+        if self._completer and self._completer.is_active:
+            if self._completer.handle_key_event(event):
+                return
+
         # --- Execute shortcuts (like Charcoal Editor 2) ---
         # Key_Return = main Enter, Key_Enter = numpad Enter.
         # Numpad keys carry KeypadModifier on Windows; strip it for clean
@@ -787,6 +814,12 @@ class MCACodeEditor(QPlainTextEdit):
         # --- Numpad Enter (no Ctrl/Shift/Alt): execute selected text or all ---
         if is_numpad and is_enter and mods == Qt.KeyboardModifier.NoModifier:
             self.execute_selected_requested.emit()
+            return
+
+        # --- Ctrl+Space: manual auto-complete trigger ---
+        if (event.key() == Qt.Key.Key_Space
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            self.completion_requested.emit(True)
             return
 
         # --- Toggle comment (Ctrl+/) ---
@@ -821,6 +854,9 @@ class MCACodeEditor(QPlainTextEdit):
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.Left)
             self.setTextCursor(cursor)
+            # Dismiss completer on bracket — not a continuation of typing.
+            if self._completer and self._completer.is_active:
+                self._completer.dismiss()
             return
 
         # --- Skip over auto-closed brackets ---
@@ -839,6 +875,9 @@ class MCACodeEditor(QPlainTextEdit):
                     # Skip over the existing closing bracket.
                     cursor.movePosition(QTextCursor.MoveOperation.Right)
                     self.setTextCursor(cursor)
+                    # Dismiss completer on close-bracket.
+                    if self._completer and self._completer.is_active:
+                        self._completer.dismiss()
                     return
 
         # --- Auto-close quotes ---
@@ -872,6 +911,71 @@ class MCACodeEditor(QPlainTextEdit):
 
         # Default key handling for everything else.
         super().keyPressEvent(event)
+
+        # --- Post-keystroke: check whether to trigger or update completions ---
+        self._check_completion_trigger(event)
+
+    def _check_completion_trigger(self, event):
+        """
+        After a key is processed, decide whether to trigger, update, or
+        dismiss the auto-complete popup.
+
+        Called at the end of keyPressEvent for non-shortcut keys that
+        were passed through to the editor.
+
+        :param QKeyEvent event: The key press event that was just processed.
+        """
+        if not self._completer:
+            return
+
+        text = event.text()
+        key = event.key()
+
+        # --- If the completer is already showing, update the filter ---
+        if self._completer.is_active:
+            # Typing letters/digits/underscore: narrow the visible items.
+            if text and (text.isalnum() or text == "_"):
+                self._completer.update_filter()
+                return
+
+            # Backspace: re-filter with shorter prefix.
+            if key == Qt.Key.Key_Backspace:
+                self._completer.update_filter()
+                return
+
+            # Dot in Python: re-trigger (new scope).
+            if text == "." and self._language == "python":
+                self.completion_requested.emit(False)
+                return
+
+            # Any other printable character that isn't an identifier char
+            # (e.g. space, parenthesis, operator): dismiss.
+            if text and not text.isalnum() and text not in "_.":
+                self._completer.dismiss()
+                return
+
+            return
+
+        # --- Completer is NOT active: decide whether to auto-trigger ---
+        # Skip if no printable text was produced (arrows, modifiers, etc.).
+        if not text:
+            return
+
+        # Letter or underscore typed: auto-trigger on letters if setting allows.
+        if text.isalpha() or text == "_":
+            if self._language == "python":
+                if self._settings and self._settings.get("py_autocomplete_on_letters"):
+                    self.completion_requested.emit(False)
+            elif self._language == "mel":
+                if self._settings and self._settings.get("mel_autocomplete_on_letters"):
+                    self.completion_requested.emit(False)
+            return
+
+        # Dot typed in Python: auto-trigger on dot if setting allows.
+        if text == "." and self._language == "python":
+            if self._settings and self._settings.get("py_autocomplete_on_dot"):
+                self.completion_requested.emit(False)
+            return
 
     def _handle_newline(self):
         """
