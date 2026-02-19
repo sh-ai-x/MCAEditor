@@ -46,6 +46,7 @@ from mca_qt.widgets.settings_dialog import SettingsDialog
 from mca_qt.widgets.connection_dialog import ConnectionDialog
 from mca_qt.widgets.new_tab_dialog import NewTabDialog
 from mca_qt.widgets.completer import CodeCompleter, CompletionProvider
+from mca_qt.widgets.find_replace_bar import FindReplaceBar
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 from mca_qt.icons import python_logo, maya_logo, text_icon
 
@@ -137,6 +138,7 @@ class MCAEditorPanel(QWidget):
         # Build UI components.
         self._setup_ui()
         self._setup_toolbar()
+        self._setup_find_bar()
         self._setup_connections()
 
         # Restore previous session or create a fresh buffer.
@@ -391,6 +393,24 @@ class MCAEditorPanel(QWidget):
         """)
         self._mode_toggle.clicked.connect(self._toggle_mode)
         self._toolbar.addWidget(self._mode_toggle)
+
+    def _setup_find_bar(self):
+        """
+        Create the find/replace bar as an overlay inside the tab widget.
+
+        The bar is a direct child of the QTabWidget (not in any layout)
+        and is positioned right below the tab bar using geometry management.
+        An event filter on the tab widget handles repositioning on resize.
+        """
+        # Parent the find bar to the tab widget so it clips correctly.
+        self._find_bar = FindReplaceBar(self._tab_widget)
+        self._find_bar.search_selections_changed.connect(self._on_search_selections_changed)
+        self._find_bar.closed.connect(self._on_find_bar_closed)
+        # Reposition the overlay when the replace row is toggled (height changes).
+        self._find_bar.geometry_changed.connect(self._reposition_find_bar)
+        # Listen for resize events on the tab widget to reposition the bar.
+        self._tab_widget.installEventFilter(self)
+        self._find_bar.hide()
 
     def _setup_connections(self):
         """Wire up signals between all UI components."""
@@ -1138,6 +1158,9 @@ class MCAEditorPanel(QWidget):
                 editor.textCursor().blockNumber() + 1,
                 editor.textCursor().columnNumber() + 1
             )
+            # If the find bar is open, re-search in the new tab's content.
+            if self._find_bar.isVisible():
+                self._find_bar.set_editor(editor)
 
     def _on_editor_modified(self, editor, modified):
         """Handle editor modification state changes."""
@@ -1424,6 +1447,11 @@ class MCAEditorPanel(QWidget):
                 if tab_index == -1:
                     self._show_new_tab_dialog()
                     return True
+
+        # Reposition the overlay find bar when the tab widget resizes.
+        if obj is self._tab_widget and event.type() == QEvent.Type.Resize:
+            self._reposition_find_bar()
+
         return super().eventFilter(obj, event)
 
     def _show_tab_context_menu(self, pos):
@@ -2142,10 +2170,102 @@ class MCAEditorPanel(QWidget):
             self._show_status("No tabs to convert")
 
     def _show_find(self):
-        self._show_status("Find: Ctrl+F (full search coming soon)")
+        """
+        Show the find bar in find-only mode, pre-filled with any selection.
+
+        Routes Ctrl+F to the output search bar if focus is currently
+        inside the output window, so each panel has its own search.
+        """
+        # If focus is inside the output panel, route to its search bar.
+        focus_widget = QApplication.focusWidget()
+        if focus_widget and self._output.isAncestorOf(focus_widget):
+            self._output.toggle_search_bar()
+            return
+
+        editor = self._current_editor()
+        if not editor:
+            return
+        # Pre-fill with selected text if there's a single-line selection.
+        selected = ""
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            sel = cursor.selectedText()
+            # QTextCursor uses \u2029 for paragraph breaks; only pre-fill
+            # single-line selections to avoid confusing multi-line pastes.
+            if "\u2029" not in sel:
+                selected = sel
+        self._find_bar.show_find(editor, selected)
+        # Reposition the overlay bar now that it's visible.
+        self._reposition_find_bar()
 
     def _show_replace(self):
-        self._show_status("Replace: Ctrl+H (coming soon)")
+        """Show the find bar in find+replace mode."""
+        editor = self._current_editor()
+        if not editor:
+            return
+        selected = ""
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            sel = cursor.selectedText()
+            if "\u2029" not in sel:
+                selected = sel
+        self._find_bar.show_replace(editor, selected)
+        # Reposition the overlay bar now that it's visible.
+        self._reposition_find_bar()
+
+    def _reposition_find_bar(self):
+        """
+        Position the overlay find bar right below the tab bar, right-aligned.
+
+        The bar uses a compact width (up to 550px) rather than spanning
+        the full editor width, and is anchored to the right edge with
+        a small margin. Called from the event filter on resize, and
+        when the bar becomes visible or toggles its replace row.
+        """
+        if not self._find_bar.isVisible():
+            return
+
+        tab_bar = self._tab_widget.tabBar()
+        # Calculate Y offset: below the tab bar if visible, otherwise at top.
+        y_offset = (tab_bar.y() + tab_bar.height()) if tab_bar.isVisible() else 0
+
+        bar_height = self._find_bar.sizeHint().height()
+        parent_width = self._tab_widget.width()
+
+        # Compact width: use sizeHint but cap between min and max bounds.
+        min_bar_width = 450
+        max_bar_width = 580
+        bar_width = max(min_bar_width, min(max_bar_width, parent_width - 40))
+
+        # Right-align with a small margin from the edge.
+        right_margin = 8
+        x_offset = parent_width - bar_width - right_margin
+
+        self._find_bar.setGeometry(x_offset, y_offset, bar_width, bar_height)
+        # Ensure the find bar renders above the editor content.
+        self._find_bar.raise_()
+
+    def _on_search_selections_changed(self, selections):
+        """
+        Apply search-match highlights to the active editor.
+
+        Called by the FindReplaceBar whenever its match set changes.
+
+        :param list selections: List of QTextEdit.ExtraSelection items.
+        """
+        editor = self._current_editor()
+        if editor:
+            editor.set_search_selections(selections)
+
+    def _on_find_bar_closed(self):
+        """
+        Return focus to the editor when the find bar is dismissed.
+        """
+        editor = self._current_editor()
+        if editor:
+            # Clear search highlights when the bar closes.
+            editor.set_search_selections([])
+            editor.setFocus()
 
     def _find_in_files(self):
         self._show_status("Find in Files: coming soon")

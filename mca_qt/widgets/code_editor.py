@@ -398,6 +398,11 @@ class MCACodeEditor(QPlainTextEdit):
         self._diagnostics = []       # Full list of diagnostic dicts from analyzer.
         self._diagnostic_lines = {}  # {line_number: severity} for fast gutter lookup.
 
+        # --- Search highlights (from FindReplaceBar) ---
+        # Stored separately so they can be merged into ExtraSelections
+        # alongside bracket-matching, word-matching, and diagnostics.
+        self._search_selections = []
+
         # Setup monospace font for code editing.
         font = QFont("JetBrains Mono, Consolas, Courier New", 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -528,6 +533,37 @@ class MCACodeEditor(QPlainTextEdit):
             or None to detach.
         """
         self._completer = completer
+
+    def focusOutEvent(self, event):
+        """
+        Dismiss the completer popup when the editor loses focus.
+
+        Covers clicking the sidebar, output panel, another tab, or
+        switching to a different application entirely.
+
+        :param QFocusEvent event: The focus-out event.
+        """
+        if self._completer and self._completer.is_active:
+            self._completer.dismiss()
+        super().focusOutEvent(event)
+
+    # --- Search Highlights ---------------------------------------------------
+
+    def set_search_selections(self, selections):
+        """
+        Set search-match highlights from the FindReplaceBar.
+
+        These are merged into the extra-selections alongside bracket
+        matching, word highlights, and diagnostic underlines on the
+        next cursor-position update.
+
+        :param list selections: List of QTextEdit.ExtraSelection items
+            representing search matches.
+        """
+        self._search_selections = selections
+        # Refresh extra selections immediately so highlights appear
+        # even if the cursor hasn't moved.
+        self._on_cursor_position_changed()
 
     # --- Line Numbers --------------------------------------------------------
 
@@ -669,6 +705,9 @@ class MCACodeEditor(QPlainTextEdit):
 
         # Diagnostic underlines (wavy red/yellow lines under errors/warnings).
         extra_selections.extend(self._build_diagnostic_selections())
+
+        # Search-match highlights from the FindReplaceBar.
+        extra_selections.extend(self._search_selections)
 
         self.setExtraSelections(extra_selections)
 
