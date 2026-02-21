@@ -40,9 +40,10 @@ htmlcov/
 .coverage
 .tox/
 
-# --- Distribution ---
+# --- Distribution / Cython ---
 *.spec
 *.manifest
+*.c
 
 # --- Logs ---
 *.log
