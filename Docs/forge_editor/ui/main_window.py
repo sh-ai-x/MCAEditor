@@ -940,7 +940,6 @@ class ForgeMainWindow(QMainWindow):
             self, "About Forge Editor",
             "<h3>Forge Editor v0.1.0</h3>"
             "<p>Cross-DCC Script IDE</p>"
-            "<p>Spiritual successor to Charcoal Editor 2.<br>"
             "Supports Maya, Blender, Unreal Engine, Unity, and more.</p>"
             "<p><b>Features:</b><br>"
             "• Dual mode: Simple (script editor) &amp; Advanced (IDE)<br>"

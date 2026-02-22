@@ -16,7 +16,7 @@ from datetime import datetime
 
 from mca_qt.qt_compat import (
     QPlainTextEdit, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    Qt, Signal, QEvent,
+    Qt, Signal, QEvent, QComboBox, QFileDialog, QMessageBox,
     QColor, QTextCharFormat, QFont, QTextCursor, QLineEdit, QTimer, QTextEdit,
 )
 
@@ -513,6 +513,9 @@ class OutputWindow(QWidget):
     # Emitted when error or warning counts change. Args: (error_count, warning_count).
     counts_changed = Signal(int, int)
 
+    # Emitted when the user changes the output verbosity combobox.
+    verbosity_changed = Signal(str)
+
     def __init__(self, parent=None):
         """
         Initialize the output window.
@@ -547,42 +550,81 @@ class OutputWindow(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
+        # Shared style for small header buttons.
+        _header_btn_style = """
+            QPushButton {
+                background: transparent;
+                color: #969696;
+                border: none;
+                padding: 0 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background-color: #3e3e42;
+            }
+        """
+
         # Search icon button to toggle the search bar.
         search_btn = QPushButton("\U0001f50d")  # Magnifying glass icon
         search_btn.setFixedHeight(22)
         search_btn.setToolTip("Search Output (Ctrl+F)")
-        search_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #969696;
-                border: none;
-                padding: 0 6px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                color: #ffffff;
-                background-color: #3e3e42;
-            }
-        """)
+        search_btn.setStyleSheet(_header_btn_style)
         search_btn.clicked.connect(self.toggle_search_bar)
         header_layout.addWidget(search_btn)
+
+        # Write to File button — exports output content to a text file.
+        write_btn = QPushButton("\U0001f4be")  # Floppy disk icon
+        write_btn.setFixedHeight(22)
+        write_btn.setToolTip("Write output to file")
+        write_btn.setStyleSheet(_header_btn_style)
+        write_btn.clicked.connect(self._write_to_file)
+        header_layout.addWidget(write_btn)
+
+        # Output verbosity selector — controls how much detail is shown.
+        self._verbosity_combo = QComboBox()
+        self._verbosity_combo.addItems(["Echo All", "Normal", "Minimal"])
+        self._verbosity_combo.setCurrentIndex(1)  # Default to Normal.
+        self._verbosity_combo.setFixedHeight(22)
+        self._verbosity_combo.setFixedWidth(90)
+        self._verbosity_combo.setToolTip("Output verbosity level")
+        self._verbosity_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 1px 4px;
+                font-size: 11px;
+            }
+            QComboBox:hover {
+                border-color: #007acc;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 16px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #969696;
+                margin-right: 4px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d30;
+                color: #cccccc;
+                selection-background-color: #094771;
+                border: 1px solid #555555;
+            }
+        """)
+        self._verbosity_combo.currentTextChanged.connect(self._on_verbosity_changed)
+        header_layout.addWidget(self._verbosity_combo)
 
         # Clear button to wipe all output.
         clear_btn = QPushButton("Clear")
         clear_btn.setFixedHeight(22)
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #969696;
-                border: none;
-                padding: 0 6px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                color: #ffffff;
-                background-color: #3e3e42;
-            }
-        """)
+        clear_btn.setStyleSheet(_header_btn_style)
         clear_btn.clicked.connect(self.clear)
         header_layout.addWidget(clear_btn)
 
@@ -795,6 +837,60 @@ class OutputWindow(QWidget):
         # If search bar is open, dismiss it since content is gone.
         if self._search_bar.isVisible():
             self._search_bar.dismiss()
+
+    def set_verbosity(self, level):
+        """
+        Set the verbosity combobox to the given level without emitting a signal.
+
+        Used by the parent to restore a saved verbosity setting on startup.
+
+        :param str level: One of "echo_all", "normal", or "minimal".
+        """
+        # Map internal setting keys to combobox display text.
+        display_map = {"echo_all": "Echo All", "normal": "Normal", "minimal": "Minimal"}
+        display_text = display_map.get(level, "Normal")
+        # Block signals to avoid a feedback loop during initialization.
+        self._verbosity_combo.blockSignals(True)
+        self._verbosity_combo.setCurrentText(display_text)
+        self._verbosity_combo.blockSignals(False)
+
+    def _on_verbosity_changed(self, text):
+        """
+        Handle verbosity combobox selection change.
+
+        Converts the display text to a lowercase key and emits the
+        ``verbosity_changed`` signal so the parent panel can apply it.
+
+        :param str text: Display text from the combobox (e.g. "Echo All").
+        """
+        # Map combobox display text to internal setting keys.
+        key_map = {"Echo All": "echo_all", "Normal": "normal", "Minimal": "minimal"}
+        level = key_map.get(text, "normal")
+        self.verbosity_changed.emit(level)
+
+    def _write_to_file(self):
+        """
+        Export all output content to a user-selected text file.
+
+        Opens a save dialog and writes the plain text contents of the
+        output panel to the chosen file path.
+        """
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Write Output to File", "",
+            "Text Files (*.txt);;Log Files (*.log);;All Files (*.*)"
+        )
+        if not filepath:
+            return
+        try:
+            text = self._output.toPlainText()
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.write_info("Output written to: {}".format(filepath))
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not write output:\n{}".format(str(exc))
+            )
 
     def set_show_timestamps(self, show):
         """

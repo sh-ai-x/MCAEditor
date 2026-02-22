@@ -186,6 +186,9 @@ class MCASettings:
         "window_geometry": None,
         "window_state": None,
         "splitter_sizes": None,
+        "center_splitter_sizes": None,   # Vertical splitter between output and editor.
+        "output_visible": True,          # Whether the output panel is shown.
+        "sidebar_visible": True,         # Whether the sidebar is shown (Advanced mode).
 
         # NOTE: Future tier/licensing hooks would add keys here:
         #   "license_key", "license_tier" (free/standard/pro/studio)

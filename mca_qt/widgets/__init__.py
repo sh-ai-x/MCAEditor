@@ -12,3 +12,4 @@ from .ai_panel import AIPanel
 from .settings_dialog import SettingsDialog
 from .completer import CodeCompleter, CompletionProvider
 from .find_replace_bar import FindReplaceBar
+from .quick_open import GoToFilePopup, GoToSymbolPopup

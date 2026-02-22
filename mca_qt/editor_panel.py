@@ -47,6 +47,7 @@ from mca_qt.widgets.connection_dialog import ConnectionDialog
 from mca_qt.widgets.new_tab_dialog import NewTabDialog
 from mca_qt.widgets.completer import CodeCompleter, CompletionProvider
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
+from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 from mca_qt.icons import python_logo, maya_logo, text_icon
 
@@ -112,7 +113,8 @@ class MCAEditorPanel(QWidget):
         self._editors = []  # List of (editor, tab_name, file_path) tuples
         self._editor_mode = settings.get_editor_mode()
         self._closed_files = []  # Track recently closed files for reopen feature.
-        self._default_font_size = 12  # Base font size for zoom calculations.
+        # Restore saved font size (falls back to 12 if never changed).
+        self._default_font_size = settings.get("font_size", 12)
         self._verbosity_level = "normal"  # Output verbosity: echo_all, normal, minimal.
         self._action_registry = {}  # name -> QAction, for keyboard shortcut editor.
         # Persistent namespace for local Python execution so variables survive
@@ -154,6 +156,9 @@ class MCAEditorPanel(QWidget):
 
         # Apply the saved editor mode.
         self._apply_editor_mode()
+
+        # Override mode defaults with user's last-saved UI state.
+        self._restore_ui_state()
 
         # Auto-detect running DCCs after a short delay.
         QTimer.singleShot(1000, self._auto_detect_dccs)
@@ -245,8 +250,58 @@ class MCAEditorPanel(QWidget):
         self._tab_widget.setTabsClosable(True)
         self._tab_widget.setMovable(True)
         self._tab_widget.setDocumentMode(True)
+        # Enable scroll arrows when tabs overflow the available width.
+        self._tab_widget.setUsesScrollButtons(True)
+        self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
+        # Offset the tab bar to the right so overlay nav buttons don't overlap tabs.
+        self._tab_widget.setStyleSheet("QTabWidget::tab-bar { left: 60px; }")
         self._tab_widget.tabCloseRequested.connect(self._close_tab)
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        # --- Tab bar overlay buttons ---
+        # Document mode hides corner widgets, so we parent overlay buttons
+        # directly to the tab widget and position them via event filter.
+        # Shared style for all tab-bar overlay buttons.
+        _tab_btn_style = """
+            QPushButton {{
+                background: transparent;
+                color: {color};
+                border: none;
+                border-radius: 3px;
+                font-size: {size};
+                font-weight: bold;
+                padding: {padding};
+            }}
+            QPushButton:hover {{
+                background-color: #3e3e42;
+            }}
+            QPushButton:pressed {{
+                background-color: #094771;
+            }}
+        """
+
+        # Left/right scroll arrows — always visible on the left side.
+        self._scroll_left_btn = QPushButton("\u2039", self._tab_widget)
+        self._scroll_left_btn.setToolTip("Scroll tabs left")
+        self._scroll_left_btn.setFixedSize(28, 28)
+        self._scroll_left_btn.setStyleSheet(_tab_btn_style.format(
+            color="#999999", size="24px", padding="0 0 4px 0"))
+        self._scroll_left_btn.clicked.connect(self._scroll_tabs_left)
+
+        self._scroll_right_btn = QPushButton("\u203a", self._tab_widget)
+        self._scroll_right_btn.setToolTip("Scroll tabs right")
+        self._scroll_right_btn.setFixedSize(28, 28)
+        self._scroll_right_btn.setStyleSheet(_tab_btn_style.format(
+            color="#999999", size="24px", padding="0 0 4px 0"))
+        self._scroll_right_btn.clicked.connect(self._scroll_tabs_right)
+
+        # "..." (vertical dots) button for the tab list dropdown.
+        self._tab_list_btn = QPushButton("\u22ee", self._tab_widget)
+        self._tab_list_btn.setToolTip("List all open tabs")
+        self._tab_list_btn.setFixedSize(28, 28)
+        self._tab_list_btn.setStyleSheet(_tab_btn_style.format(
+            color="#999999", size="18px", padding="0"))
+        self._tab_list_btn.clicked.connect(self._show_tab_list_menu)
 
         # Install event filter on the tab bar so we can intercept
         # double-clicks on empty space to create new tabs.
@@ -306,11 +361,6 @@ class MCAEditorPanel(QWidget):
         """)
         # Insert toolbar at the top of center layout.
         self._center_layout.insertWidget(0, self._toolbar)
-
-        # --- Save button ---
-        self._toolbar.addAction("Save").triggered.connect(self._save_file)
-
-        self._toolbar.addSeparator()
 
         # --- Language selector ---
         lang_label = QLabel("  Language: ")
@@ -408,9 +458,13 @@ class MCAEditorPanel(QWidget):
         self._find_bar.closed.connect(self._on_find_bar_closed)
         # Reposition the overlay when the replace row is toggled (height changes).
         self._find_bar.geometry_changed.connect(self._reposition_find_bar)
-        # Listen for resize events on the tab widget to reposition the bar.
+        # Listen for resize events on the tab widget to reposition overlays.
         self._tab_widget.installEventFilter(self)
         self._find_bar.hide()
+
+        # Position the "..." tab list button after a short delay so the
+        # tab widget has its final geometry before we calculate placement.
+        QTimer.singleShot(0, self._reposition_tab_nav_buttons)
 
     def _setup_connections(self):
         """Wire up signals between all UI components."""
@@ -425,6 +479,13 @@ class MCAEditorPanel(QWidget):
 
         # Output window error/warning counts -> forwarding signal for host windows.
         self._output.counts_changed.connect(self.output_counts_changed.emit)
+
+        # Output verbosity combobox -> sync with panel's verbosity setting.
+        self._output.verbosity_changed.connect(self._set_verbosity)
+        # Restore the saved verbosity level in the output combobox.
+        saved_verbosity = self._settings.get("output_verbosity", "normal")
+        self._verbosity_level = saved_verbosity
+        self._output.set_verbosity(saved_verbosity)
 
         # Adapter manager -> UI status updates.
         self._adapter_manager.set_connection_callback(self._update_dcc_status)
@@ -905,6 +966,56 @@ class MCAEditorPanel(QWidget):
                 self._advanced_mode_action.setChecked(True)
             self.mode_changed.emit("Advanced")
 
+    def _restore_ui_state(self):
+        """
+        Restore saved UI state from settings, overriding mode defaults.
+
+        Must be called AFTER ``_apply_editor_mode()`` because mode
+        application resets splitter sizes and panel visibility to
+        defaults. This method layers the user's last-saved state on top.
+        """
+        s = self._settings
+
+        # --- Main splitter (sidebar | editor | AI) ---
+        saved_main = s.get("splitter_sizes")
+        if saved_main:
+            # QSettings may return strings — coerce to int.
+            try:
+                self._main_splitter.setSizes([int(v) for v in saved_main])
+            except (TypeError, ValueError):
+                pass
+
+        # --- Center splitter (output | editor tabs) ---
+        saved_center = s.get("center_splitter_sizes")
+        if saved_center:
+            try:
+                self._center_splitter.setSizes([int(v) for v in saved_center])
+            except (TypeError, ValueError):
+                pass
+
+        # --- Panel visibility ---
+        # Only restore sidebar visibility in Advanced mode (Simple always hides it).
+        if self._editor_mode == EditorMode.ADVANCED:
+            sidebar_vis = s.get("sidebar_visible", True)
+            self._sidebar.setVisible(sidebar_vis)
+
+        output_vis = s.get("output_visible", True)
+        self._output.setVisible(output_vis)
+
+        ai_vis = s.get("ai_panel_visible", False)
+        self._ai_panel.setVisible(ai_vis)
+
+        # --- Whitespace rendering ---
+        show_ws = s.get("show_whitespace", False)
+        if show_ws:
+            self._whitespace_action.setChecked(True)
+            for editor, name, path in self._editors:
+                editor.set_show_whitespace(True)
+
+        # --- Font size (apply saved zoom level to all open editors) ---
+        if self._default_font_size != 12:
+            self._apply_font_size()
+
     def _toggle_mode(self):
         """Toggle between simple and advanced mode."""
         if self._editor_mode == EditorMode.SIMPLE:
@@ -913,17 +1024,22 @@ class MCAEditorPanel(QWidget):
             self._set_editor_mode(EditorMode.SIMPLE)
 
     def _toggle_sidebar(self):
-        """Toggle sidebar visibility."""
-        self._sidebar.setVisible(not self._sidebar.isVisible())
+        """Toggle sidebar visibility and persist the choice."""
+        visible = not self._sidebar.isVisible()
+        self._sidebar.setVisible(visible)
+        self._settings.set("sidebar_visible", visible)
 
     def _toggle_output(self):
-        """Toggle output window visibility."""
-        self._output.setVisible(not self._output.isVisible())
+        """Toggle output window visibility and persist the choice."""
+        visible = not self._output.isVisible()
+        self._output.setVisible(visible)
+        self._settings.set("output_visible", visible)
 
     def _toggle_ai_panel(self):
-        """Toggle AI panel visibility, expanding it if needed."""
+        """Toggle AI panel visibility, expanding it if needed, and persist."""
         visible = not self._ai_panel.isVisible()
         self._ai_panel.setVisible(visible)
+        self._settings.set("ai_panel_visible", visible)
         if visible:
             sizes = self._main_splitter.sizes()
             if sizes[-1] == 0:
@@ -972,6 +1088,9 @@ class MCAEditorPanel(QWidget):
 
         # Attach a code completer to the new buffer.
         self._attach_completer(editor)
+
+        # Inherit current font size and whitespace setting so new tabs match.
+        self._apply_editor_state(editor)
 
         lang_map = {"python": "Python", "mel": "MEL", "text": "Text"}
         tab_name = lang_map.get(editor.language, "Python")
@@ -1030,6 +1149,9 @@ class MCAEditorPanel(QWidget):
 
         # Attach a code completer to the opened file's editor.
         self._attach_completer(editor)
+
+        # Inherit current font size and whitespace setting so opened tabs match.
+        self._apply_editor_state(editor)
 
         tab_name = os.path.basename(filepath)
         idx = self._tab_widget.addTab(editor, tab_name)
@@ -1161,6 +1283,48 @@ class MCAEditorPanel(QWidget):
             # If the find bar is open, re-search in the new tab's content.
             if self._find_bar.isVisible():
                 self._find_bar.set_editor(editor)
+
+    def _show_tab_list_menu(self):
+        """
+        Show a dropdown menu listing all open tabs for quick navigation.
+
+        The currently active tab is shown with a checkmark. Clicking an
+        entry switches to that tab. The menu appears below the '...' button.
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #cccccc;
+                border: 1px solid #3f3f46;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 4px 24px 4px 12px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+            }
+            QMenu::indicator {
+                width: 12px;
+                height: 12px;
+                margin-left: 4px;
+            }
+        """)
+
+        current_idx = self._tab_widget.currentIndex()
+        for i in range(self._tab_widget.count()):
+            tab_text = self._tab_widget.tabText(i)
+            action = menu.addAction(tab_text)
+            action.setCheckable(True)
+            action.setChecked(i == current_idx)
+            # Capture loop variable with default argument.
+            action.triggered.connect(lambda _checked=None, idx=i: self._tab_widget.setCurrentIndex(idx))
+
+        # Position the menu below the "..." button.
+        menu.exec(self._tab_list_btn.mapToGlobal(
+            self._tab_list_btn.rect().bottomLeft()
+        ))
 
     def _on_editor_modified(self, editor, modified):
         """Handle editor modification state changes."""
@@ -1448,11 +1612,76 @@ class MCAEditorPanel(QWidget):
                     self._show_new_tab_dialog()
                     return True
 
-        # Reposition the overlay find bar when the tab widget resizes.
+        # Reposition overlay widgets when the tab widget resizes.
         if obj is self._tab_widget and event.type() == QEvent.Type.Resize:
             self._reposition_find_bar()
+            self._reposition_tab_nav_buttons()
 
         return super().eventFilter(obj, event)
+
+    def _reposition_tab_nav_buttons(self):
+        """
+        Position the scroll arrows and tab list button on the tab bar.
+
+        Left/right arrows sit at the far left; the '...' button sits
+        at the far right. All are vertically centered on the tab bar.
+        Called from the event filter on resize and once after init.
+        """
+        tab_bar = self._tab_widget.tabBar()
+        bar_y = tab_bar.y()
+        bar_h = tab_bar.height()
+
+        # --- Left arrow ---
+        lw = self._scroll_left_btn.width()
+        lh = self._scroll_left_btn.height()
+        self._scroll_left_btn.move(2, bar_y + (bar_h - lh) // 2)
+        self._scroll_left_btn.raise_()
+
+        # --- Right arrow (next to left arrow) ---
+        rw = self._scroll_right_btn.width()
+        rh = self._scroll_right_btn.height()
+        self._scroll_right_btn.move(2 + lw, bar_y + (bar_h - rh) // 2)
+        self._scroll_right_btn.raise_()
+
+        # --- "..." tab list button on the far right ---
+        tw = self._tab_list_btn.width()
+        th = self._tab_list_btn.height()
+        x = self._tab_widget.width() - tw - 2
+        self._tab_list_btn.move(x, bar_y + (bar_h - th) // 2)
+        self._tab_list_btn.raise_()
+
+    def _scroll_tabs_left(self):
+        """
+        Scroll the tab bar left by clicking Qt's internal scroll button.
+
+        Qt creates hidden QToolButtons named 'ScrollLeftButton' and
+        'ScrollRightButton' when ``setUsesScrollButtons(True)`` is set.
+        We find and click them to scroll without changing the active tab.
+        Does nothing if tabs aren't overflowing.
+        """
+        try:
+            from PySide6.QtWidgets import QToolButton
+        except ImportError:
+            from PySide2.QtWidgets import QToolButton
+        for child in self._tab_widget.findChildren(QToolButton):
+            if child.objectName() == "ScrollLeftButton" and child.isVisible():
+                child.click()
+                return
+
+    def _scroll_tabs_right(self):
+        """
+        Scroll the tab bar right by clicking Qt's internal scroll button.
+
+        Does nothing if tabs aren't overflowing.
+        """
+        try:
+            from PySide6.QtWidgets import QToolButton
+        except ImportError:
+            from PySide2.QtWidgets import QToolButton
+        for child in self._tab_widget.findChildren(QToolButton):
+            if child.objectName() == "ScrollRightButton" and child.isVisible():
+                child.click()
+                return
 
     def _show_tab_context_menu(self, pos):
         """
@@ -2328,8 +2557,40 @@ class MCAEditorPanel(QWidget):
         self._settings.set("word_wrap", checked)
 
     def _toggle_whitespace(self, checked):
+        """
+        Toggle whitespace rendering on all open editors.
+
+        Shows dots for spaces and arrows for tabs when enabled.
+
+        :param bool checked: Whether whitespace rendering is enabled.
+        """
         self._settings.set("show_whitespace", checked)
+        # Apply to all open editor tabs.
+        for editor, name, path in self._editors:
+            editor.set_show_whitespace(checked)
         self._show_status("Whitespace rendering: {}".format("on" if checked else "off"))
+
+    def _apply_editor_state(self, editor):
+        """
+        Apply the current font size and whitespace setting to a single editor.
+
+        Called when a new tab is created so it inherits the active zoom
+        level and whitespace rendering state from the session.
+
+        :param MCACodeEditor editor: The editor to configure.
+        """
+        # Inherit font size if user has zoomed.
+        if self._default_font_size != 12:
+            font = editor.font()
+            font.setPointSize(self._default_font_size)
+            editor.setFont(font)
+            editor.setTabStopDistance(
+                editor.fontMetrics().horizontalAdvance(" ") * editor._tab_size
+            )
+
+        # Inherit whitespace rendering.
+        if self._settings.get("show_whitespace", False):
+            editor.set_show_whitespace(True)
 
     def _on_zoom_requested(self, direction):
         """
@@ -2383,10 +2644,48 @@ class MCAEditorPanel(QWidget):
             self._tab_widget.setCurrentIndex(idx)
 
     def _go_to_file(self):
-        self._show_status("Go to File: coming soon")
+        """
+        Open the Go to File popup (Ctrl+P).
+
+        Scans workspace folders from the sidebar for files, then presents
+        a fuzzy-filtered list. Selecting a file opens it in the editor.
+        """
+        # Collect workspace folders from the sidebar's workspace panel.
+        folders = []
+        if hasattr(self, "_sidebar") and self._sidebar:
+            panel = getattr(self._sidebar, "workspace_panel", None)
+            if panel:
+                folders = panel.get_workspace_folders()
+
+        if not folders:
+            self._show_status("No workspace folders — add one first")
+            return
+
+        # Show the popup; on confirm it calls _open_file_path.
+        popup = GoToFilePopup(self, folders, self._open_file_path)
+        popup.exec()
 
     def _go_to_symbol(self):
-        self._show_status("Go to Symbol: coming soon")
+        """
+        Open the Go to Symbol popup (Ctrl+Shift+O).
+
+        Reads the code outline from the current editor and presents a
+        fuzzy-filtered list of classes, functions, and methods.
+        """
+        editor = self._current_editor()
+        if not editor:
+            self._show_status("No active editor")
+            return
+
+        # Get the outline from the editor's built-in parser.
+        outline = editor.get_code_outline()
+        if not outline:
+            self._show_status("No symbols found in current file")
+            return
+
+        # Show the popup; on confirm it calls editor.go_to_line().
+        popup = GoToSymbolPopup(self, outline, editor)
+        popup.exec()
 
     def _show_goto_line(self):
         editor = self._current_editor()
@@ -2403,8 +2702,23 @@ class MCAEditorPanel(QWidget):
     # --- Output handlers ---
 
     def _set_verbosity(self, level):
+        """
+        Apply the given output verbosity level.
+
+        Syncs the output header combobox, the Output menu action group,
+        and persists the setting.
+
+        :param str level: One of "echo_all", "normal", or "minimal".
+        """
         self._verbosity_level = level
         self._settings.set("output_verbosity", level)
+        # Keep the output header combobox in sync.
+        self._output.set_verbosity(level)
+        # Keep the Output menu radio group in sync.
+        for act in self._verbosity_group.actions():
+            if act.data() == level:
+                act.setChecked(True)
+                break
         self._show_status("Verbosity: {}".format(level))
 
     def _toggle_line_numbers_in_errors(self, checked):
@@ -2469,7 +2783,6 @@ class MCAEditorPanel(QWidget):
             self, "About MCA Editor",
             "<h3>MCA Editor v0.1.0</h3>"
             "<p>Cross-DCC Script IDE</p>"
-            "<p>Spiritual successor to Charcoal Editor 2.<br>"
             "Supports Maya (with future expansion to Blender, Unreal, Unity, and more).</p>"
             "<p><b>Features:</b><br>"
             "- Dual mode: Simple (script editor) &amp; Advanced (IDE)<br>"
@@ -2498,11 +2811,21 @@ class MCAEditorPanel(QWidget):
 
     def save_window_state(self, settings):
         """
-        Save splitter sizes and workspace folders to settings (called by host on close).
+        Save splitter sizes, panel visibility, and workspace folders to settings.
+
+        Called by the host window on close so the next launch can
+        restore the exact layout.
 
         :param MCASettings settings: Settings to save to.
         """
+        # Splitter positions.
         settings.set("splitter_sizes", self._main_splitter.sizes())
+        settings.set("center_splitter_sizes", self._center_splitter.sizes())
+
+        # Panel visibility.
+        settings.set("output_visible", self._output.isVisible())
+        settings.set("sidebar_visible", self._sidebar.isVisible())
+        settings.set("ai_panel_visible", self._ai_panel.isVisible())
 
         # Persist workspace folders so they're restored on next launch.
         folders = self._sidebar.workspace_panel.get_workspace_folders()

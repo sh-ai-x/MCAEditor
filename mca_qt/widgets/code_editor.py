@@ -565,6 +565,27 @@ class MCACodeEditor(QPlainTextEdit):
         # even if the cursor hasn't moved.
         self._on_cursor_position_changed()
 
+    # --- Whitespace Rendering ------------------------------------------------
+
+    def set_show_whitespace(self, enabled):
+        """
+        Toggle visible whitespace characters (dots for spaces, arrows for tabs).
+
+        Uses QTextOption.ShowTabsAndSpaces to render whitespace glyphs
+        directly in the editor viewport.
+
+        :param bool enabled: True to show whitespace, False to hide.
+        """
+        from mca_qt.qt_compat import QTextOption
+        option = self.document().defaultTextOption()
+        flags = option.flags()
+        if enabled:
+            flags |= QTextOption.Flag.ShowTabsAndSpaces
+        else:
+            flags &= ~QTextOption.Flag.ShowTabsAndSpaces
+        option.setFlags(flags)
+        self.document().setDefaultTextOption(option)
+
     # --- Line Numbers --------------------------------------------------------
 
     def line_number_area_width(self):

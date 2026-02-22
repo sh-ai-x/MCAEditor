@@ -1,6 +1,6 @@
 # Forge Editor — Cross-DCC Script IDE Prototype
 
-Spiritual successor to Charcoal Editor 2. Built for Maya, Blender, Unreal, Unity, and beyond.
+Built for Maya, Blender, Unreal, Unity, and beyond.
 
 ## Quick Start
 

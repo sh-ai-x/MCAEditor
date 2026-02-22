@@ -411,6 +411,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not message or not message.strip():
             return
 
+        # Suppress the harmless "Nothing is selected" error from Maya's
+        # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
+        # during focus transitions and nothing is selected in the viewport.
+        if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
+            return
+
         text = message.rstrip()
         output = self._panel._output
 

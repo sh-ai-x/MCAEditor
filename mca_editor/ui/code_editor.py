@@ -385,6 +385,11 @@ class MCACodeEditor(QPlainTextEdit):
         self._show_indent_guides = True
         self._highlight_matching_words = True
 
+        # --- Search highlights (from FindReplaceBar) ---
+        # Stored separately so they can be merged into ExtraSelections
+        # alongside bracket-matching and word-matching highlights.
+        self._search_selections = []
+
         # Setup monospace font for code editing.
         font = QFont("JetBrains Mono, Consolas, Courier New", 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -581,6 +586,44 @@ class MCACodeEditor(QPlainTextEdit):
             QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height())
         )
 
+    # --- Search Highlights ---------------------------------------------------
+
+    def set_search_selections(self, selections):
+        """
+        Set search-match highlights from the FindReplaceBar.
+
+        These are merged into the extra-selections alongside bracket
+        matching and word highlights on the next cursor-position update.
+
+        :param list selections: List of QTextEdit.ExtraSelection items
+            representing search matches.
+        """
+        self._search_selections = selections
+        # Refresh extra selections immediately so highlights appear
+        # even if the cursor hasn't moved.
+        self._on_cursor_position_changed()
+
+    # --- Whitespace Rendering ------------------------------------------------
+
+    def set_show_whitespace(self, enabled):
+        """
+        Toggle visible whitespace characters (dots for spaces, arrows for tabs).
+
+        Uses QTextOption.ShowTabsAndSpaces to render whitespace glyphs
+        directly in the editor viewport.
+
+        :param bool enabled: True to show whitespace, False to hide.
+        """
+        from PySide6.QtGui import QTextOption
+        option = self.document().defaultTextOption()
+        flags = option.flags()
+        if enabled:
+            flags |= QTextOption.Flag.ShowTabsAndSpaces
+        else:
+            flags &= ~QTextOption.Flag.ShowTabsAndSpaces
+        option.setFlags(flags)
+        self.document().setDefaultTextOption(option)
+
     # --- Cursor Position & Highlights ----------------------------------------
 
     def _on_cursor_position_changed(self):
@@ -610,6 +653,9 @@ class MCACodeEditor(QPlainTextEdit):
         # Matching word highlights (all occurrences of word under cursor).
         if self._highlight_matching_words:
             extra_selections.extend(self._find_matching_words())
+
+        # Search-match highlights from the FindReplaceBar.
+        extra_selections.extend(self._search_selections)
 
         self.setExtraSelections(extra_selections)
 

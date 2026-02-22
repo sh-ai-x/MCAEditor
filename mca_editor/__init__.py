@@ -1,7 +1,6 @@
 """
 MCA Editor - Cross-DCC Script IDE.
 
-Spiritual successor to Charcoal Editor 2, built for the modern pipeline.
 Supports Maya (with future expansion to Blender, Unreal, Unity, and more).
 
 This is the top-level package. Import version and app metadata from here.

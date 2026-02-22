@@ -72,7 +72,7 @@ if PYSIDE_VERSION == 6:
         QPalette, QColor, QFont, QFontDatabase, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor, QAction, QActionGroup,
-        QIcon, QPixmap, QPen, QPainterPath,
+        QIcon, QPixmap, QPen, QPainterPath, QTextOption,
     )
 
 
@@ -105,7 +105,7 @@ else:
         QPalette, QColor, QFont, QFontDatabase, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor,
-        QIcon, QPixmap, QPen, QPainterPath,
+        QIcon, QPixmap, QPen, QPainterPath, QTextOption,
     )
 
     # -----------------------------------------------------------------------
@@ -207,6 +207,13 @@ else:
         _patch_enum_group(Qt, "ContextMenuPolicy", [
             "NoContextMenu", "DefaultContextMenu", "ActionsContextMenu",
             "CustomContextMenu", "PreventContextMenu",
+        ])
+        _patch_enum_group(Qt, "TextElideMode", [
+            "ElideLeft", "ElideRight", "ElideMiddle", "ElideNone",
+        ])
+        _patch_enum_group(Qt, "Corner", [
+            "TopLeftCorner", "TopRightCorner",
+            "BottomLeftCorner", "BottomRightCorner",
         ])
 
         # --- QPalette enums ---

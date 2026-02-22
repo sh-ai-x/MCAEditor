@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Forge Editor - Cross-DCC Script IDE
-Spiritual successor to Charcoal Editor 2, built for the modern pipeline.
+built for the modern pipeline.
 Supports Maya, Blender, Unreal Engine, Unity, and more.
 """
 
