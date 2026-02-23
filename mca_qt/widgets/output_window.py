@@ -441,10 +441,17 @@ class _OutputTextEdit(QPlainTextEdit):
     to handle Ctrl+C and Ctrl+A explicitly, then accepts the event so
     it never propagates to Maya's hotkey layer.
 
+    Also supports Ctrl+Scroll Wheel zoom to change the output font
+    size, emitting ``zoom_requested`` so the parent can persist the
+    new size.
+
     Also sets ``TextSelectableByMouse | TextSelectableByKeyboard``
     interaction flags to ensure mouse selection always transfers
     keyboard focus to this widget.
     """
+
+    # Emitted when the user Ctrl+scrolls to zoom. +1 = zoom in, -1 = zoom out.
+    zoom_requested = Signal(int)
 
     def __init__(self, parent=None):
         """
@@ -462,6 +469,26 @@ class _OutputTextEdit(QPlainTextEdit):
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
+
+    def wheelEvent(self, event):
+        """
+        Handle Ctrl+scroll wheel for output font size zoom.
+
+        Emits ``zoom_requested(+1)`` for scroll-up (zoom in) and
+        ``zoom_requested(-1)`` for scroll-down (zoom out). Without
+        Ctrl held, scrolling behaves normally.
+
+        :param QWheelEvent event: The wheel event.
+        """
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_requested.emit(1)
+            elif delta < 0:
+                self.zoom_requested.emit(-1)
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def keyPressEvent(self, event):
         """
@@ -516,6 +543,9 @@ class OutputWindow(QWidget):
     # Emitted when the user changes the output verbosity combobox.
     verbosity_changed = Signal(str)
 
+    # Emitted when the output font size changes (new_size).
+    font_size_changed = Signal(int)
+
     def __init__(self, parent=None):
         """
         Initialize the output window.
@@ -528,6 +558,9 @@ class OutputWindow(QWidget):
         # Running tallies of errors and warnings since last clear.
         self._error_count = 0
         self._warning_count = 0
+
+        # Current output font size (overridden by restore_font_size).
+        self._font_size = 11
 
         self._setup_ui()
 
@@ -649,6 +682,9 @@ class OutputWindow(QWidget):
                 padding: 4px;
             }
         """)
+
+        # Connect Ctrl+Scroll zoom signal from the text edit.
+        self._output.zoom_requested.connect(self._on_zoom_requested)
 
         layout.addWidget(self._output)
 
@@ -853,6 +889,40 @@ class OutputWindow(QWidget):
         self._verbosity_combo.blockSignals(True)
         self._verbosity_combo.setCurrentText(display_text)
         self._verbosity_combo.blockSignals(False)
+
+    # --- Output Font Size Zoom -----------------------------------------------
+
+    def _on_zoom_requested(self, direction):
+        """
+        Handle Ctrl+scroll wheel zoom on the output text area.
+
+        :param int direction: +1 to zoom in, -1 to zoom out.
+        """
+        if direction > 0:
+            self._font_size += 1
+        elif direction < 0 and self._font_size > 6:
+            self._font_size -= 1
+        else:
+            return
+
+        # Apply the new font size to the output text area.
+        font = self._output.font()
+        font.setPointSize(self._font_size)
+        self._output.setFont(font)
+
+        # Notify the parent so it can persist the new size.
+        self.font_size_changed.emit(self._font_size)
+
+    def set_font_size(self, size):
+        """
+        Set the output font size (e.g. restoring from settings on startup).
+
+        :param int size: The font point size to apply.
+        """
+        self._font_size = size
+        font = self._output.font()
+        font.setPointSize(size)
+        self._output.setFont(font)
 
     def _on_verbosity_changed(self, text):
         """

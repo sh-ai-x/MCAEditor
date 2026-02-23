@@ -1075,6 +1075,13 @@ class MCAMainWindow(QMainWindow):
         # Restore the saved verbosity level in the output combobox.
         self._output.set_verbosity(self._verbosity_level)
 
+        # Output font size zoom -> persist to settings.
+        self._output.font_size_changed.connect(self._on_output_font_size_changed)
+        # Restore saved output font size.
+        saved_output_size = self._settings.get("output_font_size", 11)
+        if saved_output_size != 11:
+            self._output.set_font_size(saved_output_size)
+
         # Adapter manager -> UI status updates.
         self._adapter_manager.set_connection_callback(self._update_dcc_status)
 
@@ -2390,6 +2397,15 @@ class MCAMainWindow(QMainWindow):
         self._statusbar.showMessage(
             "Font size: {}pt".format(self._default_font_size), 3000
         )
+
+    def _on_output_font_size_changed(self, size):
+        """
+        Persist the output panel font size when the user Ctrl+scrolls.
+
+        :param int size: The new font point size.
+        """
+        self._settings.set("output_font_size", size)
+        self._settings.sync()
 
     # =========================================================================
     # Go Menu Handlers
