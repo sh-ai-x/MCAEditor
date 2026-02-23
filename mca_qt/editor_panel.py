@@ -1880,7 +1880,14 @@ class MCAEditorPanel(QWidget):
         """Rebuild the Recent Files submenu."""
         if not self._recent_files_menu:
             return
-        self._recent_files_menu.clear()
+
+        # Guard against Qt having destroyed the C++ QMenu while the
+        # Python reference still exists (e.g. after menu bar rebuild).
+        try:
+            self._recent_files_menu.clear()
+        except RuntimeError:
+            self._recent_files_menu = None
+            return
         reopen = self._recent_files_menu.addAction("Reopen Closed File")
         reopen.triggered.connect(self._reopen_closed_file)
         reopen.setEnabled(len(self._closed_files) > 0)
