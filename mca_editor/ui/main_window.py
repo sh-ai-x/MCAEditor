@@ -1356,8 +1356,7 @@ class MCAMainWindow(QMainWindow):
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(editor.toPlainText())
             editor.document().setModified(False)
-            self._output.write_info("Saved: {}".format(filepath))
-            logger.info("Saved file: %s", filepath)
+            logger.debug("Saved file: %s", filepath)
         except Exception as exc:
             QMessageBox.warning(self, "Error", "Could not save file:\n{}".format(str(exc)))
 

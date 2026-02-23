@@ -19,6 +19,7 @@ from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QLabel, QPushButton, QFileDialog, QLineEdit,
     QMenu, QApplication, QInputDialog, QMessageBox,
+    QAbstractItemView,
     Qt, Signal, QFileSystemWatcher,
     QColor,
 )
@@ -335,6 +336,160 @@ class OpenEditorsPanel(QWidget):
 
 
 # =============================================================================
+# Drag-and-Drop Workspace Tree
+# =============================================================================
+
+class _WorkspaceTree(QTreeWidget):
+    """
+    QTreeWidget subclass that supports drag-and-drop to move files and folders.
+
+    Dragging a file or folder onto another folder moves it on disk via
+    ``shutil.move``, then emits ``file_moved`` so the parent panel can
+    refresh the tree.
+    """
+
+    # Emitted after a successful move: (old_path, new_path).
+    file_moved = Signal(str, str)
+
+    def __init__(self, parent=None):
+        """
+        Initialize the drag-drop-enabled workspace tree.
+
+        :param QWidget parent: Optional parent widget.
+        """
+        super().__init__(parent)
+
+        # Enable internal drag-and-drop rearrangement.
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+
+    # --- Drag-and-Drop Handlers ----------------------------------------------
+
+    def dragEnterEvent(self, event):
+        """
+        Accept the drag if the source item carries a valid path.
+
+        :param QDragEnterEvent event: The drag-enter event.
+        """
+        # Only accept drags originating from within this tree.
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        """
+        Accept the drag when hovering over a folder (or tree background).
+
+        :param QDragMoveEvent event: The drag-move event.
+        """
+        # Determine what item is under the cursor.
+        target_item = self.itemAt(event.position().toPoint())
+
+        if target_item is None:
+            # Hovering over empty tree background — reject (no root-level drop).
+            event.ignore()
+            return
+
+        target_path = target_item.data(0, Qt.ItemDataRole.UserRole)
+        if not target_path:
+            event.ignore()
+            return
+
+        # Accept drops on folders, or on files (we'll resolve to the parent folder).
+        if os.path.exists(target_path):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """
+        Move the dragged file/folder to the target location on disk.
+
+        If the drop target is a file, the item is moved into that file's
+        parent directory. Validates that the move is safe before proceeding.
+
+        :param QDropEvent event: The drop event.
+        """
+        # --- Identify source item and path ---
+        source_item = self.currentItem()
+        if source_item is None:
+            event.ignore()
+            return
+
+        source_path = source_item.data(0, Qt.ItemDataRole.UserRole)
+        if not source_path or not os.path.exists(source_path):
+            event.ignore()
+            return
+
+        # --- Identify target item and resolve to a folder ---
+        target_item = self.itemAt(event.position().toPoint())
+        if target_item is None:
+            event.ignore()
+            return
+
+        target_path = target_item.data(0, Qt.ItemDataRole.UserRole)
+        if not target_path:
+            event.ignore()
+            return
+
+        # If the target is a file, use its parent folder.
+        if os.path.isfile(target_path):
+            target_folder = os.path.dirname(target_path)
+        elif os.path.isdir(target_path):
+            target_folder = target_path
+        else:
+            event.ignore()
+            return
+
+        # --- Compute destination path ---
+        basename = os.path.basename(source_path)
+        dest_path = os.path.join(target_folder, basename)
+
+        # --- Validation checks ---
+
+        # No-op: source and destination are in the same folder already.
+        if os.path.dirname(source_path) == target_folder:
+            event.ignore()
+            return
+
+        # Prevent moving a folder into itself or a subdirectory of itself.
+        if os.path.isdir(source_path):
+            # Normalize paths for reliable comparison.
+            norm_source = os.path.normpath(source_path) + os.sep
+            norm_target = os.path.normpath(target_folder) + os.sep
+            if norm_target.startswith(norm_source):
+                logger.warning("Cannot move a folder into itself: %s -> %s", source_path, target_folder)
+                event.ignore()
+                return
+
+        # Destination already exists — warn and abort.
+        if os.path.exists(dest_path):
+            QMessageBox.warning(
+                self, "Cannot Move",
+                "'{}' already exists in the target folder.".format(basename)
+            )
+            event.ignore()
+            return
+
+        # --- Perform the move ---
+        try:
+            shutil.move(source_path, dest_path)
+            logger.debug("Moved '%s' -> '%s'", source_path, dest_path)
+            self.file_moved.emit(source_path, dest_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Move Failed",
+                "Could not move '{}':\n{}".format(basename, str(exc))
+            )
+
+        # Ignore the default QTreeWidget drop behavior — we handle the move ourselves.
+        event.ignore()
+
+
+# =============================================================================
 # Workspace Tree Panel (Advanced Mode)
 # =============================================================================
 
@@ -461,13 +616,12 @@ class WorkspacePanel(QWidget):
         self._search_field.textChanged.connect(self.filter_files)
         layout.addWidget(self._search_field)
 
-        # --- Tree widget for file browsing ---
-        self._tree = QTreeWidget()
+        # --- Tree widget for file browsing (with drag-and-drop support) ---
+        self._tree = _WorkspaceTree()
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(16)
         self._tree.setAnimated(True)
-        self._tree.setDragEnabled(False)
         self._tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #252526;
@@ -478,6 +632,9 @@ class WorkspacePanel(QWidget):
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.itemCollapsed.connect(self._on_item_collapsed)
+
+        # Refresh the tree after a drag-and-drop move.
+        self._tree.file_moved.connect(self._on_file_moved)
 
         # Enable right-click context menus on the tree.
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -638,6 +795,18 @@ class WorkspacePanel(QWidget):
 
         :param str path: The directory that changed.
         """
+        self._refresh_tree()
+
+    def _on_file_moved(self, old_path, new_path):
+        """
+        Handle a file or folder moved via drag-and-drop.
+
+        Refreshes the workspace tree to reflect the new layout.
+
+        :param str old_path: The original path before the move.
+        :param str new_path: The new path after the move.
+        """
+        logger.debug("Drag-drop move complete: '%s' -> '%s'", old_path, new_path)
         self._refresh_tree()
 
     def get_workspace_folders(self):
