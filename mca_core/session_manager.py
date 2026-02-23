@@ -54,7 +54,12 @@ class SessionManager:
     """
 
     # Current manifest schema version — bump if the schema changes.
-    MANIFEST_VERSION = 1
+    # v1: flat "tabs" list, single active_tab
+    # v2: "groups" array (each with "tabs" + "active_tab"),
+    #     plus "active_group" and "group_splitter_sizes"
+    # v3: recursive "layout" tree with nested splitters and groups,
+    #     supports both horizontal and vertical splits
+    MANIFEST_VERSION = 3
 
     def __init__(self):
         """
@@ -290,3 +295,161 @@ class SessionManager:
         except Exception as exc:
             logger.error("Failed to load session manifest: %s", exc)
             return None
+
+    def save_manifest_v2(self, groups_data, active_group_index, splitter_sizes):
+        """
+        Write a v2 grouped session manifest to disk.
+
+        :param list groups_data: List of group dicts, each containing:
+            - ``tabs`` (list): Tab dicts for this group
+            - ``active_tab`` (int): Active tab index within the group
+        :param int active_group_index: Index of the active group.
+        :param list splitter_sizes: Splitter sizes for group layout.
+        """
+        self._ensure_dirs()
+        manifest_path = os.path.join(self._prefs_dir, "session.json")
+
+        # Count total tabs across all groups.
+        total_tabs = sum(len(g.get("tabs", [])) for g in groups_data)
+
+        manifest = {
+            "version": self.MANIFEST_VERSION,
+            "next_buffer_id": self._next_buffer_id,
+            "groups": groups_data,
+            "active_group": active_group_index,
+            "group_splitter_sizes": splitter_sizes,
+        }
+
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=4)
+            logger.debug("Saved v2 session manifest: %d group(s), %d tabs",
+                         len(groups_data), total_tabs)
+        except Exception as exc:
+            logger.error("Failed to save session manifest: %s", exc)
+
+    def save_manifest_v3(self, layout_tree, active_group_index):
+        """
+        Write a v3 session manifest with a recursive layout tree.
+
+        The layout tree contains nested splitter and group nodes.
+        Group nodes carry their tab data (type, language, title, etc.).
+
+        :param dict layout_tree: Recursive layout dict with "type" nodes.
+            Splitter nodes: {"type": "splitter", "orientation": "horizontal"/"vertical",
+                             "sizes": [...], "children": [...]}
+            Group nodes: {"type": "group", "tabs": [...], "active_tab": int}
+        :param int active_group_index: Index of the active group (DFS order).
+        """
+        self._ensure_dirs()
+        manifest_path = os.path.join(self._prefs_dir, "session.json")
+
+        manifest = {
+            "version": self.MANIFEST_VERSION,
+            "next_buffer_id": self._next_buffer_id,
+            "layout": layout_tree,
+            "active_group": active_group_index,
+        }
+
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=4)
+
+            # Count total tabs for the debug log.
+            total = self._count_tabs_in_tree(layout_tree)
+            logger.debug("Saved v3 session manifest: %d tabs", total)
+        except Exception as exc:
+            logger.error("Failed to save session manifest: %s", exc)
+
+    def _count_tabs_in_tree(self, node):
+        """
+        Recursively count the total number of tabs in a layout tree.
+
+        :param dict node: Layout tree node.
+        :return: Total tab count.
+        :rtype: int
+        """
+        if not node:
+            return 0
+        if node.get("type") == "group":
+            return len(node.get("tabs", []))
+        if node.get("type") == "splitter":
+            return sum(
+                self._count_tabs_in_tree(c)
+                for c in node.get("children", [])
+            )
+        return 0
+
+    def upgrade_manifest(self, manifest):
+        """
+        Upgrade a manifest to v3 format.
+
+        Handles v1 -> v2 -> v3 upgrade chain:
+        - V1: flat "tabs" list -> wrapped into v2 groups -> wrapped into v3 layout tree
+        - V2: "groups" array -> wrapped into v3 layout tree
+        - V3: already current, returned unchanged.
+
+        :param dict manifest: The loaded manifest dict.
+        :return: V3-formatted manifest.
+        :rtype: dict
+        """
+        if not manifest:
+            return manifest
+
+        version = manifest.get("version", 1)
+
+        # Already v3 with layout tree — nothing to do.
+        if version >= 3 and "layout" in manifest:
+            return manifest
+
+        # --- V1 -> V2 upgrade ---
+        if version < 2 or "groups" not in manifest:
+            tabs = manifest.get("tabs", [])
+            active_tab = manifest.get("active_tab", 0)
+
+            manifest = {
+                "version": 2,
+                "next_buffer_id": manifest.get("next_buffer_id", 1),
+                "groups": [
+                    {
+                        "tabs": tabs,
+                        "active_tab": active_tab,
+                    }
+                ],
+                "active_group": 0,
+                "group_splitter_sizes": [],
+            }
+            logger.info("Upgraded session manifest from v%d to v2", version)
+            version = 2
+
+        # --- V2 -> V3 upgrade ---
+        # Wrap the flat groups list into a single horizontal splitter node.
+        groups_data = manifest.get("groups", [])
+        splitter_sizes = manifest.get("group_splitter_sizes", [])
+
+        # Build group nodes with their tab data.
+        children = []
+        for group_info in groups_data:
+            children.append({
+                "type": "group",
+                "tabs": group_info.get("tabs", []),
+                "active_tab": group_info.get("active_tab", 0),
+            })
+
+        # Wrap in a horizontal splitter.
+        layout_tree = {
+            "type": "splitter",
+            "orientation": "horizontal",
+            "sizes": splitter_sizes if len(splitter_sizes) == len(children) else [],
+            "children": children,
+        }
+
+        upgraded = {
+            "version": 3,
+            "next_buffer_id": manifest.get("next_buffer_id", 1),
+            "layout": layout_tree,
+            "active_group": manifest.get("active_group", 0),
+        }
+
+        logger.info("Upgraded session manifest from v2 to v3")
+        return upgraded

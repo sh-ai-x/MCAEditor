@@ -48,6 +48,7 @@ from mca_qt.widgets.new_tab_dialog import NewTabDialog
 from mca_qt.widgets.completer import CodeCompleter, CompletionProvider
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
 from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup
+from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 from mca_qt.icons import python_logo, maya_logo, text_icon
 
@@ -95,6 +96,9 @@ class MCAEditorPanel(QWidget):
     # Args: (error_count, warning_count)
     output_counts_changed = Signal(int, int)
 
+    # Signal emitted when the user toggles the activity bar (bottom status bar).
+    activity_bar_toggled = Signal()
+
     def __init__(self, settings, adapter_manager=None, parent=None):
         """
         Initialize the editor panel and all UI components.
@@ -110,7 +114,8 @@ class MCAEditorPanel(QWidget):
         # When embedded, the DCC menu and toolbar indicator are hidden
         # since the host already provides direct execution access.
         self._embedded_in_dcc = adapter_manager is not None
-        self._editors = []  # List of (editor, tab_name, file_path) tuples
+        # NOTE: _editors list is no longer maintained here — editors are
+        # tracked inside EditorGroupContainer -> EditorGroup instances.
         self._editor_mode = settings.get_editor_mode()
         self._closed_files = []  # Track recently closed files for reopen feature.
         # Restore saved font size (falls back to 12 if never changed).
@@ -140,7 +145,6 @@ class MCAEditorPanel(QWidget):
         # Build UI components.
         self._setup_ui()
         self._setup_toolbar()
-        self._setup_find_bar()
         self._setup_connections()
 
         # Restore previous session or create a fresh buffer.
@@ -245,77 +249,14 @@ class MCAEditorPanel(QWidget):
         self._output = OutputWindow()
         self._center_splitter.addWidget(self._output)
 
-        # Tab widget for code editor buffers (below output).
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setTabsClosable(True)
-        self._tab_widget.setMovable(True)
-        self._tab_widget.setDocumentMode(True)
-        # Enable scroll arrows when tabs overflow the available width.
-        self._tab_widget.setUsesScrollButtons(True)
-        self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
-        # Offset the tab bar to the right so overlay nav buttons don't overlap tabs.
-        self._tab_widget.setStyleSheet("QTabWidget::tab-bar { left: 60px; }")
-        self._tab_widget.tabCloseRequested.connect(self._close_tab)
-        self._tab_widget.currentChanged.connect(self._on_tab_changed)
-
-        # --- Tab bar overlay buttons ---
-        # Document mode hides corner widgets, so we parent overlay buttons
-        # directly to the tab widget and position them via event filter.
-        # Shared style for all tab-bar overlay buttons.
-        _tab_btn_style = """
-            QPushButton {{
-                background: transparent;
-                color: {color};
-                border: none;
-                border-radius: 3px;
-                font-size: {size};
-                font-weight: bold;
-                padding: {padding};
-            }}
-            QPushButton:hover {{
-                background-color: #3e3e42;
-            }}
-            QPushButton:pressed {{
-                background-color: #094771;
-            }}
-        """
-
-        # Left/right scroll arrows — always visible on the left side.
-        self._scroll_left_btn = QPushButton("\u2039", self._tab_widget)
-        self._scroll_left_btn.setToolTip("Scroll tabs left")
-        self._scroll_left_btn.setFixedSize(28, 28)
-        self._scroll_left_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="24px", padding="0 0 4px 0"))
-        self._scroll_left_btn.clicked.connect(self._scroll_tabs_left)
-
-        self._scroll_right_btn = QPushButton("\u203a", self._tab_widget)
-        self._scroll_right_btn.setToolTip("Scroll tabs right")
-        self._scroll_right_btn.setFixedSize(28, 28)
-        self._scroll_right_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="24px", padding="0 0 4px 0"))
-        self._scroll_right_btn.clicked.connect(self._scroll_tabs_right)
-
-        # "..." (vertical dots) button for the tab list dropdown.
-        self._tab_list_btn = QPushButton("\u22ee", self._tab_widget)
-        self._tab_list_btn.setToolTip("List all open tabs")
-        self._tab_list_btn.setFixedSize(28, 28)
-        self._tab_list_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="18px", padding="0"))
-        self._tab_list_btn.clicked.connect(self._show_tab_list_menu)
-
-        # Install event filter on the tab bar so we can intercept
-        # double-clicks on empty space to create new tabs.
-        self._tab_widget.tabBar().installEventFilter(self)
-
-        # Enable right-click context menu on the tab bar.
-        self._tab_widget.tabBar().setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu
-        )
-        self._tab_widget.tabBar().customContextMenuRequested.connect(
-            self._show_tab_context_menu
-        )
-
-        self._center_splitter.addWidget(self._tab_widget)
+        # Editor group container — holds one or more editor groups
+        # (each group is a QTabWidget with find bar and tab nav buttons).
+        # Replaces the old single _tab_widget with split/side-by-side support.
+        self._group_container = EditorGroupContainer()
+        self._group_container.active_editor_changed.connect(self._on_active_editor_changed)
+        self._group_container.editors_changed.connect(self._update_open_editors)
+        self._group_container.tab_close_requested.connect(self._close_tab_in_group)
+        self._center_splitter.addWidget(self._group_container)
 
         # Default split: 30% output (top), 70% editor (bottom).
         self._center_splitter.setSizes([250, 600])
@@ -444,34 +385,12 @@ class MCAEditorPanel(QWidget):
         self._mode_toggle.clicked.connect(self._toggle_mode)
         self._toolbar.addWidget(self._mode_toggle)
 
-    def _setup_find_bar(self):
-        """
-        Create the find/replace bar as an overlay inside the tab widget.
-
-        The bar is a direct child of the QTabWidget (not in any layout)
-        and is positioned right below the tab bar using geometry management.
-        An event filter on the tab widget handles repositioning on resize.
-        """
-        # Parent the find bar to the tab widget so it clips correctly.
-        self._find_bar = FindReplaceBar(self._tab_widget)
-        self._find_bar.search_selections_changed.connect(self._on_search_selections_changed)
-        self._find_bar.closed.connect(self._on_find_bar_closed)
-        # Reposition the overlay when the replace row is toggled (height changes).
-        self._find_bar.geometry_changed.connect(self._reposition_find_bar)
-        # Listen for resize events on the tab widget to reposition overlays.
-        self._tab_widget.installEventFilter(self)
-        self._find_bar.hide()
-
-        # Position the "..." tab list button after a short delay so the
-        # tab widget has its final geometry before we calculate placement.
-        QTimer.singleShot(0, self._reposition_tab_nav_buttons)
-
     def _setup_connections(self):
         """Wire up signals between all UI components."""
         # Sidebar signals -> editor navigation.
         self._sidebar.file_open_requested.connect(self._open_file_path)
         self._sidebar.outline_item_clicked.connect(self._goto_outline_item)
-        self._sidebar.editor_selected.connect(self._tab_widget.setCurrentIndex)
+        self._sidebar.editor_selected.connect(self._on_sidebar_editor_selected)
 
         # Sidebar header buttons -> file operations.
         self._sidebar.new_tab_requested.connect(self._show_new_tab_dialog)
@@ -614,7 +533,7 @@ class MCAEditorPanel(QWidget):
                             callback=self._revert_file)
         self._create_action(file_menu, "Close File", name="Close File",
                             shortcut="Ctrl+W",
-                            callback=lambda: self._close_tab(self._tab_widget.currentIndex()))
+                            callback=self._close_current_tab)
         self._create_action(file_menu, "Close All Files", name="Close All Files",
                             callback=self._close_all_files)
         self._create_action(file_menu, "Save State", name="Save State",
@@ -727,10 +646,15 @@ class MCAEditorPanel(QWidget):
         self._toggle_sidebar_action = self._create_action(
             view_menu, "Toggle Side Bar", name="Toggle Side Bar",
             shortcut="Ctrl+B", callback=self._toggle_sidebar)
-        self._create_action(view_menu, "Hide Activity Bar",
-                            callback=lambda: self._show_status("Hide Activity Bar: coming soon"))
+        # Activity bar toggle — emits signal so the host window can toggle its status bar.
+        self._create_action(view_menu, "Toggle Activity Bar",
+                            callback=lambda: self.activity_bar_toggled.emit())
 
         view_menu.addSeparator()
+
+        # --- Split editor ---
+        self._create_action(view_menu, "Split Editor Right", name="Split Editor Right",
+                            shortcut="Ctrl+\\", callback=self._split_editor_right)
 
         self._create_action(view_menu, "Toggle Code Editor Layout",
                             shortcut="Alt+Shift+1",
@@ -796,10 +720,16 @@ class MCAEditorPanel(QWidget):
         self._create_action(switch_menu, "Previous Used Editor\tCtrl+Shift+Tab",
                             callback=self._prev_editor)
 
-        # --- Switch Group submenu (stub) ---
-        switch_group = go_menu.addMenu("Switch Group")
-        sg_stub = switch_group.addAction("No groups")
-        sg_stub.setEnabled(False)
+        # --- Switch Group submenu (dynamically populated) ---
+        self._switch_group_menu = go_menu.addMenu("Switch Group")
+        self._switch_group_menu.aboutToShow.connect(self._build_switch_group_menu)
+
+        self._create_action(go_menu, "Focus Next Group", name="Focus Next Group",
+                            shortcut="Ctrl+K Ctrl+Right",
+                            callback=self._group_container.focus_next_group)
+        self._create_action(go_menu, "Focus Previous Group", name="Focus Previous Group",
+                            shortcut="Ctrl+K Ctrl+Left",
+                            callback=self._group_container.focus_previous_group)
 
         go_menu.addSeparator()
 
@@ -1009,7 +939,7 @@ class MCAEditorPanel(QWidget):
         show_ws = s.get("show_whitespace", False)
         if show_ws:
             self._whitespace_action.setChecked(True)
-            for editor, name, path in self._editors:
+            for editor, name, path in self._group_container.all_editors():
                 editor.set_show_whitespace(True)
 
         # --- Font size (apply saved zoom level to all open editors) ---
@@ -1059,10 +989,7 @@ class MCAEditorPanel(QWidget):
         :return: The active editor widget, or None.
         :rtype: MCACodeEditor or None
         """
-        widget = self._tab_widget.currentWidget()
-        if isinstance(widget, MCACodeEditor):
-            return widget
-        return None
+        return self._group_container.current_editor()
 
     def _new_buffer(self):
         """
@@ -1095,10 +1022,8 @@ class MCAEditorPanel(QWidget):
         lang_map = {"python": "Python", "mel": "MEL", "text": "Text"}
         tab_name = lang_map.get(editor.language, "Python")
 
-        idx = self._tab_widget.addTab(editor, tab_name)
-        self._tab_widget.setTabIcon(idx, self._icon_for_language(editor.language))
-        self._editors.append((editor, tab_name, None))
-        self._tab_widget.setCurrentIndex(idx)
+        icon = self._icon_for_language(editor.language)
+        self._group_container.add_editor(editor, tab_name, None, icon)
 
         self._update_open_editors()
         return editor
@@ -1119,10 +1044,13 @@ class MCAEditorPanel(QWidget):
 
         :param str filepath: Absolute path to the file to open.
         """
-        for i, (editor, name, path) in enumerate(self._editors):
-            if path == filepath:
-                self._tab_widget.setCurrentIndex(i)
-                return
+        # Check if the file is already open in any group.
+        group, idx, existing = self._group_container.find_editor_by_path(filepath)
+        if group is not None:
+            group.set_current_index(idx)
+            # Activate that group.
+            self._group_container._on_group_activated(group)
+            return
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -1154,10 +1082,8 @@ class MCAEditorPanel(QWidget):
         self._apply_editor_state(editor)
 
         tab_name = os.path.basename(filepath)
-        idx = self._tab_widget.addTab(editor, tab_name)
-        self._tab_widget.setTabIcon(idx, self._icon_for_language(editor.language))
-        self._editors.append((editor, tab_name, filepath))
-        self._tab_widget.setCurrentIndex(idx)
+        icon = self._icon_for_language(editor.language)
+        self._group_container.add_editor(editor, tab_name, filepath, icon)
 
         self._settings.add_recent_file(filepath)
         self._build_recent_files_menu()
@@ -1204,10 +1130,14 @@ class MCAEditorPanel(QWidget):
 
             self._write_file(editor, filepath)
             editor.file_path = filepath
-            idx = self._tab_widget.currentIndex()
             tab_name = os.path.basename(filepath)
-            self._tab_widget.setTabText(idx, tab_name)
-            self._editors[idx] = (editor, tab_name, filepath)
+            # Update the tab text and internal tracking in the active group.
+            group = self._group_container.active_group()
+            if group:
+                idx = group.index_of_editor(editor)
+                if idx >= 0:
+                    group.set_tab_text(idx, tab_name)
+                    group.update_editor_entry(idx, editor, tab_name, filepath)
             self._settings.add_recent_file(filepath)
             self._update_open_editors()
             self._save_session_manifest()
@@ -1228,18 +1158,20 @@ class MCAEditorPanel(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Error", "Could not save file:\n{}".format(str(exc)))
 
-    def _close_tab(self, index):
+    def _close_tab_in_group(self, group, index):
         """
-        Close a tab/buffer, prompting to save if modified.
+        Close a tab in a specific group, prompting to save if modified.
 
-        For temp buffers, the corresponding buffer file is deleted.
-        The session manifest is updated after every close.
+        This is the primary close handler, connected to the container's
+        ``tab_close_requested`` signal.
 
+        :param EditorGroup group: The group containing the tab.
         :param int index: Tab index to close.
         """
-        if index < 0 or index >= len(self._editors):
+        editors = group.editors()
+        if index < 0 or index >= len(editors):
             return
-        editor, name, path = self._editors[index]
+        editor, name, path = editors[index]
         if editor.document().isModified():
             reply = QMessageBox.question(
                 self, "Unsaved Changes",
@@ -1249,7 +1181,7 @@ class MCAEditorPanel(QWidget):
                 QMessageBox.StandardButton.Cancel
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._tab_widget.setCurrentIndex(index)
+                group.set_current_index(index)
                 self._save_file()
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
@@ -1258,21 +1190,33 @@ class MCAEditorPanel(QWidget):
         if editor._buffer_filename:
             self._session_manager.remove_buffer(editor._buffer_filename)
 
-        self._tab_widget.removeTab(index)
-        self._editors.pop(index)
         if path:
             self._closed_files.append(path)
+
+        group.remove_editor(index)
         self._update_open_editors()
 
         # Keep manifest in sync after closing a tab.
         self._save_session_manifest()
 
-        if self._tab_widget.count() == 0:
+        # If the active group is now empty and it's the only group,
+        # create a fresh buffer so the UI is never blank.
+        active = self._group_container.active_group()
+        if active and active.count() == 0 and self._group_container.group_count() == 1:
             self._new_buffer()
 
-    def _on_tab_changed(self, index):
-        """Handle tab selection changes."""
-        editor = self._current_editor()
+    def _close_current_tab(self):
+        """Close the current tab in the active group."""
+        group = self._group_container.active_group()
+        if group:
+            self._close_tab_in_group(group, group.current_index())
+
+    def _on_active_editor_changed(self, editor):
+        """
+        Handle active editor changes (tab switch or group switch).
+
+        :param object editor: The newly active editor.
+        """
         if editor:
             self._update_outline(editor)
             self._update_language_combo(editor)
@@ -1280,72 +1224,48 @@ class MCAEditorPanel(QWidget):
                 editor.textCursor().blockNumber() + 1,
                 editor.textCursor().columnNumber() + 1
             )
-            # If the find bar is open, re-search in the new tab's content.
-            if self._find_bar.isVisible():
-                self._find_bar.set_editor(editor)
-
-    def _show_tab_list_menu(self):
-        """
-        Show a dropdown menu listing all open tabs for quick navigation.
-
-        The currently active tab is shown with a checkmark. Clicking an
-        entry switches to that tab. The menu appears below the '...' button.
-        """
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d30;
-                color: #cccccc;
-                border: 1px solid #3f3f46;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 4px 24px 4px 12px;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-            }
-            QMenu::indicator {
-                width: 12px;
-                height: 12px;
-                margin-left: 4px;
-            }
-        """)
-
-        current_idx = self._tab_widget.currentIndex()
-        for i in range(self._tab_widget.count()):
-            tab_text = self._tab_widget.tabText(i)
-            action = menu.addAction(tab_text)
-            action.setCheckable(True)
-            action.setChecked(i == current_idx)
-            # Capture loop variable with default argument.
-            action.triggered.connect(lambda _checked=None, idx=i: self._tab_widget.setCurrentIndex(idx))
-
-        # Position the menu below the "..." button.
-        menu.exec(self._tab_list_btn.mapToGlobal(
-            self._tab_list_btn.rect().bottomLeft()
-        ))
 
     def _on_editor_modified(self, editor, modified):
         """Handle editor modification state changes."""
-        for i, (e, name, path) in enumerate(self._editors):
-            if e is editor:
+        # Find the editor across all groups and update its tab text.
+        for group in self._group_container.groups():
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                editors = group.editors()
+                _, name, _ = editors[idx]
                 display = "* {}".format(name) if modified else name
-                self._tab_widget.setTabText(i, display)
+                group.set_tab_text(idx, display)
                 break
         self._update_open_editors()
 
     def _update_open_editors(self):
         """Update the sidebar's open editors panel."""
-        tabs = []
-        for editor, name, path in self._editors:
-            tabs.append({
-                "name": name,
-                "path": path,
-                "modified": editor.document().isModified(),
-                "language": editor.language,
-            })
-        self._sidebar.open_editors_panel.update_editors(tabs)
+        groups = self._group_container.groups()
+        # When there are multiple groups, show grouped data with headers.
+        if len(groups) > 1:
+            groups_data = []
+            for gi, group in enumerate(groups):
+                group_tabs = []
+                for editor, name, path in group.editors():
+                    group_tabs.append({
+                        "name": name,
+                        "path": path,
+                        "modified": editor.document().isModified(),
+                        "language": editor.language,
+                    })
+                groups_data.append(group_tabs)
+            self._sidebar.open_editors_panel.update_editors_grouped(groups_data)
+        else:
+            # Single group — flat list, no headers.
+            tabs = []
+            for editor, name, path in self._group_container.all_editors():
+                tabs.append({
+                    "name": name,
+                    "path": path,
+                    "modified": editor.document().isModified(),
+                    "language": editor.language,
+                })
+            self._sidebar.open_editors_panel.update_editors(tabs)
 
     def _icon_for_language(self, language):
         """
@@ -1409,18 +1329,21 @@ class MCAEditorPanel(QWidget):
             # if switching away from Python).
             editor._run_analysis()
             self.language_changed.emit(language)
-            idx = self._tab_widget.currentIndex()
-            if idx >= 0 and idx < len(self._editors):
-                # Update the tab icon to match the new language.
-                self._tab_widget.setTabIcon(idx, self._icon_for_language(language))
-                e, name, path = self._editors[idx]
-                if path is None:
-                    new_name = language
-                    modified = e.document().isModified()
-                    display = "* {}".format(new_name) if modified else new_name
-                    self._tab_widget.setTabText(idx, display)
-                    self._editors[idx] = (e, new_name, path)
-                    self._update_open_editors()
+            # Update tab icon and name in the active group.
+            group = self._group_container.active_group()
+            if group:
+                idx = group.index_of_editor(editor)
+                if idx >= 0:
+                    group.set_tab_icon(idx, self._icon_for_language(language))
+                    editors = group.editors()
+                    e, name, path = editors[idx]
+                    if path is None:
+                        new_name = language
+                        modified = e.document().isModified()
+                        display = "* {}".format(new_name) if modified else new_name
+                        group.set_tab_text(idx, display)
+                        group.update_editor_entry(idx, e, new_name, path)
+                        self._update_open_editors()
 
     def _update_cursor_pos(self, line, col):
         """Emit cursor position so the host can update its status bar."""
@@ -1453,131 +1376,177 @@ class MCAEditorPanel(QWidget):
 
     def _save_session_manifest(self):
         """
-        Build the tab list and write the session manifest to disk.
+        Build the recursive layout tree and write the v3 session manifest.
 
         Called after every tab open/close/save so the manifest stays
-        in sync with the editor state.
+        in sync with the editor state. Uses v3 recursive layout format
+        that supports nested horizontal/vertical splits.
         """
-        tabs = []
-        for editor, name, path in self._editors:
-            if path:
-                # File-backed tab — content lives on disk at file_path.
-                tabs.append({
-                    "type": "file",
-                    "file_path": path,
-                    "language": editor.language,
-                    "title": name,
-                })
-            else:
-                # Temp buffer — content lives in the buffers directory.
-                tabs.append({
-                    "type": "buffer",
-                    "buffer_file": editor._buffer_filename,
-                    "language": editor.language,
-                    "title": name,
-                })
+        # Get the recursive layout tree from the container.
+        layout_state = self._group_container.get_layout_state()
+        layout_tree = layout_state.get("layout", {})
+        active_group_idx = layout_state.get("active_group", 0)
 
-        active_index = self._tab_widget.currentIndex()
-        self._session_manager.save_manifest(tabs, active_index)
+        # Walk the layout tree and fill in tab data for each group node.
+        # Groups appear in DFS order matching self._group_container.groups().
+        groups = self._group_container.groups()
+        group_iter = iter(groups)
+        self._fill_layout_tabs(layout_tree, group_iter)
+
+        self._session_manager.save_manifest_v3(layout_tree, active_group_idx)
+
+    def _fill_layout_tabs(self, node, group_iter):
+        """
+        Recursively fill in tab data for group nodes in the layout tree.
+
+        Each "group" node gets its tabs and active_tab populated from
+        the corresponding EditorGroup (consumed from the iterator).
+
+        :param dict node: Layout tree node.
+        :param iterator group_iter: Iterator over EditorGroup instances.
+        """
+        if not node:
+            return
+
+        if node.get("type") == "group":
+            # Consume the next group from the iterator.
+            try:
+                group = next(group_iter)
+            except StopIteration:
+                return
+
+            group_tabs = []
+            for editor, name, path in group.editors():
+                if path:
+                    group_tabs.append({
+                        "type": "file",
+                        "file_path": path,
+                        "language": editor.language,
+                        "title": name,
+                    })
+                else:
+                    group_tabs.append({
+                        "type": "buffer",
+                        "buffer_file": editor._buffer_filename,
+                        "language": editor.language,
+                        "title": name,
+                    })
+            node["tabs"] = group_tabs
+            node["active_tab"] = group.current_index()
+
+        elif node.get("type") == "splitter":
+            for child in node.get("children", []):
+                self._fill_layout_tabs(child, group_iter)
 
     def _restore_session(self):
         """
         Restore tabs from the session manifest saved on last exit.
 
-        For file-backed tabs, re-opens the file from disk (skips if
-        the file no longer exists). For buffer tabs, loads content from
-        the buffers directory and restores buffer tracking attributes.
+        Supports v1, v2, and v3 manifest formats (auto-upgrades to v3).
+        For file-backed tabs, re-opens the file from disk. For buffer
+        tabs, loads content from the buffers directory.
 
-        Signals on the tab widget are blocked during the restore loop
-        to avoid an O(n^2) cascade of tab-changed / sidebar-update /
-        outline-parse events. A single UI sync runs at the end.
+        V3 manifests use a recursive layout tree that supports nested
+        horizontal/vertical splits.
 
         :return: True if at least one tab was restored.
         :rtype: bool
         """
         manifest = self._session_manager.load_manifest()
-        if not manifest or not manifest.get("tabs"):
+        if not manifest:
             return False
 
+        # Auto-upgrade v1/v2 to v3 format.
+        manifest = self._session_manager.upgrade_manifest(manifest)
+
+        layout_tree = manifest.get("layout")
+        if not layout_tree:
+            return False
+
+        # Collect all group nodes from the layout tree in DFS order.
+        group_nodes = []
+        self._collect_group_nodes(layout_tree, group_nodes)
+        if not group_nodes:
+            return False
+
+        # Rebuild the splitter tree structure in the container.
+        # This returns the new groups in DFS order.
+        layout_state = {
+            "layout": layout_tree,
+            "active_group": manifest.get("active_group", 0),
+        }
+        restored_groups = self._group_container.restore_layout_state(layout_state)
+
+        # Now populate tabs into each group from the matching node data.
         restored_count = 0
         lang_map = {"python": "Python", "mel": "MEL", "text": "Text"}
 
-        # Block tab-widget signals during bulk restore so we don't fire
-        # _on_tab_changed (outline parse, sidebar refresh, cursor update)
-        # for every single tab — one sync at the end is enough.
-        self._tab_widget.blockSignals(True)
+        for gi, group_node in enumerate(group_nodes):
+            if gi >= len(restored_groups):
+                break
+            group = restored_groups[gi]
 
-        for tab_info in manifest["tabs"]:
-            tab_type = tab_info.get("type", "buffer")
-            language = tab_info.get("language", "python")
-            title = tab_info.get("title", lang_map.get(language, "Python"))
+            # Block signals during bulk restore.
+            group.block_signals(True)
 
-            if tab_type == "file":
-                # File-backed tab — reopen from disk if the file exists.
-                file_path = tab_info.get("file_path", "")
-                if file_path and os.path.isfile(file_path):
-                    self._open_file_path(file_path)
+            for tab_info in group_node.get("tabs", []):
+                tab_type = tab_info.get("type", "buffer")
+                language = tab_info.get("language", "python")
+                title = tab_info.get("title", lang_map.get(language, "Python"))
+
+                if tab_type == "file":
+                    file_path = tab_info.get("file_path", "")
+                    if file_path and os.path.isfile(file_path):
+                        # Create editor directly to avoid signal cascade.
+                        editor = self._create_editor_for_restore(language)
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                content = f.read()
+                            editor.file_path = file_path
+                            editor.setPlainText(content)
+                            editor.document().setModified(False)
+                        except Exception as exc:
+                            logger.warning("Session restore: %s", exc)
+                            continue
+                        icon = self._icon_for_language(language)
+                        group.add_editor(editor, title, file_path, icon)
+                        self._settings.add_recent_file(file_path)
+                        restored_count += 1
+                    else:
+                        logger.warning("Session restore: file not found: %s",
+                                       tab_info.get("file_path", ""))
+
+                elif tab_type == "buffer":
+                    buffer_file = tab_info.get("buffer_file")
+                    content = ""
+                    if buffer_file:
+                        loaded = self._session_manager.load_buffer(buffer_file)
+                        if loaded is not None:
+                            content = loaded
+
+                    editor = self._create_editor_for_restore(language)
+                    if content:
+                        editor.setPlainText(content)
+                    editor.document().setModified(False)
+
+                    # Restore buffer tracking.
+                    if buffer_file:
+                        try:
+                            basename = os.path.splitext(buffer_file)[0]
+                            editor._buffer_id = int(basename.split("_")[1])
+                        except (IndexError, ValueError):
+                            editor._buffer_id = self._session_manager.allocate_buffer_id()
+                        editor._buffer_filename = buffer_file
+
+                    icon = self._icon_for_language(language)
+                    group.add_editor(editor, title, None, icon)
                     restored_count += 1
-                else:
-                    logger.warning("Session restore: file not found: %s", file_path)
 
-            elif tab_type == "buffer":
-                # Temp buffer — load content from the buffers directory.
-                buffer_file = tab_info.get("buffer_file")
-                content = ""
-                if buffer_file:
-                    loaded = self._session_manager.load_buffer(buffer_file)
-                    if loaded is not None:
-                        content = loaded
-
-                # Create a new editor directly instead of going through
-                # _new_buffer(), which fires redundant signal cascades
-                # (tab changed, sidebar update, language combo sync).
-                editor = MCACodeEditor()
-                editor._buffer_id = None
-                editor._buffer_filename = None
-
-                # Set the language BEFORE setPlainText so we only create
-                # one highlighter instead of defaulting to Python and
-                # immediately swapping it out.
-                editor.set_language(language)
-
-                editor.execute_requested.connect(self._execute_all)
-                editor.execute_selected_requested.connect(self._execute_selected)
-                editor.execute_line_requested.connect(self._execute_line)
-                editor.cursor_position_changed_info.connect(self._update_cursor_pos)
-                editor.file_modified.connect(lambda mod, e=editor: self._on_editor_modified(e, mod))
-                editor.zoom_requested.connect(self._on_zoom_requested)
-                self._attach_completer(editor)
-
-                if content:
-                    editor.setPlainText(content)
-                editor.document().setModified(False)
-
-                # Restore buffer tracking so subsequent saves reuse the
-                # same buffer file instead of allocating a new one.
-                if buffer_file:
-                    # Parse the buffer ID from the filename (e.g. "buffer_3.py" -> 3).
-                    try:
-                        basename = os.path.splitext(buffer_file)[0]
-                        editor._buffer_id = int(basename.split("_")[1])
-                    except (IndexError, ValueError):
-                        editor._buffer_id = self._session_manager.allocate_buffer_id()
-                    editor._buffer_filename = buffer_file
-
-                tab_idx = self._tab_widget.addTab(editor, title)
-                self._tab_widget.setTabIcon(tab_idx, self._icon_for_language(language))
-                self._editors.append((editor, title, None))
-                restored_count += 1
-
-        # Unblock signals before setting the active tab so _on_tab_changed
-        # fires exactly once for the final active tab.
-        self._tab_widget.blockSignals(False)
-
-        # Restore the active tab index from the manifest.
-        active_tab = manifest.get("active_tab", 0)
-        if 0 <= active_tab < self._tab_widget.count():
-            self._tab_widget.setCurrentIndex(active_tab)
+            # Unblock signals and set active tab within this group.
+            group.block_signals(False)
+            active_tab = group_node.get("active_tab", 0)
+            if 0 <= active_tab < group.count():
+                group.set_current_index(active_tab)
 
         # Single UI sync now that all tabs are in place.
         self._update_open_editors()
@@ -1585,165 +1554,55 @@ class MCAEditorPanel(QWidget):
         if editor:
             self._update_language_combo(editor)
 
-        logger.info("Session restored: %d tab(s)", restored_count)
+        total_groups = len(group_nodes)
+        logger.info("Session restored: %d tab(s) in %d group(s)",
+                     restored_count, total_groups)
         return restored_count > 0
+
+    def _collect_group_nodes(self, node, result):
+        """
+        Recursively collect all group nodes from a layout tree in DFS order.
+
+        :param dict node: Layout tree node.
+        :param list result: Accumulator list for group node dicts.
+        """
+        if not node:
+            return
+        if node.get("type") == "group":
+            result.append(node)
+        elif node.get("type") == "splitter":
+            for child in node.get("children", []):
+                self._collect_group_nodes(child, result)
+
+    def _create_editor_for_restore(self, language):
+        """
+        Create a bare editor for session restore (no signal cascade).
+
+        :param str language: Language identifier.
+        :return: Configured editor widget.
+        :rtype: MCACodeEditor
+        """
+        editor = MCACodeEditor()
+        editor._buffer_id = None
+        editor._buffer_filename = None
+        editor.set_language(language)
+
+        editor.execute_requested.connect(self._execute_all)
+        editor.execute_selected_requested.connect(self._execute_selected)
+        editor.execute_line_requested.connect(self._execute_line)
+        editor.cursor_position_changed_info.connect(self._update_cursor_pos)
+        editor.file_modified.connect(
+            lambda mod, e=editor: self._on_editor_modified(e, mod)
+        )
+        editor.zoom_requested.connect(self._on_zoom_requested)
+        self._attach_completer(editor)
+        self._apply_editor_state(editor)
+
+        return editor
 
     # =========================================================================
     # Tab Bar Events (double-click, right-click context menu)
     # =========================================================================
-
-    def eventFilter(self, obj, event):
-        """
-        Event filter for the tab bar to catch double-clicks on empty space.
-
-        A double-click on the tab bar where no tab exists opens the
-        New Tab dialog so the user can quickly create a buffer.
-
-        :param QObject obj: The object that generated the event.
-        :param QEvent event: The event to filter.
-        :return: True if the event was handled, False to pass it along.
-        :rtype: bool
-        """
-        if obj is self._tab_widget.tabBar():
-            if event.type() == QEvent.Type.MouseButtonDblClick:
-                # Check if the click landed on empty space (not on a tab).
-                tab_index = self._tab_widget.tabBar().tabAt(event.pos())
-                if tab_index == -1:
-                    self._show_new_tab_dialog()
-                    return True
-
-        # Reposition overlay widgets when the tab widget resizes.
-        if obj is self._tab_widget and event.type() == QEvent.Type.Resize:
-            self._reposition_find_bar()
-            self._reposition_tab_nav_buttons()
-
-        return super().eventFilter(obj, event)
-
-    def _reposition_tab_nav_buttons(self):
-        """
-        Position the scroll arrows and tab list button on the tab bar.
-
-        Left/right arrows sit at the far left; the '...' button sits
-        at the far right. All are vertically centered on the tab bar.
-        Called from the event filter on resize and once after init.
-        """
-        tab_bar = self._tab_widget.tabBar()
-        bar_y = tab_bar.y()
-        bar_h = tab_bar.height()
-
-        # --- Left arrow ---
-        lw = self._scroll_left_btn.width()
-        lh = self._scroll_left_btn.height()
-        self._scroll_left_btn.move(2, bar_y + (bar_h - lh) // 2)
-        self._scroll_left_btn.raise_()
-
-        # --- Right arrow (next to left arrow) ---
-        rw = self._scroll_right_btn.width()
-        rh = self._scroll_right_btn.height()
-        self._scroll_right_btn.move(2 + lw, bar_y + (bar_h - rh) // 2)
-        self._scroll_right_btn.raise_()
-
-        # --- "..." tab list button on the far right ---
-        tw = self._tab_list_btn.width()
-        th = self._tab_list_btn.height()
-        x = self._tab_widget.width() - tw - 2
-        self._tab_list_btn.move(x, bar_y + (bar_h - th) // 2)
-        self._tab_list_btn.raise_()
-
-    def _scroll_tabs_left(self):
-        """
-        Scroll the tab bar left by clicking Qt's internal scroll button.
-
-        Qt creates hidden QToolButtons named 'ScrollLeftButton' and
-        'ScrollRightButton' when ``setUsesScrollButtons(True)`` is set.
-        We find and click them to scroll without changing the active tab.
-        Does nothing if tabs aren't overflowing.
-        """
-        try:
-            from PySide6.QtWidgets import QToolButton
-        except ImportError:
-            from PySide2.QtWidgets import QToolButton
-        for child in self._tab_widget.findChildren(QToolButton):
-            if child.objectName() == "ScrollLeftButton" and child.isVisible():
-                child.click()
-                return
-
-    def _scroll_tabs_right(self):
-        """
-        Scroll the tab bar right by clicking Qt's internal scroll button.
-
-        Does nothing if tabs aren't overflowing.
-        """
-        try:
-            from PySide6.QtWidgets import QToolButton
-        except ImportError:
-            from PySide2.QtWidgets import QToolButton
-        for child in self._tab_widget.findChildren(QToolButton):
-            if child.objectName() == "ScrollRightButton" and child.isVisible():
-                child.click()
-                return
-
-    def _show_tab_context_menu(self, pos):
-        """
-        Show a context menu on right-click on the tab bar.
-
-        Menu items: New Python/MEL/Text Tab, separator, Close Tab,
-        Close Other Tabs, Close All Tabs.
-
-        :param QPoint pos: The position of the right-click in tab bar coords.
-        """
-        menu = QMenu(self)
-
-        # --- New tab actions ---
-        menu.addAction("New Python Tab", self._new_python_buffer)
-        menu.addAction("New MEL Tab", self._new_mel_buffer)
-        menu.addAction("New Text Tab", self._new_text_buffer)
-
-        menu.addSeparator()
-
-        # Figure out which tab was right-clicked (if any).
-        clicked_index = self._tab_widget.tabBar().tabAt(pos)
-
-        # Check if the clicked tab is backed by a real file on disk.
-        has_file = False
-        if 0 <= clicked_index < len(self._editors):
-            _, _, tab_path = self._editors[clicked_index]
-            has_file = tab_path is not None
-
-        # --- File actions (only enabled for file-backed tabs) ---
-        rename_action = menu.addAction("Rename")
-        rename_action.setEnabled(has_file)
-        if has_file:
-            rename_action.triggered.connect(lambda: self._rename_tab_file(clicked_index))
-
-        copy_path_action = menu.addAction("Copy Path")
-        copy_path_action.setEnabled(has_file)
-        if has_file:
-            copy_path_action.triggered.connect(lambda: self._copy_tab_path(clicked_index))
-
-        open_explorer_action = menu.addAction("Open in Explorer")
-        open_explorer_action.setEnabled(has_file)
-        if has_file:
-            open_explorer_action.triggered.connect(lambda: self._open_tab_in_explorer(clicked_index))
-
-        menu.addSeparator()
-
-        # --- Close actions ---
-        close_action = menu.addAction("Close Tab")
-        close_action.setEnabled(clicked_index >= 0)
-        if clicked_index >= 0:
-            close_action.triggered.connect(lambda: self._close_tab(clicked_index))
-
-        close_others_action = menu.addAction("Close Other Tabs")
-        close_others_action.setEnabled(clicked_index >= 0 and self._tab_widget.count() > 1)
-        if clicked_index >= 0:
-            close_others_action.triggered.connect(lambda: self._close_other_tabs(clicked_index))
-
-        close_all_action = menu.addAction("Close All Tabs")
-        close_all_action.triggered.connect(self._close_all_files)
-
-        # Show the menu at the cursor position (mapped to global coords).
-        menu.exec(self._tab_widget.tabBar().mapToGlobal(pos))
 
     def _show_new_tab_dialog(self):
         """
@@ -1759,132 +1618,6 @@ class MCAEditorPanel(QWidget):
                 self._new_mel_buffer()
             elif language == "text":
                 self._new_text_buffer()
-
-    def _rename_tab_file(self, index):
-        """
-        Rename the file backing a tab via an input dialog.
-
-        Renames the file on disk and updates the tab title and internal
-        tracking to reflect the new name. Only works for file-backed tabs.
-
-        :param int index: Tab index of the file to rename.
-        """
-        if index < 0 or index >= len(self._editors):
-            return
-        editor, name, path = self._editors[index]
-        if not path:
-            return
-
-        old_name = os.path.basename(path)
-        new_name, ok = QInputDialog.getText(
-            self, "Rename File", "New filename:", text=old_name
-        )
-        if not ok or not new_name or new_name == old_name:
-            return
-
-        # Build the new path in the same directory.
-        new_path = os.path.join(os.path.dirname(path), new_name)
-
-        # Guard against overwriting an existing file.
-        if os.path.exists(new_path):
-            QMessageBox.warning(
-                self, "Rename Failed",
-                "A file named '{}' already exists in that folder.".format(new_name),
-            )
-            return
-
-        try:
-            os.rename(path, new_path)
-        except OSError as exc:
-            QMessageBox.warning(
-                self, "Rename Failed",
-                "Could not rename file:\n{}".format(exc),
-            )
-            return
-
-        # Update internal tracking with the new name and path.
-        self._editors[index] = (editor, new_name, new_path)
-
-        # Update the tab title (preserve the modified dot if present).
-        modified = editor.document().isModified()
-        display = "* {}".format(new_name) if modified else new_name
-        self._tab_widget.setTabText(index, display)
-        self._tab_widget.setTabToolTip(index, new_path)
-
-        # Refresh the open editors sidebar panel.
-        self._update_open_editors()
-
-        # Update recent files list — swap old path for new.
-        self._settings.add_recent_file(new_path)
-
-        self._show_status("Renamed to {}".format(new_name))
-        logger.info("Renamed file: %s -> %s", path, new_path)
-
-    def _copy_tab_path(self, index):
-        """
-        Copy the file path of a tab to the system clipboard.
-
-        :param int index: Tab index whose path to copy.
-        """
-        if index < 0 or index >= len(self._editors):
-            return
-        _, _, path = self._editors[index]
-        if not path:
-            return
-
-        clipboard = QApplication.instance().clipboard()
-        clipboard.setText(path)
-        self._show_status("Copied: {}".format(path))
-
-    def _open_tab_in_explorer(self, index):
-        """
-        Open the containing folder of a tab's file in the system file manager.
-
-        Uses ``os.startfile`` on Windows, ``open`` on macOS, and
-        ``xdg-open`` on Linux.
-
-        :param int index: Tab index whose file to reveal.
-        """
-        if index < 0 or index >= len(self._editors):
-            return
-        _, _, path = self._editors[index]
-        if not path:
-            return
-
-        import subprocess
-        import platform
-
-        folder = os.path.dirname(path)
-        system = platform.system()
-
-        try:
-            if system == "Windows":
-                # /select highlights the file in Explorer.
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-            elif system == "Darwin":
-                subprocess.Popen(["open", "-R", path])
-            else:
-                # Linux — just open the containing folder.
-                subprocess.Popen(["xdg-open", folder])
-        except Exception as exc:
-            logger.warning("Could not open file manager: %s", exc)
-            self._show_status("Could not open file manager")
-
-    def _close_other_tabs(self, keep_index):
-        """
-        Close all tabs except the one at keep_index.
-
-        Iterates right-to-left so indices stay valid as tabs are removed.
-
-        :param int keep_index: The tab index to keep open.
-        """
-        # Close tabs from right to left, skipping the one we want to keep.
-        for i in range(self._tab_widget.count() - 1, -1, -1):
-            if i != keep_index:
-                self._close_tab(i)
-                # Adjust keep_index if a tab before it was removed.
-                if i < keep_index:
-                    keep_index -= 1
 
     # =========================================================================
     # Execution
@@ -2090,9 +1823,13 @@ class MCAEditorPanel(QWidget):
         """Create a new MEL buffer."""
         editor = self._new_buffer()
         editor.set_language("mel")
-        idx = self._tab_widget.currentIndex()
-        self._tab_widget.setTabText(idx, "MEL")
-        self._editors[idx] = (editor, "MEL", None)
+        group = self._group_container.active_group()
+        if group:
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                group.set_tab_text(idx, "MEL")
+                group.set_tab_icon(idx, self._icon_for_language("mel"))
+                group.update_editor_entry(idx, editor, "MEL", None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -2100,9 +1837,13 @@ class MCAEditorPanel(QWidget):
         """Create a new Python buffer."""
         editor = self._new_buffer()
         editor.set_language("python")
-        idx = self._tab_widget.currentIndex()
-        self._tab_widget.setTabText(idx, "Python")
-        self._editors[idx] = (editor, "Python", None)
+        group = self._group_container.active_group()
+        if group:
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                group.set_tab_text(idx, "Python")
+                group.set_tab_icon(idx, self._icon_for_language("python"))
+                group.update_editor_entry(idx, editor, "Python", None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -2110,9 +1851,13 @@ class MCAEditorPanel(QWidget):
         """Create a new plain text buffer."""
         editor = self._new_buffer()
         editor.set_language("text")
-        idx = self._tab_widget.currentIndex()
-        self._tab_widget.setTabText(idx, "Text")
-        self._editors[idx] = (editor, "Text", None)
+        group = self._group_container.active_group()
+        if group:
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                group.set_tab_text(idx, "Text")
+                group.set_tab_icon(idx, self._icon_for_language("text"))
+                group.update_editor_entry(idx, editor, "Text", None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -2172,7 +1917,7 @@ class MCAEditorPanel(QWidget):
     def _save_all(self):
         """Save all modified files."""
         saved_count = 0
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             if path and editor.document().isModified():
                 self._write_file(editor, path)
                 saved_count += 1
@@ -2193,9 +1938,13 @@ class MCAEditorPanel(QWidget):
             try:
                 os.rename(old_path, new_path)
                 editor.file_path = new_path
-                idx = self._tab_widget.currentIndex()
-                self._tab_widget.setTabText(idx, new_name)
-                self._editors[idx] = (editor, new_name, new_path)
+                # Update tab text and tracking in the active group.
+                group = self._group_container.active_group()
+                if group:
+                    idx = group.index_of_editor(editor)
+                    if idx >= 0:
+                        group.set_tab_text(idx, new_name)
+                        group.update_editor_entry(idx, editor, new_name, new_path)
                 self._settings.add_recent_file(new_path)
                 self._update_open_editors()
                 self._output.write_info("Renamed: {} -> {}".format(old_path, new_path))
@@ -2251,19 +2000,23 @@ class MCAEditorPanel(QWidget):
             QMessageBox.warning(self, "Error", "Could not revert file:\n{}".format(str(exc)))
 
     def _close_all_files(self):
-        """Close all tabs."""
-        while self._tab_widget.count() > 0:
-            self._close_tab(0)
-            if self._tab_widget.count() == 1:
-                break
+        """Close all tabs in all groups."""
+        for group in list(self._group_container.groups()):
+            while group.count() > 0:
+                self._close_tab_in_group(group, 0)
+                # If the last group has 1 tab left, that's the auto-created buffer.
+                if (self._group_container.group_count() == 1
+                        and group.count() == 1):
+                    break
 
     def _save_state(self):
         """Save all temp buffers and session manifest to disk."""
-        for editor, name, path in self._editors:
+        all_editors = self._group_container.all_editors()
+        for editor, name, path in all_editors:
             if not path:
                 self._save_buffer_content(editor)
         self._save_session_manifest()
-        self._show_status("State saved ({} tabs)".format(len(self._editors)))
+        self._show_status("State saved ({} tabs)".format(len(all_editors)))
 
     # --- Edit handlers ---
 
@@ -2411,7 +2164,10 @@ class MCAEditorPanel(QWidget):
             self._output.toggle_search_bar()
             return
 
-        editor = self._current_editor()
+        group = self._group_container.active_group()
+        if not group:
+            return
+        editor = group.current_editor()
         if not editor:
             return
         # Pre-fill with selected text if there's a single-line selection.
@@ -2419,17 +2175,16 @@ class MCAEditorPanel(QWidget):
         cursor = editor.textCursor()
         if cursor.hasSelection():
             sel = cursor.selectedText()
-            # QTextCursor uses \u2029 for paragraph breaks; only pre-fill
-            # single-line selections to avoid confusing multi-line pastes.
             if "\u2029" not in sel:
                 selected = sel
-        self._find_bar.show_find(editor, selected)
-        # Reposition the overlay bar now that it's visible.
-        self._reposition_find_bar()
+        group.show_find(selected)
 
     def _show_replace(self):
         """Show the find bar in find+replace mode."""
-        editor = self._current_editor()
+        group = self._group_container.active_group()
+        if not group:
+            return
+        editor = group.current_editor()
         if not editor:
             return
         selected = ""
@@ -2438,63 +2193,7 @@ class MCAEditorPanel(QWidget):
             sel = cursor.selectedText()
             if "\u2029" not in sel:
                 selected = sel
-        self._find_bar.show_replace(editor, selected)
-        # Reposition the overlay bar now that it's visible.
-        self._reposition_find_bar()
-
-    def _reposition_find_bar(self):
-        """
-        Position the overlay find bar right below the tab bar, right-aligned.
-
-        The bar uses a compact width (up to 550px) rather than spanning
-        the full editor width, and is anchored to the right edge with
-        a small margin. Called from the event filter on resize, and
-        when the bar becomes visible or toggles its replace row.
-        """
-        if not self._find_bar.isVisible():
-            return
-
-        tab_bar = self._tab_widget.tabBar()
-        # Calculate Y offset: below the tab bar if visible, otherwise at top.
-        y_offset = (tab_bar.y() + tab_bar.height()) if tab_bar.isVisible() else 0
-
-        bar_height = self._find_bar.sizeHint().height()
-        parent_width = self._tab_widget.width()
-
-        # Compact width: use sizeHint but cap between min and max bounds.
-        min_bar_width = 450
-        max_bar_width = 580
-        bar_width = max(min_bar_width, min(max_bar_width, parent_width - 40))
-
-        # Right-align with a small margin from the edge.
-        right_margin = 8
-        x_offset = parent_width - bar_width - right_margin
-
-        self._find_bar.setGeometry(x_offset, y_offset, bar_width, bar_height)
-        # Ensure the find bar renders above the editor content.
-        self._find_bar.raise_()
-
-    def _on_search_selections_changed(self, selections):
-        """
-        Apply search-match highlights to the active editor.
-
-        Called by the FindReplaceBar whenever its match set changes.
-
-        :param list selections: List of QTextEdit.ExtraSelection items.
-        """
-        editor = self._current_editor()
-        if editor:
-            editor.set_search_selections(selections)
-
-    def _on_find_bar_closed(self):
-        """
-        Return focus to the editor when the find bar is dismissed.
-        """
-        editor = self._current_editor()
-        if editor:
-            # Clear search highlights when the bar closes.
-            editor.set_search_selections([])
-            editor.setFocus()
+        group.show_replace(selected)
 
     def _find_in_files(self):
         self._show_status("Find in Files: coming soon")
@@ -2521,15 +2220,10 @@ class MCAEditorPanel(QWidget):
     def _apply_settings_to_editors(self):
         """Push current settings to all open editors."""
         s = self._settings
-        font_family = s.get("font_family")
-        font_size = s.get("font_size")
-        tab_size = s.get("tab_size")
-        for editor, _name, _path in self._editors:
-            font = editor.font()
-            font.setFamily(font_family)
-            font.setPointSize(font_size)
-            editor.setFont(font)
-            editor.setTabStopDistance(font_size * tab_size)
+        # Push settings to every group.
+        for group in self._group_container.groups():
+            group.apply_settings(s)
+        # Output word wrap.
         output_wrap = s.get("output_word_wrap")
         if hasattr(self._output, "_output"):
             wrap_mode = (
@@ -2537,22 +2231,19 @@ class MCAEditorPanel(QWidget):
                 else QPlainTextEdit.LineWrapMode.NoWrap
             )
             self._output._output.setLineWrapMode(wrap_mode)
-        self._tab_widget.tabBar().setVisible(s.get("show_tab_bar"))
-        self._tab_widget.setTabsClosable(s.get("show_close_button_on_tab"))
-        self._tab_widget.setMovable(not s.get("lock_tabs"))
         logger.info("Settings applied to running editors")
 
     # --- View handlers ---
 
     def _toggle_code_editor(self):
-        self._tab_widget.setVisible(not self._tab_widget.isVisible())
+        self._group_container.setVisible(not self._group_container.isVisible())
 
     def _toggle_word_wrap(self, checked):
         mode = (
             QPlainTextEdit.LineWrapMode.WidgetWidth if checked
             else QPlainTextEdit.LineWrapMode.NoWrap
         )
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             editor.setLineWrapMode(mode)
         self._settings.set("word_wrap", checked)
 
@@ -2566,7 +2257,7 @@ class MCAEditorPanel(QWidget):
         """
         self._settings.set("show_whitespace", checked)
         # Apply to all open editor tabs.
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             editor.set_show_whitespace(checked)
         self._show_status("Whitespace rendering: {}".format("on" if checked else "off"))
 
@@ -2619,7 +2310,7 @@ class MCAEditorPanel(QWidget):
         self._apply_font_size()
 
     def _apply_font_size(self):
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             font = editor.font()
             font.setPointSize(self._default_font_size)
             editor.setFont(font)
@@ -2632,16 +2323,18 @@ class MCAEditorPanel(QWidget):
     # --- Go handlers ---
 
     def _next_editor(self):
-        count = self._tab_widget.count()
-        if count > 1:
-            idx = (self._tab_widget.currentIndex() + 1) % count
-            self._tab_widget.setCurrentIndex(idx)
+        """Cycle to the next editor within the active group."""
+        group = self._group_container.active_group()
+        if group and group.count() > 1:
+            idx = (group.current_index() + 1) % group.count()
+            group.set_current_index(idx)
 
     def _prev_editor(self):
-        count = self._tab_widget.count()
-        if count > 1:
-            idx = (self._tab_widget.currentIndex() - 1) % count
-            self._tab_widget.setCurrentIndex(idx)
+        """Cycle to the previous editor within the active group."""
+        group = self._group_container.active_group()
+        if group and group.count() > 1:
+            idx = (group.current_index() - 1) % group.count()
+            group.set_current_index(idx)
 
     def _go_to_file(self):
         """
@@ -2698,6 +2391,49 @@ class MCAEditorPanel(QWidget):
         )
         if ok:
             editor.go_to_line(line)
+
+    # --- Split / Group handlers -----------------------------------------------
+
+    def _split_editor_right(self):
+        """Split the current tab into a new group on the right."""
+        group = self._group_container.active_group()
+        if group and group.count() > 0:
+            self._group_container.split_right(group, group.current_index())
+
+    def _build_switch_group_menu(self):
+        """Dynamically populate the Switch Group submenu."""
+        self._switch_group_menu.clear()
+        groups = self._group_container.groups()
+        if len(groups) <= 1:
+            stub = self._switch_group_menu.addAction("No groups")
+            stub.setEnabled(False)
+            return
+        for i, group in enumerate(groups):
+            label = "Group {}".format(i + 1)
+            if group is self._group_container.active_group():
+                label += " (active)"
+            action = self._switch_group_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=None, idx=i: self._group_container.focus_group(idx)
+            )
+
+    def _on_sidebar_editor_selected(self, index):
+        """
+        Handle a click on an editor entry in the sidebar.
+
+        When there's only one group, ``index`` maps directly to a tab.
+        When there are multiple groups, we need to find the right group.
+
+        :param int index: Flat index across all groups.
+        """
+        # Walk the groups to find which one contains this flat index.
+        remaining = index
+        for group in self._group_container.groups():
+            if remaining < group.count():
+                group.set_current_index(remaining)
+                self._group_container._on_group_activated(group)
+                return
+            remaining -= group.count()
 
     # --- Output handlers ---
 
@@ -2775,7 +2511,7 @@ class MCAEditorPanel(QWidget):
             "<p>MCA Editor is currently in early development.<br>"
             "Future licensing tiers (Standard, Pro, Studio) are planned.</p>"
             "<hr>"
-            "<p style='color: #888;'>Contact: support@mcatools.com</p>"
+            "<p style='color: #888;'>Contact: info@mechart.org</p>"
         )
 
     def _show_about(self):
@@ -2804,7 +2540,7 @@ class MCAEditorPanel(QWidget):
         :return: True if there are unsaved changes.
         :rtype: bool
         """
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             if editor.document().isModified():
                 return True
         return False
@@ -2841,7 +2577,7 @@ class MCAEditorPanel(QWidget):
         editor can restore them on next launch.
         """
         # Persist all temp buffers to disk before shutting down.
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             if not path:
                 self._save_buffer_content(editor)
         self._save_session_manifest()

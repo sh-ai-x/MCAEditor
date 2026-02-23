@@ -53,7 +53,7 @@ if PYSIDE_VERSION == 6:
         QComboBox, QLabel, QLineEdit, QPushButton, QListWidgetItem,
         QFileDialog, QAbstractItemView, QFontComboBox, QTextEdit,
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
-        QSplitter, QTabWidget, QToolBar, QStatusBar, QMessageBox,
+        QSplitter, QTabWidget, QTabBar, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
         QFrame, QMenuBar, QMenu, QToolTip,
     )
@@ -73,7 +73,11 @@ if PYSIDE_VERSION == 6:
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor, QAction, QActionGroup,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,
+        QDrag,
     )
+
+    # Additional QtCore imports for drag-and-drop support.
+    from PySide6.QtCore import QMimeData, QByteArray
 
 
 # --- PySide2 imports with compat patches ------------------------------------
@@ -86,7 +90,7 @@ else:
         QComboBox, QLabel, QLineEdit, QPushButton, QListWidgetItem,
         QFileDialog, QAbstractItemView, QFontComboBox, QTextEdit,
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
-        QSplitter, QTabWidget, QToolBar, QStatusBar, QMessageBox,
+        QSplitter, QTabWidget, QTabBar, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
         QFrame, QMenuBar, QMenu, QToolTip,
     )
@@ -106,7 +110,11 @@ else:
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,
+        QDrag,
     )
+
+    # Additional QtCore imports for drag-and-drop support.
+    from PySide2.QtCore import QMimeData, QByteArray
 
     # -----------------------------------------------------------------------
     # PySide2 Compatibility Patches
@@ -186,6 +194,7 @@ else:
         ])
         _patch_enum_group(Qt, "WidgetAttribute", [
             "WA_DeleteOnClose",
+            "WA_TransparentForMouseEvents", "WA_NoSystemBackground",
         ])
         _patch_enum_group(Qt, "WindowType", [
             "Window", "Dialog", "Widget", "ToolTip", "FramelessWindowHint",
@@ -311,10 +320,17 @@ else:
             "SpellCheckUnderline",
         ])
 
-        # --- QEvent.Type enums (used by diagnostic tooltip hover) ---
+        # --- QEvent.Type enums (used by diagnostic tooltip hover and drag-drop) ---
         _patch_enum_group(QEvent, "Type", [
             "ToolTip", "MouseMove", "KeyPress", "KeyRelease",
             "FocusIn", "FocusOut", "Enter", "Leave",
+            "DragEnter", "DragMove", "DragLeave", "Drop",
+            "MouseButtonDblClick", "Resize",
+        ])
+
+        # --- Qt.DropAction enums (used by drag-and-drop tab splitting) ---
+        _patch_enum_group(Qt, "DropAction", [
+            "MoveAction", "IgnoreAction", "CopyAction",
         ])
 
         logger.debug("PySide2 enum compatibility patches applied")
