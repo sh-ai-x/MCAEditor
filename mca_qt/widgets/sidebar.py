@@ -541,10 +541,13 @@ class WorkspacePanel(QWidget):
             root_item.setIcon(0, folder_open())
             root_item.setData(0, Qt.ItemDataRole.UserRole, folder)
             root_item.setForeground(0, QColor("#cccccc"))
-            root_item.setExpanded(True)
 
             self._populate_folder(root_item, folder, depth=0)
             self._tree.addTopLevelItem(root_item)
+
+            # Expand AFTER adding to the tree — Qt silently ignores
+            # setExpanded() on items that aren't in a tree yet.
+            root_item.setExpanded(True)
 
     def _populate_folder(self, parent_item, folder_path, depth):
         """

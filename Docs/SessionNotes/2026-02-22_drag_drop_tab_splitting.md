@@ -116,6 +116,23 @@ Open, Reveal in Explorer, Copy, Copy Path, Rename, Delete
 - `_rename_path` and `_delete_path` with confirmation dialogs
 - Signal chain: `WorkspacePanel.file_created` → `MCASidebar.file_created` → `EditorPanel._open_file_path`
 
+## Session Persistence Fixes
+- **Workspace tree not expanding**: `setExpanded(True)` was called BEFORE
+  `addTopLevelItem()` — Qt silently ignores expansion on items not in a tree.
+  Moved expansion to after insertion.
+- **Output panel content**: Added `save_output()` / `load_output()` to
+  `SessionManager`, saving output as `output.log`. `cleanup()` saves on close,
+  `_restore_output()` loads on startup via `write_bulk()`.
+- **Font size default mismatch**: `_DEFAULTS["font_size"]` was 9 but code_editor
+  constructor uses 12. Aligned default to 12 so `settings.get("font_size")`
+  without explicit default returns the correct value.
+- **main_window.py closeEvent**: Was missing workspace_folders and font_size
+  saves. Added both + `sync()` call.
+- **Tab stop distance bug**: `editor_group.py` and `main_window.py` used
+  `font_size * tab_size` instead of `fontMetrics().horizontalAdvance(" ") * tab_size`.
+- **Font save robustness**: Added `sync()` call after font size save in
+  `_apply_font_size()` so zoom survives crashes/force-closes.
+
 ## Testing
 1. `python run.py` — launches without errors
 2. Drag tab to right/left/top/bottom of editor → creates correct split
@@ -129,3 +146,6 @@ Open, Reveal in Explorer, Copy, Copy Path, Rename, Delete
 10. Right-click folder → context menu with all actions working
 11. Right-click file → context menu with all actions working
 12. New File from folder context menu → creates file and opens in editor
+13. Workspace tree folders expanded on startup (root items visible)
+14. Output panel content restored from previous session on startup
+15. Font size zoom level persists across restarts

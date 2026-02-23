@@ -73,7 +73,7 @@ class MCASettings:
         # --- Appearance ---
         "theme": "dark",
         "font_family": "Consolas",
-        "font_size": 9,
+        "font_size": 12,
         "show_line_numbers": True,
         "show_indent_guides": True,
         "show_whitespace": False,

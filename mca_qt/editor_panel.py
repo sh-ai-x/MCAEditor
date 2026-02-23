@@ -164,6 +164,9 @@ class MCAEditorPanel(QWidget):
         # Override mode defaults with user's last-saved UI state.
         self._restore_ui_state()
 
+        # Restore the output panel content from the previous session.
+        self._restore_output()
+
         # Auto-detect running DCCs after a short delay.
         QTimer.singleShot(1000, self._auto_detect_dccs)
 
@@ -937,7 +940,19 @@ class MCAEditorPanel(QWidget):
 
         # --- Font size (apply saved zoom level to all open editors) ---
         if self._default_font_size != 12:
-            self._apply_font_size()
+            self._apply_font_size(notify=False)
+
+    def _restore_output(self):
+        """
+        Restore the output panel content from the previous session.
+
+        Loads the saved ``output.log`` file and inserts it into the
+        output window using ``write_bulk()`` for efficiency.
+        """
+        saved_text = self._session_manager.load_output()
+        if saved_text:
+            self._output.write_bulk(saved_text)
+            logger.info("Restored output log (%d chars)", len(saved_text))
 
     def _toggle_mode(self):
         """Toggle between simple and advanced mode."""
@@ -2298,7 +2313,14 @@ class MCAEditorPanel(QWidget):
         self._default_font_size = 12
         self._apply_font_size()
 
-    def _apply_font_size(self):
+    def _apply_font_size(self, notify=True):
+        """
+        Apply the current font size to all editors and persist it.
+
+        :param bool notify: If True, show a status bar message and save
+            to settings. Pass False during startup restore to avoid
+            unnecessary status messages and redundant writes.
+        """
         for editor, name, path in self._group_container.all_editors():
             font = editor.font()
             font.setPointSize(self._default_font_size)
@@ -2306,8 +2328,11 @@ class MCAEditorPanel(QWidget):
             editor.setTabStopDistance(
                 editor.fontMetrics().horizontalAdvance(" ") * editor._tab_size
             )
-        self._settings.set("font_size", self._default_font_size)
-        self._show_status("Font size: {}pt".format(self._default_font_size))
+        if notify:
+            # Save immediately so the zoom level survives a crash or force-close.
+            self._settings.set("font_size", self._default_font_size)
+            self._settings.sync()
+            self._show_status("Font size: {}pt".format(self._default_font_size))
 
     # --- Go handlers ---
 
@@ -2545,14 +2570,19 @@ class MCAEditorPanel(QWidget):
         """
         Clean up resources (called by host on close).
 
-        Saves all temp buffer contents and the session manifest so the
-        editor can restore them on next launch.
+        Saves all temp buffer contents, the session manifest, and the
+        output panel content so the editor can restore them on next launch.
         """
         # Persist all temp buffers to disk before shutting down.
         for editor, name, path in self._group_container.all_editors():
             if not path:
                 self._save_buffer_content(editor)
         self._save_session_manifest()
+
+        # Persist the output panel content so it survives restarts.
+        output_text = self._output._output.toPlainText()
+        if output_text.strip():
+            self._session_manager.save_output(output_text)
 
         self._adapter_manager.disconnect_all()
         logger.info("MCA Editor panel cleaning up")

@@ -164,6 +164,48 @@ class SessionManager:
         except Exception as exc:
             logger.error("Failed to remove buffer %s: %s", filepath, exc)
 
+    # --- Output Content Persistence ------------------------------------------
+
+    def save_output(self, content):
+        """
+        Save the output panel text to a file alongside the session manifest.
+
+        Stored as ``output.log`` in the preferences directory so the
+        output window contents survive across restarts.
+
+        :param str content: The plain text content of the output panel.
+        """
+        self._ensure_dirs()
+        filepath = os.path.join(self._prefs_dir, "output.log")
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.debug("Saved output log (%d chars)", len(content))
+        except Exception as exc:
+            logger.error("Failed to save output log: %s", exc)
+
+    def load_output(self):
+        """
+        Load the saved output panel text from disk.
+
+        :return: The saved output text, or None if no file exists.
+        :rtype: str or None
+        """
+        filepath = os.path.join(self._prefs_dir, "output.log")
+
+        if not os.path.isfile(filepath):
+            return None
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            logger.debug("Loaded output log (%d chars)", len(content))
+            return content
+        except Exception as exc:
+            logger.error("Failed to load output log: %s", exc)
+            return None
+
     # --- Buffer ID Allocation ------------------------------------------------
 
     def allocate_buffer_id(self):

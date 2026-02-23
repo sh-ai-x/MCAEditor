@@ -2227,7 +2227,9 @@ class MCAMainWindow(QMainWindow):
             font.setFamily(font_family)
             font.setPointSize(font_size)
             editor.setFont(font)
-            editor.setTabStopDistance(font_size * tab_size)
+            editor.setTabStopDistance(
+                editor.fontMetrics().horizontalAdvance(" ") * tab_size
+            )
 
         # Apply word wrap to the output window.
         output_wrap = s.get("output_word_wrap")
@@ -2382,7 +2384,9 @@ class MCAMainWindow(QMainWindow):
             editor.setTabStopDistance(
                 editor.fontMetrics().horizontalAdvance(" ") * editor._tab_size
             )
+        # Save immediately so the zoom level survives a crash or force-close.
         self._settings.set("font_size", self._default_font_size)
+        self._settings.sync()
         self._statusbar.showMessage(
             "Font size: {}pt".format(self._default_font_size), 3000
         )
@@ -2838,6 +2842,13 @@ class MCAMainWindow(QMainWindow):
         self._settings.set("output_visible", self._output.isVisible())
         self._settings.set("sidebar_visible", self._sidebar.isVisible())
         self._settings.set("ai_panel_visible", self._ai_panel.isVisible())
+
+        # Persist font size so zoom level survives restart.
+        self._settings.set("font_size", self._default_font_size)
+
+        # Persist workspace folders so the file tree survives restart.
+        folders = self._sidebar.workspace_panel.get_workspace_folders()
+        self._settings.set("workspace_folders", folders)
 
         self._settings.sync()
 

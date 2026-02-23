@@ -870,7 +870,9 @@ class EditorGroup(QWidget):
             font.setFamily(font_family)
             font.setPointSize(font_size)
             editor.setFont(font)
-            editor.setTabStopDistance(font_size * tab_size)
+            editor.setTabStopDistance(
+                editor.fontMetrics().horizontalAdvance(" ") * tab_size
+            )
 
         # Apply tab bar settings.
         self._tab_widget.tabBar().setVisible(settings.get("show_tab_bar"))
