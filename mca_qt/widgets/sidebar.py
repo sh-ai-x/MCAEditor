@@ -11,9 +11,14 @@ Dependencies:
 import os
 import logging
 
+import shutil
+import subprocess
+import platform
+
 from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QLabel, QPushButton, QFileDialog, QLineEdit,
+    QMenu, QApplication, QInputDialog, QMessageBox,
     Qt, Signal, QFileSystemWatcher,
     QColor,
 )
@@ -269,6 +274,54 @@ class OpenEditorsPanel(QWidget):
 
             self._tree.addTopLevelItem(item)
 
+    def update_editors_grouped(self, groups_data):
+        """
+        Update the open editors list with group headers.
+
+        Shows a "Group N" header for each group when there are
+        multiple groups. Each editor item stores a flat index so
+        the sidebar's ``editor_selected`` signal works with the
+        panel's flat-index lookup.
+
+        :param list groups_data: List of lists, where each inner list
+            contains tab dicts (same format as ``update_editors``).
+        """
+        self._tree.clear()
+
+        lang_icons = {
+            "python": python_logo,
+            "mel": maya_logo,
+            "text": text_icon,
+        }
+
+        flat_index = 0
+        for gi, group_tabs in enumerate(groups_data):
+            # Add a group header item.
+            header = QTreeWidgetItem()
+            header.setText(0, "Group {}".format(gi + 1))
+            header.setForeground(0, QColor("#888888"))
+            # Headers are not selectable — no UserRole data.
+            header.setFlags(header.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self._tree.addTopLevelItem(header)
+
+            for tab in group_tabs:
+                name = tab.get("name", "Untitled")
+                if tab.get("modified", False):
+                    name = "* {}".format(name)
+
+                item = QTreeWidgetItem()
+                item.setText(0, "  {}".format(name))
+                item.setToolTip(0, tab.get("path", "Temporary buffer"))
+                # Store flat index for the panel's lookup.
+                item.setData(0, Qt.ItemDataRole.UserRole, flat_index)
+
+                language = tab.get("language", "")
+                icon_fn = lang_icons.get(language, text_icon)
+                item.setIcon(0, icon_fn())
+
+                self._tree.addTopLevelItem(item)
+                flat_index += 1
+
     def _on_item_clicked(self, item, column):
         """
         Handle click on an editor entry.
@@ -425,6 +478,11 @@ class WorkspacePanel(QWidget):
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.itemCollapsed.connect(self._on_item_collapsed)
+
+        # Enable right-click context menus on the tree.
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
+
         layout.addWidget(self._tree)
 
         # --- Empty state message ---
@@ -641,6 +699,368 @@ class WorkspacePanel(QWidget):
             child.setHidden(False)
             self._set_all_visible(child)
 
+    # --- Context Menu ---------------------------------------------------------
+
+    def _on_context_menu(self, pos):
+        """
+        Show a context menu on right-click in the tree widget.
+
+        Shows different menus for folders vs files. If no item is
+        clicked, no menu is shown.
+
+        :param QPoint pos: Click position in tree widget coordinates.
+        """
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #cccccc;
+                border: 1px solid #3f3f46;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 4px 24px 4px 12px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+            }
+            QMenu::item:disabled {
+                color: #666666;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #3f3f46;
+                margin: 4px 8px;
+            }
+        """)
+
+        if os.path.isdir(path):
+            self._build_folder_context_menu(menu, item, path)
+        elif os.path.isfile(path):
+            self._build_file_context_menu(menu, item, path)
+
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _build_folder_context_menu(self, menu, item, folder_path):
+        """
+        Build the context menu for a folder item.
+
+        Actions: New File, New Folder, Reveal in Explorer,
+        Find in Folder, Paste, Copy Path, Delete.
+
+        :param QMenu menu: The menu to populate.
+        :param QTreeWidgetItem item: The clicked tree item.
+        :param str folder_path: Absolute path to the folder.
+        """
+        # --- New File ---
+        new_file_action = menu.addAction("New File")
+        new_file_action.triggered.connect(
+            lambda: self._new_file_in_folder(folder_path)
+        )
+
+        # --- New Folder ---
+        new_folder_action = menu.addAction("New Folder")
+        new_folder_action.triggered.connect(
+            lambda: self._new_folder_in_folder(folder_path)
+        )
+
+        # --- Reveal in Explorer ---
+        reveal_action = menu.addAction("Reveal in Explorer")
+        reveal_action.triggered.connect(
+            lambda: self._reveal_in_explorer(folder_path)
+        )
+
+        menu.addSeparator()
+
+        # --- Find in Folder ---
+        find_action = menu.addAction("Find in Folder...")
+        find_action.setEnabled(False)  # Placeholder for future implementation.
+
+        menu.addSeparator()
+
+        # --- Paste ---
+        paste_action = menu.addAction("Paste")
+        # Only enable if the clipboard has a file path that exists.
+        clipboard = QApplication.instance().clipboard()
+        clipboard_text = clipboard.text().strip() if clipboard else ""
+        can_paste = bool(clipboard_text) and os.path.exists(clipboard_text)
+        paste_action.setEnabled(can_paste)
+        if can_paste:
+            paste_action.triggered.connect(
+                lambda: self._paste_into_folder(folder_path, clipboard_text)
+            )
+
+        # --- Copy Path ---
+        copy_path_action = menu.addAction("Copy Path")
+        copy_path_action.triggered.connect(
+            lambda: self._copy_path(folder_path)
+        )
+
+        menu.addSeparator()
+
+        # --- Delete ---
+        delete_action = menu.addAction("Delete")
+        delete_action.triggered.connect(
+            lambda: self._delete_path(folder_path, is_folder=True)
+        )
+
+    def _build_file_context_menu(self, menu, item, file_path):
+        """
+        Build the context menu for a file item.
+
+        Actions: Open, Reveal in Explorer, Copy, Copy Path, Rename, Delete.
+
+        :param QMenu menu: The menu to populate.
+        :param QTreeWidgetItem item: The clicked tree item.
+        :param str file_path: Absolute path to the file.
+        """
+        # --- Open ---
+        open_action = menu.addAction("Open")
+        open_action.triggered.connect(
+            lambda: self.file_open_requested.emit(file_path)
+        )
+
+        # --- Reveal in Explorer ---
+        reveal_action = menu.addAction("Reveal in Explorer")
+        reveal_action.triggered.connect(
+            lambda: self._reveal_in_explorer(file_path)
+        )
+
+        menu.addSeparator()
+
+        # --- Copy (file path to clipboard for paste operations) ---
+        copy_action = menu.addAction("Copy")
+        copy_action.triggered.connect(
+            lambda: self._copy_path(file_path)
+        )
+
+        # --- Copy Path ---
+        copy_path_action = menu.addAction("Copy Path")
+        copy_path_action.triggered.connect(
+            lambda: self._copy_path(file_path)
+        )
+
+        menu.addSeparator()
+
+        # --- Rename ---
+        rename_action = menu.addAction("Rename")
+        rename_action.triggered.connect(
+            lambda: self._rename_path(file_path)
+        )
+
+        # --- Delete ---
+        delete_action = menu.addAction("Delete")
+        delete_action.triggered.connect(
+            lambda: self._delete_path(file_path, is_folder=False)
+        )
+
+    # --- Context Menu Actions ------------------------------------------------
+
+    def _new_file_in_folder(self, folder_path):
+        """
+        Create a new file inside the given folder.
+
+        Prompts the user for a filename, creates the file, and emits
+        file_created so the editor can open it.
+
+        :param str folder_path: The folder to create the file in.
+        """
+        name, ok = QInputDialog.getText(
+            self, "New File", "File name:",
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        new_path = os.path.join(folder_path, name)
+
+        # Don't overwrite existing files.
+        if os.path.exists(new_path):
+            QMessageBox.warning(
+                self, "File Exists",
+                "A file or folder named '{}' already exists.".format(name)
+            )
+            return
+
+        try:
+            # Create an empty file.
+            with open(new_path, "w", encoding="utf-8") as f:
+                f.write("")
+            logger.info("Created new file: %s", new_path)
+
+            # Emit so the editor opens the new file.
+            self.file_created.emit(new_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not create file:\n{}".format(str(exc))
+            )
+
+    def _new_folder_in_folder(self, folder_path):
+        """
+        Create a new subfolder inside the given folder.
+
+        :param str folder_path: The parent folder.
+        """
+        name, ok = QInputDialog.getText(
+            self, "New Folder", "Folder name:",
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        new_path = os.path.join(folder_path, name)
+
+        if os.path.exists(new_path):
+            QMessageBox.warning(
+                self, "Folder Exists",
+                "A file or folder named '{}' already exists.".format(name)
+            )
+            return
+
+        try:
+            os.makedirs(new_path, exist_ok=True)
+            logger.info("Created new folder: %s", new_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not create folder:\n{}".format(str(exc))
+            )
+
+    def _reveal_in_explorer(self, path):
+        """
+        Open the system file explorer and highlight the given path.
+
+        :param str path: Absolute path to reveal.
+        """
+        try:
+            if platform.system() == "Windows":
+                # /select highlights the file/folder in Explorer.
+                if os.path.isfile(path):
+                    subprocess.Popen(["explorer", "/select,", path])
+                else:
+                    subprocess.Popen(["explorer", path])
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", "-R", path])
+            else:
+                # Linux — open the containing folder.
+                folder = path if os.path.isdir(path) else os.path.dirname(path)
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as exc:
+            logger.warning("Could not reveal in explorer: %s", exc)
+
+    def _copy_path(self, path):
+        """
+        Copy a file or folder path to the system clipboard.
+
+        :param str path: The path to copy.
+        """
+        clipboard = QApplication.instance().clipboard()
+        clipboard.setText(path)
+
+    def _paste_into_folder(self, folder_path, source_path):
+        """
+        Copy a file or folder from the clipboard path into the target folder.
+
+        :param str folder_path: Destination folder.
+        :param str source_path: Source file or folder path from clipboard.
+        """
+        basename = os.path.basename(source_path)
+        dest_path = os.path.join(folder_path, basename)
+
+        # Avoid overwriting.
+        if os.path.exists(dest_path):
+            QMessageBox.warning(
+                self, "Already Exists",
+                "'{}' already exists in the target folder.".format(basename)
+            )
+            return
+
+        try:
+            if os.path.isdir(source_path):
+                shutil.copytree(source_path, dest_path)
+            else:
+                shutil.copy2(source_path, dest_path)
+            logger.info("Pasted '%s' into '%s'", basename, folder_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not paste:\n{}".format(str(exc))
+            )
+
+    def _rename_path(self, path):
+        """
+        Rename a file or folder.
+
+        :param str path: Absolute path to the item to rename.
+        """
+        old_name = os.path.basename(path)
+        new_name, ok = QInputDialog.getText(
+            self, "Rename", "New name:", text=old_name,
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+
+        new_name = new_name.strip()
+        parent_dir = os.path.dirname(path)
+        new_path = os.path.join(parent_dir, new_name)
+
+        if os.path.exists(new_path):
+            QMessageBox.warning(
+                self, "Already Exists",
+                "'{}' already exists.".format(new_name)
+            )
+            return
+
+        try:
+            os.rename(path, new_path)
+            logger.info("Renamed '%s' -> '%s'", old_name, new_name)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not rename:\n{}".format(str(exc))
+            )
+
+    def _delete_path(self, path, is_folder):
+        """
+        Delete a file or folder after user confirmation.
+
+        :param str path: Absolute path to delete.
+        :param bool is_folder: True if deleting a folder.
+        """
+        name = os.path.basename(path)
+        kind = "folder" if is_folder else "file"
+
+        reply = QMessageBox.question(
+            self, "Delete {}".format(kind.title()),
+            "Are you sure you want to delete '{}'?".format(name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            if is_folder:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            logger.info("Deleted %s: %s", kind, path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Error",
+                "Could not delete {}:\n{}".format(kind, str(exc))
+            )
+
+    # --- Item Helpers --------------------------------------------------------
+
     def _is_folder_item(self, item):
         """
         Check whether a tree item represents a directory.
@@ -702,6 +1122,7 @@ class MCASidebar(QWidget):
 
     # Forwarded signals from child panels.
     file_open_requested = Signal(str)
+    file_created = Signal(str)
     outline_item_clicked = Signal(int)
     editor_selected = Signal(int)
     new_tab_requested = Signal()
@@ -725,6 +1146,7 @@ class MCASidebar(QWidget):
         # Workspace panel (visible in Advanced mode only).
         self.workspace_panel = WorkspacePanel()
         self.workspace_panel.file_open_requested.connect(self.file_open_requested.emit)
+        self.workspace_panel.file_created.connect(self.file_created.emit)
         self.workspace_panel.new_tab_requested.connect(self.new_tab_requested.emit)
         self.workspace_panel.open_file_requested.connect(self.open_file_requested.emit)
         layout.addWidget(self.workspace_panel, stretch=3)

@@ -9,7 +9,7 @@ This module ties all UI components together: tab management, menu bar,
 toolbar, status bar, execution routing, and DCC connection dialogs.
 
 Dependencies:
-    - PySide6 (QMainWindow, QSplitter, QTabWidget, etc.)
+    - PySide6 (QMainWindow, QSplitter, etc.)
 
 Side Effects:
     - Reads/writes window geometry to QSettings on open/close.
@@ -25,11 +25,12 @@ import webbrowser
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QTabWidget, QToolBar, QStatusBar, QLabel, QComboBox, QPushButton,
+    QToolBar, QStatusBar, QLabel, QComboBox, QPushButton,
     QFileDialog, QMessageBox, QDialog, QFormLayout, QLineEdit,
-    QSpinBox, QDialogButtonBox, QInputDialog, QApplication, QMenu
+    QSpinBox, QDialogButtonBox, QInputDialog, QApplication, QMenu,
+    QPlainTextEdit
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QTextCursor
 
 from mca_editor.config.settings import MCASettings, EditorMode
@@ -39,7 +40,7 @@ from mca_editor.ui.sidebar import MCASidebar
 from mca_editor.ui.ai_panel import AIPanel
 from mca_editor.ui.settings_dialog import SettingsDialog
 from mca_editor.adapters import AdapterManager, DCCType, ConnectionState
-from mca_qt.widgets.find_replace_bar import FindReplaceBar
+from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup
 
 # Module-level logger for main window operations.
@@ -193,7 +194,8 @@ class MCAMainWindow(QMainWindow):
         super().__init__()
         self._settings = settings
         self._adapter_manager = AdapterManager()
-        self._editors = []  # List of (editor, tab_name, file_path) tuples
+        # NOTE: _editors list is no longer maintained here -- editors are
+        # tracked inside EditorGroupContainer -> EditorGroup instances.
         self._editor_mode = settings.get_editor_mode()
         self._closed_files = []  # Track recently closed files for reopen feature.
         # Restore saved font size (falls back to 12 if never changed).
@@ -215,7 +217,6 @@ class MCAMainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_connections()
-        self._setup_find_bar()
 
         # Create the first empty buffer (like Charcoal Editor 2).
         self._new_buffer()
@@ -276,65 +277,14 @@ class MCAMainWindow(QMainWindow):
         self._output = OutputWindow()
         self._center_splitter.addWidget(self._output)
 
-        # Tab widget for code editor buffers (below output).
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setTabsClosable(True)
-        self._tab_widget.setMovable(True)
-        self._tab_widget.setDocumentMode(True)
-        # Enable scroll arrows when tabs overflow the available width.
-        self._tab_widget.setUsesScrollButtons(True)
-        self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
-        # Offset the tab bar to the right so overlay nav buttons don't overlap tabs.
-        self._tab_widget.setStyleSheet("QTabWidget::tab-bar { left: 60px; }")
-        self._tab_widget.tabCloseRequested.connect(self._close_tab)
-        self._tab_widget.currentChanged.connect(self._on_tab_changed)
-
-        # --- Tab bar overlay buttons ---
-        # Document mode hides corner widgets, so we parent overlay buttons
-        # directly to the tab widget and position them via event filter.
-        # Shared style for all tab-bar overlay buttons.
-        _tab_btn_style = """
-            QPushButton {{
-                background: transparent;
-                color: {color};
-                border: none;
-                border-radius: 3px;
-                font-size: {size};
-                font-weight: bold;
-                padding: {padding};
-            }}
-            QPushButton:hover {{
-                background-color: #3e3e42;
-            }}
-            QPushButton:pressed {{
-                background-color: #094771;
-            }}
-        """
-
-        # Left/right scroll arrows — always visible on the left side.
-        self._scroll_left_btn = QPushButton("\u2039", self._tab_widget)
-        self._scroll_left_btn.setToolTip("Scroll tabs left")
-        self._scroll_left_btn.setFixedSize(28, 28)
-        self._scroll_left_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="24px", padding="0 0 4px 0"))
-        self._scroll_left_btn.clicked.connect(self._scroll_tabs_left)
-
-        self._scroll_right_btn = QPushButton("\u203a", self._tab_widget)
-        self._scroll_right_btn.setToolTip("Scroll tabs right")
-        self._scroll_right_btn.setFixedSize(28, 28)
-        self._scroll_right_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="24px", padding="0 0 4px 0"))
-        self._scroll_right_btn.clicked.connect(self._scroll_tabs_right)
-
-        # "..." (vertical dots) button for the tab list dropdown.
-        self._tab_list_btn = QPushButton("\u22ee", self._tab_widget)
-        self._tab_list_btn.setToolTip("List all open tabs")
-        self._tab_list_btn.setFixedSize(28, 28)
-        self._tab_list_btn.setStyleSheet(_tab_btn_style.format(
-            color="#999999", size="18px", padding="0"))
-        self._tab_list_btn.clicked.connect(self._show_tab_list_menu)
-
-        self._center_splitter.addWidget(self._tab_widget)
+        # Editor group container -- holds one or more editor groups
+        # (each group is a QTabWidget with find bar and tab nav buttons).
+        # Replaces the old single _tab_widget with split/side-by-side support.
+        self._group_container = EditorGroupContainer()
+        self._group_container.active_editor_changed.connect(self._on_active_editor_changed)
+        self._group_container.editors_changed.connect(self._update_open_editors)
+        self._group_container.tab_close_requested.connect(self._close_tab_in_group)
+        self._center_splitter.addWidget(self._group_container)
 
         # Default split: 30% output (top), 70% editor (bottom).
         self._center_splitter.setSizes([250, 600])
@@ -442,15 +392,16 @@ class MCAMainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        revert = file_menu.addAction("Revert File")
-        revert.setStatusTip("Discard changes and reload the file from disk")
-        revert.triggered.connect(self._revert_file)
-        self._register_action("Revert File", revert)
+        unlock = file_menu.addAction("Unlock File")
+        unlock.setStatusTip("Unlock the current file for editing")
+        unlock.triggered.connect(self._unlock_file)
+        self._register_action("Unlock File", unlock)
 
+        # Close the current tab in the active group.
         close_action = file_menu.addAction("Close File")
         close_action.setShortcut(QKeySequence("Ctrl+W"))
         close_action.setStatusTip("Close the current editor tab")
-        close_action.triggered.connect(lambda: self._close_tab(self._tab_widget.currentIndex()))
+        close_action.triggered.connect(self._close_current_tab)
         self._register_action("Close File", close_action)
 
         close_all = file_menu.addAction("Close All Files")
@@ -661,17 +612,20 @@ class MCAMainWindow(QMainWindow):
         self._toggle_sidebar_action.triggered.connect(self._toggle_sidebar)
         self._register_action("Toggle Side Bar", self._toggle_sidebar_action)
 
-        hide_activity = view_menu.addAction("Hide Activity Bar")
-        hide_activity.setStatusTip("Show or hide the activity bar icons")
-        hide_activity.triggered.connect(
-            lambda: self._statusbar.showMessage("Hide Activity Bar: coming soon", 3000)
-        )
-
-        hide_statusbar = view_menu.addAction("Hide Status Bar")
-        hide_statusbar.setStatusTip("Show or hide the status bar at the bottom")
-        hide_statusbar.triggered.connect(self._toggle_statusbar)
+        # "Activity Bar" refers to the bottom blue status bar.
+        hide_activity = view_menu.addAction("Toggle Activity Bar")
+        hide_activity.setStatusTip("Show or hide the bottom activity bar")
+        hide_activity.triggered.connect(self._toggle_statusbar)
+        self._register_action("Toggle Activity Bar", hide_activity)
 
         view_menu.addSeparator()
+
+        # Split the current tab into a new group on the right.
+        split_right = view_menu.addAction("Split Editor Right")
+        split_right.setShortcut(QKeySequence("Ctrl+\\"))
+        split_right.setStatusTip("Split the current editor into a new group on the right")
+        split_right.triggered.connect(self._split_editor_right)
+        self._register_action("Split Editor Right", split_right)
 
         toggle_layout = view_menu.addAction("Toggle Code Editor Layout")
         toggle_layout.setShortcut(QKeySequence("Alt+Shift+1"))
@@ -696,7 +650,7 @@ class MCAMainWindow(QMainWindow):
         bottom_action.setStatusTip("Place the output panel below the editor")
         bottom_action.triggered.connect(lambda: self._set_output_position("bottom"))
 
-        # Left/Right are impractical for an output panel — leave as stubs.
+        # Left/Right are impractical for an output panel -- leave as stubs.
         for pos in ["Left", "Right"]:
             act = output_pos_menu.addAction(pos)
             act.triggered.connect(
@@ -787,11 +741,6 @@ class MCAMainWindow(QMainWindow):
         prev_used = switch_menu.addAction("Previous Used Editor\tCtrl+Shift+Tab")
         prev_used.setStatusTip("Switch to the previous most recently used editor")
         prev_used.triggered.connect(self._prev_editor)
-
-        # Switch Group submenu (stub).
-        switch_group = go_menu.addMenu("Switch Group")
-        sg_stub = switch_group.addAction("No groups")
-        sg_stub.setEnabled(False)
 
         go_menu.addSeparator()
 
@@ -905,7 +854,7 @@ class MCAMainWindow(QMainWindow):
 
         cmd_menu.addSeparator()
 
-        # Pylint submenu — open or create the pylintrc configuration file.
+        # Pylint submenu -- open or create the pylintrc configuration file.
         pylint_menu = cmd_menu.addMenu("Pylint")
         open_pylintrc = pylint_menu.addAction("Open pylintrc")
         open_pylintrc.setStatusTip("Open or create the Pylint configuration file")
@@ -1116,8 +1065,10 @@ class MCAMainWindow(QMainWindow):
         """Wire up signals between all UI components."""
         # Sidebar signals -> editor navigation.
         self._sidebar.file_open_requested.connect(self._open_file_path)
+        self._sidebar.file_created.connect(self._open_file_path)
         self._sidebar.outline_item_clicked.connect(self._goto_outline_item)
-        self._sidebar.editor_selected.connect(self._tab_widget.setCurrentIndex)
+        # Sidebar editor clicks go through the group-aware handler.
+        self._sidebar.editor_selected.connect(self._on_sidebar_editor_selected)
 
         # Output verbosity combobox -> sync with the main window's verbosity.
         self._output.verbosity_changed.connect(self._set_verbosity)
@@ -1132,98 +1083,6 @@ class MCAMainWindow(QMainWindow):
         for adapter in self._adapter_manager.get_all_adapters().values():
             adapter.set_output_callback(self._filtered_output)
             adapter.set_error_callback(self._filtered_error)
-
-    def _setup_find_bar(self):
-        """
-        Create the find/replace bar as an overlay inside the tab widget.
-
-        The bar is a direct child of the QTabWidget (not in any layout)
-        and is positioned right below the tab bar using geometry management.
-        An event filter on the tab widget handles repositioning on resize.
-        """
-        # Parent the find bar to the tab widget so it clips correctly.
-        self._find_bar = FindReplaceBar(self._tab_widget)
-        self._find_bar.search_selections_changed.connect(self._on_search_selections_changed)
-        self._find_bar.closed.connect(self._on_find_bar_closed)
-        # Reposition the overlay when the replace row is toggled (height changes).
-        self._find_bar.geometry_changed.connect(self._reposition_find_bar)
-        # Listen for resize events on the tab widget to reposition overlays.
-        self._tab_widget.installEventFilter(self)
-        self._find_bar.hide()
-
-        # Position the "..." tab list button after a short delay so the
-        # tab widget has its final geometry before we calculate placement.
-        QTimer.singleShot(0, self._reposition_tab_nav_buttons)
-
-    def eventFilter(self, obj, event):
-        """
-        Event filter for the tab widget to reposition overlays on resize.
-
-        Repositions the find bar and the tab list "..." button whenever
-        the tab widget changes size.
-
-        :param QObject obj: The object that generated the event.
-        :param QEvent event: The event to filter.
-        :return: True if the event was handled, False to pass it along.
-        :rtype: bool
-        """
-        # Reposition overlay widgets when the tab widget resizes.
-        if obj is self._tab_widget and event.type() == QEvent.Type.Resize:
-            self._reposition_find_bar()
-            self._reposition_tab_nav_buttons()
-
-        return super().eventFilter(obj, event)
-
-    def _reposition_tab_nav_buttons(self):
-        """
-        Position the scroll arrows and tab list button on the tab bar.
-
-        Left/right arrows sit at the far left; the '...' button sits
-        at the far right. All are vertically centered on the tab bar.
-        Called from the event filter on resize and once after init.
-        """
-        tab_bar = self._tab_widget.tabBar()
-        bar_y = tab_bar.y()
-        bar_h = tab_bar.height()
-
-        # --- Left arrow ---
-        lw = self._scroll_left_btn.width()
-        lh = self._scroll_left_btn.height()
-        self._scroll_left_btn.move(2, bar_y + (bar_h - lh) // 2)
-        self._scroll_left_btn.raise_()
-
-        # --- Right arrow (next to left arrow) ---
-        rw = self._scroll_right_btn.width()
-        rh = self._scroll_right_btn.height()
-        self._scroll_right_btn.move(2 + lw, bar_y + (bar_h - rh) // 2)
-        self._scroll_right_btn.raise_()
-
-        # --- "..." tab list button on the far right ---
-        tw = self._tab_list_btn.width()
-        th = self._tab_list_btn.height()
-        x = self._tab_widget.width() - tw - 2
-        self._tab_list_btn.move(x, bar_y + (bar_h - th) // 2)
-        self._tab_list_btn.raise_()
-
-    def _scroll_tabs_left(self):
-        """
-        Scroll the tab bar to the left by clicking Qt's internal scroll button.
-        """
-        from PySide6.QtWidgets import QToolButton
-        for child in self._tab_widget.findChildren(QToolButton):
-            if child.objectName() == "ScrollLeftButton" and child.isVisible():
-                child.click()
-                return
-
-    def _scroll_tabs_right(self):
-        """
-        Scroll the tab bar to the right by clicking Qt's internal scroll button.
-        """
-        from PySide6.QtWidgets import QToolButton
-        for child in self._tab_widget.findChildren(QToolButton):
-            if child.objectName() == "ScrollRightButton" and child.isVisible():
-                child.click()
-                return
 
     # =========================================================================
     # Editor Mode (Simple / Advanced)
@@ -1276,7 +1135,7 @@ class MCAMainWindow(QMainWindow):
         # --- Main splitter (sidebar | editor | AI) ---
         saved_main = s.get("splitter_sizes")
         if saved_main:
-            # QSettings may return strings — coerce to int.
+            # QSettings may return strings -- coerce to int.
             try:
                 self._main_splitter.setSizes([int(v) for v in saved_main])
             except (TypeError, ValueError):
@@ -1306,7 +1165,7 @@ class MCAMainWindow(QMainWindow):
         show_ws = s.get("show_whitespace", False)
         if show_ws:
             self._whitespace_action.setChecked(True)
-            for editor, name, path in self._editors:
+            for editor, name, path in self._group_container.all_editors():
                 editor.set_show_whitespace(True)
 
         # --- Font size (apply saved zoom level to all open editors) ---
@@ -1347,7 +1206,7 @@ class MCAMainWindow(QMainWindow):
                 self._main_splitter.setSizes(sizes)
 
     # =========================================================================
-    # Tab / Buffer Management (like Charcoal Editor 2)
+    # Tab / Buffer Management
     # =========================================================================
 
     def _current_editor(self):
@@ -1357,10 +1216,7 @@ class MCAMainWindow(QMainWindow):
         :return: The active editor widget, or None.
         :rtype: MCACodeEditor or None
         """
-        widget = self._tab_widget.currentWidget()
-        if isinstance(widget, MCACodeEditor):
-            return widget
-        return None
+        return self._group_container.current_editor()
 
     def _new_buffer(self):
         """
@@ -1385,9 +1241,8 @@ class MCAMainWindow(QMainWindow):
         lang_map = {"python": "Python", "mel": "MEL"}
         tab_name = lang_map.get(editor.language, "Python")
 
-        idx = self._tab_widget.addTab(editor, tab_name)
-        self._editors.append((editor, tab_name, None))
-        self._tab_widget.setCurrentIndex(idx)
+        # Add editor to the active group via the container.
+        self._group_container.add_editor(editor, tab_name, None)
 
         self._update_open_editors()
         return editor
@@ -1408,11 +1263,13 @@ class MCAMainWindow(QMainWindow):
 
         :param str filepath: Absolute path to the file to open.
         """
-        # Check if the file is already open in a tab.
-        for i, (editor, name, path) in enumerate(self._editors):
-            if path == filepath:
-                self._tab_widget.setCurrentIndex(i)
-                return
+        # Check if the file is already open in any group.
+        group, idx, existing = self._group_container.find_editor_by_path(filepath)
+        if group is not None:
+            group.set_current_index(idx)
+            # Activate that group so it becomes the focused one.
+            self._group_container._on_group_activated(group)
+            return
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -1437,9 +1294,8 @@ class MCAMainWindow(QMainWindow):
         self._apply_editor_state(editor)
 
         tab_name = os.path.basename(filepath)
-        idx = self._tab_widget.addTab(editor, tab_name)
-        self._editors.append((editor, tab_name, filepath))
-        self._tab_widget.setCurrentIndex(idx)
+        # Add editor to the active group via the container.
+        self._group_container.add_editor(editor, tab_name, filepath)
 
         self._settings.add_recent_file(filepath)
         self._build_recent_files_menu()
@@ -1471,11 +1327,14 @@ class MCAMainWindow(QMainWindow):
             self._write_file(editor, filepath)
             editor.file_path = filepath
 
-            # Update tab name and tracking.
-            idx = self._tab_widget.currentIndex()
+            # Update the tab text and internal tracking in the active group.
             tab_name = os.path.basename(filepath)
-            self._tab_widget.setTabText(idx, tab_name)
-            self._editors[idx] = (editor, tab_name, filepath)
+            group = self._group_container.active_group()
+            if group:
+                idx = group.index_of_editor(editor)
+                if idx >= 0:
+                    group.set_tab_text(idx, tab_name)
+                    group.update_editor_entry(idx, editor, tab_name, filepath)
             self._settings.add_recent_file(filepath)
             self._update_open_editors()
 
@@ -1495,18 +1354,21 @@ class MCAMainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Error", "Could not save file:\n{}".format(str(exc)))
 
-    def _close_tab(self, index):
+    def _close_tab_in_group(self, group, index):
         """
-        Close a tab/buffer, prompting to save if modified.
+        Close a tab in a specific group, prompting to save if modified.
 
-        Always keeps at least one buffer open.
+        This is the primary close handler, connected to the container's
+        ``tab_close_requested`` signal.
 
+        :param object group: The EditorGroup containing the tab.
         :param int index: Tab index to close.
         """
-        if index < 0 or index >= len(self._editors):
+        editors = group.editors()
+        if index < 0 or index >= len(editors):
             return
 
-        editor, name, path = self._editors[index]
+        editor, name, path = editors[index]
 
         # Prompt for unsaved changes.
         if editor.document().isModified():
@@ -1518,34 +1380,39 @@ class MCAMainWindow(QMainWindow):
                 QMessageBox.StandardButton.Cancel
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._tab_widget.setCurrentIndex(index)
+                group.set_current_index(index)
                 self._save_file()
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
-
-        self._tab_widget.removeTab(index)
-        self._editors.pop(index)
 
         # Track closed file for "reopen closed file" feature.
         if path:
             self._closed_files.append(path)
 
+        group.remove_editor(index)
         self._update_open_editors()
 
-        # Ensure at least one buffer is always open (CE2 behavior).
-        if self._tab_widget.count() == 0:
+        # If the active group is now empty and it's the only group,
+        # create a fresh buffer so the UI is never blank.
+        active = self._group_container.active_group()
+        if active and active.count() == 0 and self._group_container.group_count() == 1:
             self._new_buffer()
 
-    def _on_tab_changed(self, index):
+    def _close_current_tab(self):
+        """Close the current tab in the active group."""
+        group = self._group_container.active_group()
+        if group:
+            self._close_tab_in_group(group, group.current_index())
+
+    def _on_active_editor_changed(self, editor):
         """
-        Handle tab selection changes.
+        Handle active editor changes (tab switch or group switch).
 
         Updates the outline, language combo, cursor position, and
         re-targets the find bar if it's open.
 
-        :param int index: The new active tab index.
+        :param object editor: The newly active editor.
         """
-        editor = self._current_editor()
         if editor:
             self._update_outline(editor)
             self._update_language_combo(editor)
@@ -1553,79 +1420,69 @@ class MCAMainWindow(QMainWindow):
                 editor.textCursor().blockNumber() + 1,
                 editor.textCursor().columnNumber() + 1
             )
-            # If the find bar is open, re-search in the new tab's content.
-            if self._find_bar.isVisible():
-                self._find_bar.set_editor(editor)
-
-    def _show_tab_list_menu(self):
-        """
-        Show a dropdown menu listing all open tabs for quick navigation.
-
-        The currently active tab is shown with a checkmark. Clicking an
-        entry switches to that tab. The menu appears below the '...' button.
-        """
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d30;
-                color: #cccccc;
-                border: 1px solid #3f3f46;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 4px 24px 4px 12px;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-            }
-            QMenu::indicator {
-                width: 12px;
-                height: 12px;
-                margin-left: 4px;
-            }
-        """)
-
-        current_idx = self._tab_widget.currentIndex()
-        for i in range(self._tab_widget.count()):
-            tab_text = self._tab_widget.tabText(i)
-            action = menu.addAction(tab_text)
-            action.setCheckable(True)
-            action.setChecked(i == current_idx)
-            # Capture loop variable with default argument.
-            action.triggered.connect(lambda _checked=None, idx=i: self._tab_widget.setCurrentIndex(idx))
-
-        # Position the menu below the "..." button.
-        menu.exec(self._tab_list_btn.mapToGlobal(
-            self._tab_list_btn.rect().bottomLeft()
-        ))
 
     def _on_editor_modified(self, editor, modified):
         """
         Handle editor modification state changes.
 
         Updates the tab title to show a modification indicator.
+        Searches across all groups to find which group owns this editor.
 
         :param MCACodeEditor editor: The modified editor.
         :param bool modified: Whether the editor has unsaved changes.
         """
-        for i, (e, name, path) in enumerate(self._editors):
-            if e is editor:
-                display = "[*] {}".format(name) if modified else name
-                self._tab_widget.setTabText(i, display)
+        # Find the editor across all groups and update its tab text.
+        for group in self._group_container.groups():
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                editors = group.editors()
+                _, name, _ = editors[idx]
+                display = "* {}".format(name) if modified else name
+                group.set_tab_text(idx, display)
                 break
         self._update_open_editors()
 
     def _update_open_editors(self):
-        """Update the sidebar's open editors panel."""
-        tabs = []
-        for editor, name, path in self._editors:
-            tabs.append({
-                "name": name,
-                "path": path,
-                "modified": editor.document().isModified(),
-                "language": editor.language,
-            })
-        self._sidebar.open_editors_panel.update_editors(tabs)
+        """
+        Update the sidebar's open editors panel.
+
+        When there are multiple groups, shows grouped data with headers.
+        When there's only one group, shows a flat list.
+        """
+        groups = self._group_container.groups()
+        # When there are multiple groups, show grouped data with headers.
+        if len(groups) > 1:
+            groups_data = []
+            for gi, group in enumerate(groups):
+                group_tabs = []
+                for editor, name, path in group.editors():
+                    group_tabs.append({
+                        "name": name,
+                        "path": path,
+                        "modified": editor.document().isModified(),
+                        "language": editor.language,
+                    })
+                groups_data.append(group_tabs)
+            # Use grouped display if the sidebar supports it.
+            if hasattr(self._sidebar.open_editors_panel, "update_editors_grouped"):
+                self._sidebar.open_editors_panel.update_editors_grouped(groups_data)
+            else:
+                # Fallback: flatten all editors into a single list.
+                tabs = []
+                for group_tabs in groups_data:
+                    tabs.extend(group_tabs)
+                self._sidebar.open_editors_panel.update_editors(tabs)
+        else:
+            # Single group -- flat list, no headers.
+            tabs = []
+            for editor, name, path in self._group_container.all_editors():
+                tabs.append({
+                    "name": name,
+                    "path": path,
+                    "modified": editor.document().isModified(),
+                    "language": editor.language,
+                })
+            self._sidebar.open_editors_panel.update_editors(tabs)
 
     def _update_outline(self, editor):
         """
@@ -1674,17 +1531,20 @@ class MCAMainWindow(QMainWindow):
             self._lang_label.setText(language)
 
             # Rename the tab for temp buffers to reflect the language.
-            idx = self._tab_widget.currentIndex()
-            if idx >= 0 and idx < len(self._editors):
-                e, name, path = self._editors[idx]
-                if path is None:
-                    # Temp buffer: update tab name to the language.
-                    new_name = language
-                    modified = e.document().isModified()
-                    display = "[*] {}".format(new_name) if modified else new_name
-                    self._tab_widget.setTabText(idx, display)
-                    self._editors[idx] = (e, new_name, path)
-                    self._update_open_editors()
+            group = self._group_container.active_group()
+            if group:
+                idx = group.index_of_editor(editor)
+                if idx >= 0:
+                    editors = group.editors()
+                    e, name, path = editors[idx]
+                    if path is None:
+                        # Temp buffer: update tab name to the language.
+                        new_name = language
+                        modified = e.document().isModified()
+                        display = "* {}".format(new_name) if modified else new_name
+                        group.set_tab_text(idx, display)
+                        group.update_editor_entry(idx, e, new_name, path)
+                        self._update_open_editors()
 
     def _update_cursor_pos(self, line, col):
         """
@@ -1886,6 +1746,7 @@ class MCAMainWindow(QMainWindow):
 
         Routes Ctrl+F to the output search bar if focus is currently
         inside the output window, so each panel has its own search.
+        Delegates to the active EditorGroup's built-in find bar.
         """
         # If focus is inside the output panel, route to its search bar.
         focus_widget = QApplication.focusWidget()
@@ -1894,7 +1755,10 @@ class MCAMainWindow(QMainWindow):
                 self._output.toggle_search_bar()
             return
 
-        editor = self._current_editor()
+        group = self._group_container.active_group()
+        if not group:
+            return
+        editor = group.current_editor()
         if not editor:
             return
         # Pre-fill with selected text if there's a single-line selection.
@@ -1906,9 +1770,24 @@ class MCAMainWindow(QMainWindow):
             # single-line selections to avoid confusing multi-line pastes.
             if "\u2029" not in sel:
                 selected = sel
-        self._find_bar.show_find(editor, selected)
-        # Reposition the overlay bar now that it's visible.
-        self._reposition_find_bar()
+        group.show_find(selected)
+
+    def _show_replace(self):
+        """Show the find bar in find+replace mode."""
+        group = self._group_container.active_group()
+        if not group:
+            return
+        editor = group.current_editor()
+        if not editor:
+            return
+        # Pre-fill with selected text if there's a single-line selection.
+        selected = ""
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            sel = cursor.selectedText()
+            if "\u2029" not in sel:
+                selected = sel
+        group.show_replace(selected)
 
     def _show_goto_line(self):
         """Show go-to-line dialog and navigate to the chosen line."""
@@ -1933,9 +1812,12 @@ class MCAMainWindow(QMainWindow):
         editor = self._new_buffer()
         editor.set_language("mel")
         # Update the tab name and tracking to reflect MEL language.
-        idx = self._tab_widget.currentIndex()
-        self._tab_widget.setTabText(idx, "MEL")
-        self._editors[idx] = (editor, "MEL", None)
+        group = self._group_container.active_group()
+        if group:
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                group.set_tab_text(idx, "MEL")
+                group.update_editor_entry(idx, editor, "MEL", None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -1944,9 +1826,12 @@ class MCAMainWindow(QMainWindow):
         editor = self._new_buffer()
         editor.set_language("python")
         # Update the tab name and tracking to reflect Python language.
-        idx = self._tab_widget.currentIndex()
-        self._tab_widget.setTabText(idx, "Python")
-        self._editors[idx] = (editor, "Python", None)
+        group = self._group_container.active_group()
+        if group:
+            idx = group.index_of_editor(editor)
+            if idx >= 0:
+                group.set_tab_text(idx, "Python")
+                group.update_editor_entry(idx, editor, "Python", None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -2010,7 +1895,7 @@ class MCAMainWindow(QMainWindow):
     def _save_all(self):
         """Save all editors that have associated file paths."""
         saved_count = 0
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             if path and editor.document().isModified():
                 self._write_file(editor, path)
                 saved_count += 1
@@ -2034,10 +1919,13 @@ class MCAMainWindow(QMainWindow):
             try:
                 os.rename(old_path, new_path)
                 editor.file_path = new_path
-                # Update tab name and tracking.
-                idx = self._tab_widget.currentIndex()
-                self._tab_widget.setTabText(idx, new_name)
-                self._editors[idx] = (editor, new_name, new_path)
+                # Update tab text and tracking in the active group.
+                group = self._group_container.active_group()
+                if group:
+                    idx = group.index_of_editor(editor)
+                    if idx >= 0:
+                        group.set_tab_text(idx, new_name)
+                        group.update_editor_entry(idx, editor, new_name, new_path)
                 self._settings.add_recent_file(new_path)
                 self._update_open_editors()
                 self._output.write_info("Renamed: {} -> {}".format(old_path, new_path))
@@ -2081,47 +1969,38 @@ class MCAMainWindow(QMainWindow):
                     self, "Error", "Could not source script:\n{}".format(str(exc))
                 )
 
-    def _revert_file(self):
-        """Reload the current file from disk, discarding changes."""
+    def _unlock_file(self):
+        """Toggle the current editor out of read-only mode so it can be edited."""
         editor = self._current_editor()
-        if not editor or not editor.file_path:
-            self._statusbar.showMessage("No file to revert", 3000)
+        if not editor:
+            self._statusbar.showMessage("No editor open", 3000)
             return
 
-        # Confirm before discarding changes.
-        if editor.document().isModified():
-            reply = QMessageBox.question(
-                self, "Revert File",
-                "Discard all changes and reload from disk?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        if not editor.isReadOnly():
+            self._statusbar.showMessage("File is already editable", 3000)
+            return
 
-        try:
-            with open(editor.file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            editor.setPlainText(content)
-            editor.document().setModified(False)
-            self._output.write_info("Reverted: {}".format(editor.file_path))
-        except Exception as exc:
-            QMessageBox.warning(
-                self, "Error", "Could not revert file:\n{}".format(str(exc))
-            )
+        # Unlock the editor for editing.
+        editor.setReadOnly(False)
+        self._statusbar.showMessage("File unlocked for editing", 3000)
+        self._output.write_info("Unlocked: {}".format(
+            editor.file_path or "untitled buffer"
+        ))
 
     def _close_all_files(self):
-        """Close all open tabs, prompting for unsaved changes."""
-        # Work backwards; _close_tab ensures at least one buffer stays open.
-        while self._tab_widget.count() > 0:
-            self._close_tab(0)
-            # If _close_tab created a new empty buffer (last tab), stop.
-            if self._tab_widget.count() == 1:
-                break
+        """Close all open tabs in all groups, prompting for unsaved changes."""
+        for group in list(self._group_container.groups()):
+            while group.count() > 0:
+                self._close_tab_in_group(group, 0)
+                # If the last group has 1 tab left, that's the auto-created buffer.
+                if (self._group_container.group_count() == 1
+                        and group.count() == 1):
+                    break
 
     def _save_state(self):
         """Persist the list of open file paths to settings for session restore."""
         open_files = []
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             if path:
                 open_files.append(path)
         self._settings.set("open_files", open_files)
@@ -2299,76 +2178,6 @@ class MCAMainWindow(QMainWindow):
         else:
             self._statusbar.showMessage("No tabs to convert", 3000)
 
-    def _show_replace(self):
-        """Show the find bar in find+replace mode."""
-        editor = self._current_editor()
-        if not editor:
-            return
-        # Pre-fill with selected text if there's a single-line selection.
-        selected = ""
-        cursor = editor.textCursor()
-        if cursor.hasSelection():
-            sel = cursor.selectedText()
-            if "\u2029" not in sel:
-                selected = sel
-        self._find_bar.show_replace(editor, selected)
-        # Reposition the overlay bar now that it's visible.
-        self._reposition_find_bar()
-
-    def _reposition_find_bar(self):
-        """
-        Position the overlay find bar right below the tab bar, right-aligned.
-
-        The bar uses a compact width (up to 580px) rather than spanning
-        the full editor width, and is anchored to the right edge with
-        a small margin. Called from the event filter on resize, and
-        when the bar becomes visible or toggles its replace row.
-        """
-        if not self._find_bar.isVisible():
-            return
-
-        tab_bar = self._tab_widget.tabBar()
-        # Calculate Y offset: below the tab bar if visible, otherwise at top.
-        y_offset = (tab_bar.y() + tab_bar.height()) if tab_bar.isVisible() else 0
-
-        bar_height = self._find_bar.sizeHint().height()
-        parent_width = self._tab_widget.width()
-
-        # Compact width: use sizeHint but cap between min and max bounds.
-        min_bar_width = 450
-        max_bar_width = 580
-        bar_width = max(min_bar_width, min(max_bar_width, parent_width - 40))
-
-        # Right-align with a small margin from the edge.
-        right_margin = 8
-        x_offset = parent_width - bar_width - right_margin
-
-        self._find_bar.setGeometry(x_offset, y_offset, bar_width, bar_height)
-        # Ensure the find bar renders above the editor content.
-        self._find_bar.raise_()
-
-    def _on_search_selections_changed(self, selections):
-        """
-        Apply search-match highlights to the active editor.
-
-        Called by the FindReplaceBar whenever its match set changes.
-
-        :param list selections: List of QTextEdit.ExtraSelection items.
-        """
-        editor = self._current_editor()
-        if editor:
-            editor.set_search_selections(selections)
-
-    def _on_find_bar_closed(self):
-        """
-        Return focus to the editor when the find bar is dismissed.
-        """
-        editor = self._current_editor()
-        if editor:
-            # Clear search highlights when the bar closes.
-            editor.set_search_selections([])
-            editor.setFocus()
-
     def _find_in_files(self):
         """Show find-in-files dialog (placeholder)."""
         self._statusbar.showMessage("Find in Files: coming soon", 3000)
@@ -2411,12 +2220,9 @@ class MCAMainWindow(QMainWindow):
         font_family = s.get("font_family")
         font_size = s.get("font_size")
         tab_size = s.get("tab_size")
-        use_spaces = s.get("use_spaces")
-        word_wrap = s.get("word_wrap")
-        show_indent_guides = s.get("show_indent_guides")
 
-        # Apply to every open code editor tab.
-        for editor, _name, _path in self._editors:
+        # Apply to every open code editor tab across all groups.
+        for editor, _name, _path in self._group_container.all_editors():
             font = editor.font()
             font.setFamily(font_family)
             font.setPointSize(font_size)
@@ -2426,17 +2232,11 @@ class MCAMainWindow(QMainWindow):
         # Apply word wrap to the output window.
         output_wrap = s.get("output_word_wrap")
         if hasattr(self._output, "_output"):
-            from PySide6.QtWidgets import QPlainTextEdit
             wrap_mode = (
                 QPlainTextEdit.LineWrapMode.WidgetWidth if output_wrap
                 else QPlainTextEdit.LineWrapMode.NoWrap
             )
             self._output._output.setLineWrapMode(wrap_mode)
-
-        # Apply tab bar visibility settings.
-        self._tab_widget.tabBar().setVisible(s.get("show_tab_bar"))
-        self._tab_widget.setTabsClosable(s.get("show_close_button_on_tab"))
-        self._tab_widget.setMovable(not s.get("lock_tabs"))
 
         logger.info("Settings applied to running editors")
 
@@ -2445,8 +2245,8 @@ class MCAMainWindow(QMainWindow):
     # =========================================================================
 
     def _toggle_code_editor(self):
-        """Toggle visibility of the code editor tab widget."""
-        self._tab_widget.setVisible(not self._tab_widget.isVisible())
+        """Toggle visibility of the code editor group container."""
+        self._group_container.setVisible(not self._group_container.isVisible())
 
     def _toggle_statusbar(self):
         """Toggle visibility of the status bar."""
@@ -2458,13 +2258,12 @@ class MCAMainWindow(QMainWindow):
 
         :param bool checked: Whether word wrap should be enabled.
         """
-        from PySide6.QtWidgets import QPlainTextEdit
         mode = (
             QPlainTextEdit.LineWrapMode.WidgetWidth if checked
             else QPlainTextEdit.LineWrapMode.NoWrap
         )
-        # Apply to all open editors.
-        for editor, name, path in self._editors:
+        # Apply to all open editors across all groups.
+        for editor, name, path in self._group_container.all_editors():
             editor.setLineWrapMode(mode)
         self._settings.set("word_wrap", checked)
 
@@ -2477,8 +2276,8 @@ class MCAMainWindow(QMainWindow):
         :param bool checked: Whether whitespace rendering is enabled.
         """
         self._settings.set("show_whitespace", checked)
-        # Apply to all open editor tabs.
-        for editor, name, path in self._editors:
+        # Apply to all open editor tabs across all groups.
+        for editor, name, path in self._group_container.all_editors():
             editor.set_show_whitespace(checked)
         self._statusbar.showMessage(
             "Whitespace rendering: {}".format("on" if checked else "off"), 3000
@@ -2513,17 +2312,17 @@ class MCAMainWindow(QMainWindow):
         Move the output panel to the top or bottom of the center splitter.
 
         Swaps the widget order in the vertical center splitter so the
-        output panel appears above or below the tab widget.
+        output panel appears above or below the editor group container.
 
         :param str position: Either 'top' or 'bottom'.
         """
         if position == "top":
-            # Output on top (index 0), tabs below (index 1) — the default.
+            # Output on top (index 0), editor groups below (index 1) -- the default.
             self._center_splitter.insertWidget(0, self._output)
             self._statusbar.showMessage("Output position: top", 3000)
         elif position == "bottom":
-            # Tabs on top (index 0), output below (index 1).
-            self._center_splitter.insertWidget(0, self._tab_widget)
+            # Editor groups on top (index 0), output below (index 1).
+            self._center_splitter.insertWidget(0, self._group_container)
             self._statusbar.showMessage("Output position: bottom", 3000)
 
         # Preserve reasonable sizing after the swap.
@@ -2572,9 +2371,10 @@ class MCAMainWindow(QMainWindow):
         """
         Apply the current font size to all open editors and update the status bar.
 
-        Reads ``self._default_font_size`` and sets it on every editor widget.
+        Reads ``self._default_font_size`` and sets it on every editor widget
+        across all groups.
         """
-        for editor, name, path in self._editors:
+        for editor, name, path in self._group_container.all_editors():
             font = editor.font()
             font.setPointSize(self._default_font_size)
             editor.setFont(font)
@@ -2592,18 +2392,18 @@ class MCAMainWindow(QMainWindow):
     # =========================================================================
 
     def _next_editor(self):
-        """Switch to the next editor tab."""
-        count = self._tab_widget.count()
-        if count > 1:
-            idx = (self._tab_widget.currentIndex() + 1) % count
-            self._tab_widget.setCurrentIndex(idx)
+        """Cycle to the next editor within the active group."""
+        group = self._group_container.active_group()
+        if group and group.count() > 1:
+            idx = (group.current_index() + 1) % group.count()
+            group.set_current_index(idx)
 
     def _prev_editor(self):
-        """Switch to the previous editor tab."""
-        count = self._tab_widget.count()
-        if count > 1:
-            idx = (self._tab_widget.currentIndex() - 1) % count
-            self._tab_widget.setCurrentIndex(idx)
+        """Cycle to the previous editor within the active group."""
+        group = self._group_container.active_group()
+        if group and group.count() > 1:
+            idx = (group.current_index() - 1) % group.count()
+            group.set_current_index(idx)
 
     def _go_to_file(self):
         """
@@ -2620,7 +2420,7 @@ class MCAMainWindow(QMainWindow):
                 folders = panel.get_workspace_folders()
 
         if not folders:
-            self._statusbar.showMessage("No workspace folders — add one first", 3000)
+            self._statusbar.showMessage("No workspace folders -- add one first", 3000)
             return
 
         # Show the popup; on confirm it calls _open_file_path.
@@ -2648,6 +2448,33 @@ class MCAMainWindow(QMainWindow):
         # Show the popup; on confirm it calls editor.go_to_line().
         popup = GoToSymbolPopup(self, outline, editor)
         popup.exec()
+
+    # --- Split / Group handlers -----------------------------------------------
+
+    def _split_editor_right(self):
+        """Split the current tab into a new group on the right."""
+        group = self._group_container.active_group()
+        if group and group.count() > 0:
+            self._group_container.split_right(group, group.current_index())
+
+    def _on_sidebar_editor_selected(self, index):
+        """
+        Handle a click on an editor entry in the sidebar.
+
+        When there's only one group, ``index`` maps directly to a tab.
+        When there are multiple groups, we need to find the right group
+        by walking through them until we reach the flat index.
+
+        :param int index: Flat index across all groups.
+        """
+        # Walk the groups to find which one contains this flat index.
+        remaining = index
+        for group in self._group_container.groups():
+            if remaining < group.count():
+                group.set_current_index(remaining)
+                self._group_container._on_group_activated(group)
+                return
+            remaining -= group.count()
 
     # =========================================================================
     # Output Menu Handlers
@@ -2712,7 +2539,7 @@ class MCAMainWindow(QMainWindow):
         """
         Route adapter output through verbosity filtering before display.
 
-        In 'minimal' mode, normal output is suppressed — only errors and
+        In 'minimal' mode, normal output is suppressed -- only errors and
         warnings will reach the output panel.
 
         :param str text: The output text from a DCC adapter.
@@ -2732,7 +2559,7 @@ class MCAMainWindow(QMainWindow):
 
         :param str text: The error text from a DCC adapter.
         """
-        # Suppress Stack Window — discard error output entirely.
+        # Suppress Stack Window -- discard error output entirely.
         if self._suppress_stack_action.isChecked():
             return
 
@@ -2748,7 +2575,7 @@ class MCAMainWindow(QMainWindow):
 
         Must be called from within an except block.
         """
-        # Suppress Stack Window — discard error output entirely.
+        # Suppress Stack Window -- discard error output entirely.
         if self._suppress_stack_action.isChecked():
             return
 
@@ -2799,7 +2626,7 @@ class MCAMainWindow(QMainWindow):
                     continue
                 # Skip indented source lines that follow 'File ...' lines.
                 if line.startswith("    ") and not stripped.startswith(("Error", "Exception")):
-                    # Could be source context — skip if it looks like code.
+                    # Could be source context -- skip if it looks like code.
                     if filtered or not stripped:
                         continue
                 filtered.append(line)
@@ -2955,7 +2782,7 @@ class MCAMainWindow(QMainWindow):
             "<p>MCA Editor is currently in early development.<br>"
             "Future licensing tiers (Standard, Pro, Studio) are planned.</p>"
             "<hr>"
-            "<p style='color: #888;'>Contact: support@mcatools.com</p>"
+            "<p style='color: #888;'>Contact: info@mechart.org</p>"
         )
 
     # =========================================================================
@@ -2988,8 +2815,8 @@ class MCAMainWindow(QMainWindow):
 
         :param QCloseEvent event: The close event.
         """
-        # Check for unsaved changes across all tabs.
-        for editor, name, path in self._editors:
+        # Check for unsaved changes across all groups.
+        for editor, name, path in self._group_container.all_editors():
             if editor.document().isModified():
                 reply = QMessageBox.question(
                     self, "Unsaved Changes",

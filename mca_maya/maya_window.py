@@ -300,6 +300,7 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._panel.mode_changed.connect(self._on_mode_changed)
         self._panel.status_message.connect(self._on_status_message)
         self._panel.output_counts_changed.connect(self._on_counts_changed)
+        self._panel.activity_bar_toggled.connect(self._toggle_status_bar)
 
         # Install an application-level event filter to prevent Maya's
         # hotkeys from intercepting keystrokes while typing in our editor.
@@ -541,6 +542,10 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Auto-clear after the specified duration.
         from mca_qt.qt_compat import QTimer
         QTimer.singleShot(duration_ms, lambda: self._status_message_label.setText(""))
+
+    def _toggle_status_bar(self):
+        """Toggle visibility of the bottom blue status bar."""
+        self._status_bar.setVisible(not self._status_bar.isVisible())
 
     def _on_counts_changed(self, errors, warnings):
         """

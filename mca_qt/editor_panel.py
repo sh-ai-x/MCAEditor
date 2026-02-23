@@ -389,6 +389,7 @@ class MCAEditorPanel(QWidget):
         """Wire up signals between all UI components."""
         # Sidebar signals -> editor navigation.
         self._sidebar.file_open_requested.connect(self._open_file_path)
+        self._sidebar.file_created.connect(self._open_file_path)
         self._sidebar.outline_item_clicked.connect(self._goto_outline_item)
         self._sidebar.editor_selected.connect(self._on_sidebar_editor_selected)
 
@@ -529,8 +530,8 @@ class MCAEditorPanel(QWidget):
         file_menu.addSeparator()
 
         # --- File management ---
-        self._create_action(file_menu, "Revert File", name="Revert File",
-                            callback=self._revert_file)
+        self._create_action(file_menu, "Unlock File", name="Unlock File",
+                            callback=self._unlock_file)
         self._create_action(file_menu, "Close File", name="Close File",
                             shortcut="Ctrl+W",
                             callback=self._close_current_tab)
@@ -720,10 +721,6 @@ class MCAEditorPanel(QWidget):
         self._create_action(switch_menu, "Previous Used Editor\tCtrl+Shift+Tab",
                             callback=self._prev_editor)
 
-        # --- Switch Group submenu (dynamically populated) ---
-        self._switch_group_menu = go_menu.addMenu("Switch Group")
-        self._switch_group_menu.aboutToShow.connect(self._build_switch_group_menu)
-
         self._create_action(go_menu, "Focus Next Group", name="Focus Next Group",
                             shortcut="Ctrl+K Ctrl+Right",
                             callback=self._group_container.focus_next_group)
@@ -813,10 +810,6 @@ class MCAEditorPanel(QWidget):
         cmd_menu.addSeparator()
 
         # --- Stub submenus ---
-        python_menu = cmd_menu.addMenu("Python")
-        py_stub = python_menu.addAction("Python settings coming soon")
-        py_stub.setEnabled(False)
-
         pylint_menu = cmd_menu.addMenu("Pylint")
         pl_stub = pylint_menu.addAction("Pylint integration coming soon")
         pl_stub.setEnabled(False)
@@ -1977,27 +1970,23 @@ class MCAEditorPanel(QWidget):
             except Exception as exc:
                 QMessageBox.warning(self, "Error", "Could not source script:\n{}".format(str(exc)))
 
-    def _revert_file(self):
-        """Revert file from disk."""
+    def _unlock_file(self):
+        """Toggle the current editor out of read-only mode so it can be edited."""
         editor = self._current_editor()
-        if not editor or not editor.file_path:
-            self._show_status("No file to revert")
+        if not editor:
+            self._show_status("No editor open")
             return
-        if editor.document().isModified():
-            reply = QMessageBox.question(
-                self, "Revert File", "Discard all changes and reload from disk?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-        try:
-            with open(editor.file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            editor.setPlainText(content)
-            editor.document().setModified(False)
-            self._output.write_info("Reverted: {}".format(editor.file_path))
-        except Exception as exc:
-            QMessageBox.warning(self, "Error", "Could not revert file:\n{}".format(str(exc)))
+
+        if not editor.isReadOnly():
+            self._show_status("File is already editable")
+            return
+
+        # Unlock the editor for editing.
+        editor.setReadOnly(False)
+        self._show_status("File unlocked for editing")
+        self._output.write_info("Unlocked: {}".format(
+            editor.file_path or "untitled buffer"
+        ))
 
     def _close_all_files(self):
         """Close all tabs in all groups."""
@@ -2399,23 +2388,6 @@ class MCAEditorPanel(QWidget):
         group = self._group_container.active_group()
         if group and group.count() > 0:
             self._group_container.split_right(group, group.current_index())
-
-    def _build_switch_group_menu(self):
-        """Dynamically populate the Switch Group submenu."""
-        self._switch_group_menu.clear()
-        groups = self._group_container.groups()
-        if len(groups) <= 1:
-            stub = self._switch_group_menu.addAction("No groups")
-            stub.setEnabled(False)
-            return
-        for i, group in enumerate(groups):
-            label = "Group {}".format(i + 1)
-            if group is self._group_container.active_group():
-                label += " (active)"
-            action = self._switch_group_menu.addAction(label)
-            action.triggered.connect(
-                lambda _checked=None, idx=i: self._group_container.focus_group(idx)
-            )
 
     def _on_sidebar_editor_selected(self, index):
         """

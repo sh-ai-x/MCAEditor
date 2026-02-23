@@ -93,6 +93,29 @@ The initial implementation had two bugs:
 }
 ```
 
+## Menu Cleanup
+- Removed "Switch Group" submenu from Go menu (both editor_panel.py and main_window.py)
+- Removed "Python" stub submenu from Command menu (editor_panel.py)
+- Changed "Revert File" → "Unlock File" in File menu — now calls `editor.setReadOnly(False)`
+
+## Sidebar Context Menus
+Added right-click context menus to the workspace tree (`mca_qt/widgets/sidebar.py`):
+
+### Folder Context Menu
+New File, New Folder, Reveal in Explorer, Find in Folder... (disabled placeholder),
+Paste, Copy Path, Delete
+
+### File Context Menu
+Open, Reveal in Explorer, Copy, Copy Path, Rename, Delete
+
+### Implementation Details
+- `_on_context_menu(pos)` dispatches to folder or file menu builders
+- `_new_file_in_folder` creates empty file, emits `file_created` signal → opens in editor
+- `_reveal_in_explorer` uses `explorer /select,` on Windows, `open -R` on macOS
+- `_paste_into_folder` copies file/folder from clipboard path into target folder
+- `_rename_path` and `_delete_path` with confirmation dialogs
+- Signal chain: `WorkspacePanel.file_created` → `MCASidebar.file_created` → `EditorPanel._open_file_path`
+
 ## Testing
 1. `python run.py` — launches without errors
 2. Drag tab to right/left/top/bottom of editor → creates correct split
@@ -103,3 +126,6 @@ The initial implementation had two bugs:
 7. Close all tabs in a split group → group collapses, splitter simplifies
 8. Close and reopen → all splits, positions, and tabs restored exactly
 9. Existing v2 session.json auto-upgrades to v3 on load
+10. Right-click folder → context menu with all actions working
+11. Right-click file → context menu with all actions working
+12. New File from folder context menu → creates file and opens in editor
