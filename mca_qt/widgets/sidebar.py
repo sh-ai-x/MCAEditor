@@ -898,6 +898,7 @@ class WorkspacePanel(QWidget):
             with open(new_path, "w", encoding="utf-8") as f:
                 f.write("")
             logger.info("Created new file: %s", new_path)
+            self._refresh_tree()
 
             # Emit so the editor opens the new file.
             self.file_created.emit(new_path)
@@ -932,6 +933,7 @@ class WorkspacePanel(QWidget):
         try:
             os.makedirs(new_path, exist_ok=True)
             logger.info("Created new folder: %s", new_path)
+            self._refresh_tree()
         except Exception as exc:
             QMessageBox.warning(
                 self, "Error",
@@ -993,6 +995,7 @@ class WorkspacePanel(QWidget):
             else:
                 shutil.copy2(source_path, dest_path)
             logger.info("Pasted '%s' into '%s'", basename, folder_path)
+            self._refresh_tree()
         except Exception as exc:
             QMessageBox.warning(
                 self, "Error",
@@ -1026,6 +1029,7 @@ class WorkspacePanel(QWidget):
         try:
             os.rename(path, new_path)
             logger.info("Renamed '%s' -> '%s'", old_name, new_name)
+            self._refresh_tree()
         except Exception as exc:
             QMessageBox.warning(
                 self, "Error",
@@ -1056,6 +1060,7 @@ class WorkspacePanel(QWidget):
             else:
                 os.remove(path)
             logger.info("Deleted %s: %s", kind, path)
+            self._refresh_tree()
         except Exception as exc:
             QMessageBox.warning(
                 self, "Error",
