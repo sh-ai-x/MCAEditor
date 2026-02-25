@@ -148,12 +148,19 @@ class MCAEditorPanel(QWidget):
         self._setup_toolbar()
         self._setup_connections()
 
-        # Restore previous session or create a fresh buffer.
+        # Migrate buffer files from legacy buffers/ to scripts/ directory.
+        # Must happen before session restore so buffer files are found.
+        self._session_manager.migrate_buffers_to_scripts()
+
+        # Restore previous session or create default starter tabs.
         restored = False
         if settings.get("restore_session"):
             restored = self._restore_session()
         if not restored:
-            self._new_buffer()
+            # First launch (or no session to restore) — start with a
+            # Python and a MEL buffer so both languages are ready to go.
+            self._new_python_buffer()
+            self._new_mel_buffer()
 
         # Ensure the default workspace (scripts + site-packages) exists,
         # and add site-packages to sys.path for user imports.
@@ -175,31 +182,35 @@ class MCAEditorPanel(QWidget):
 
     def _init_default_workspace(self):
         """
-        Set up the workspace sidebar with saved or default folders.
+        Lock the workspace sidebar to the ``scripts/`` directory.
 
-        On first launch (no saved folders), creates the default
-        ``mca_preferences/scripts/`` workspace and adds it to the
-        sidebar. On subsequent launches, restores the previously
-        saved workspace folders from settings.
+        Creates the default ``mca_preferences/scripts/`` and
+        ``mca_preferences/scripts/site-packages/`` directories, adds
+        both ``scripts/`` and ``site-packages/`` to ``sys.path`` so
+        user scripts and packages can be imported, and locks the
+        sidebar tree to show only the ``scripts/`` folder.
 
-        Also ensures the ``scripts/site-packages/`` directory exists
-        and is on ``sys.path`` so user packages can be imported.
+        Also configures the Maya adapter with workspace paths so
+        scripts can be imported inside Maya as well.
         """
-        # Always ensure the default dirs exist and site-packages is on sys.path.
-        default_scripts = self._session_manager.ensure_default_workspace()
+        # Ensure the default dirs exist and site-packages is on sys.path.
+        scripts_dir = self._session_manager.ensure_default_workspace()
 
-        # Try to restore saved workspace folders from settings.
-        saved = self._settings.get("workspace_folders", [])
+        # Add scripts/ itself to sys.path so user scripts can import each other.
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+            logger.info("Added to sys.path: %s", scripts_dir)
 
-        if saved and isinstance(saved, list):
-            # Restore only folders that still exist on disk.
-            valid = [f for f in saved if os.path.isdir(f)]
-            if valid:
-                self._sidebar.workspace_panel.set_workspace_folders(valid)
-                return
+        # Lock the workspace tree to the scripts directory — no user-selectable folders.
+        self._sidebar.workspace_panel.set_locked_folder(scripts_dir)
 
-        # First launch — seed the workspace with the default scripts folder.
-        self._sidebar.workspace_panel.add_folder(default_scripts)
+        # Tell the Maya adapter about the workspace paths so it can inject
+        # sys.path entries into the Python wrapper sent to Maya.
+        maya_adapter = self._adapter_manager.get_adapter(DCCType.MAYA)
+        if maya_adapter:
+            maya_adapter.set_workspace_paths(
+                scripts_dir, self._session_manager.site_packages_dir
+            )
 
     # --- Status Message Helper -----------------------------------------------
 
@@ -263,10 +274,15 @@ class MCAEditorPanel(QWidget):
         self._center_splitter.addWidget(self._group_container)
 
         # Terminal panel (bottom, hidden by default).
+        # Start in the scripts/ directory so the user can run scripts directly.
+        # Note: _session_manager.scripts_dir exists by the time the terminal
+        # actually starts (user toggles it), since _init_default_workspace()
+        # is called during __init__.
         terminal_shell = self._settings.get("terminal_shell", "")
         terminal_font = self._settings.get("terminal_font_size", 12)
         self._terminal = TerminalWidget(
             shell=terminal_shell,
+            cwd=self._session_manager.scripts_dir,
             font_size=terminal_font,
             parent=self,
         )
@@ -405,6 +421,7 @@ class MCAEditorPanel(QWidget):
         # Sidebar signals -> editor navigation.
         self._sidebar.file_open_requested.connect(self._open_file_path)
         self._sidebar.file_created.connect(self._open_file_path)
+        self._sidebar.file_renamed.connect(self._on_file_renamed)
         self._sidebar.outline_item_clicked.connect(self._goto_outline_item)
         self._sidebar.editor_selected.connect(self._on_sidebar_editor_selected)
 
@@ -1054,15 +1071,18 @@ class MCAEditorPanel(QWidget):
         """
         Create a new temporary buffer.
 
+        The tab name matches the buffer filename stem (e.g. "Python_1",
+        "MEL_2") so the tab label and the file in the workspace tree
+        are consistent.
+
         :return: The newly created editor widget.
         :rtype: MCACodeEditor
         """
         editor = MCACodeEditor()
 
-        # Buffer tracking — these attrs let us persist temp tabs to disk.
-        # Allocated lazily on first save so we don't create files for
-        # buffers that are never modified.
-        editor._buffer_id = None
+        # Allocate a buffer ID immediately so the tab name matches the
+        # eventual filename (e.g. "Python_1" -> "Python_1.py").
+        editor._buffer_id = self._session_manager.allocate_buffer_id()
         editor._buffer_filename = None
 
         editor.execute_requested.connect(self._execute_all)
@@ -1078,8 +1098,11 @@ class MCAEditorPanel(QWidget):
         # Inherit current font size and whitespace setting so new tabs match.
         self._apply_editor_state(editor)
 
-        lang_map = {"python": "Python", "mel": "MEL", "text": "Text"}
-        tab_name = lang_map.get(editor.language, "Python")
+        # Tab name = language prefix + buffer ID, matching the on-disk filename.
+        lang_prefix = {"python": "Python", "mel": "MEL", "text": "Text"}
+        tab_name = "{}_{}".format(
+            lang_prefix.get(editor.language, "Python"), editor._buffer_id
+        )
 
         icon = self._icon_for_language(editor.language)
         self._group_container.add_editor(editor, tab_name, None, icon)
@@ -1148,6 +1171,56 @@ class MCAEditorPanel(QWidget):
         self._build_recent_files_menu()
         self._update_open_editors()
         self._update_language_combo(editor)
+
+    def _on_file_renamed(self, old_path, new_path):
+        """
+        Handle a file rename from the workspace tree.
+
+        If the renamed file is open in a tab, update the tab name,
+        the editor's file_path, and the internal tracking entry so
+        the editor stays in sync with the file on disk.
+
+        For buffer tabs (no file_path), also updates the buffer_filename
+        tracking so the session manifest stays correct.
+
+        :param str old_path: The original file path before the rename.
+        :param str new_path: The new file path after the rename.
+        """
+        # Search all groups for an editor matching the old path.
+        group, idx, editor = self._group_container.find_editor_by_path(old_path)
+
+        if group is None:
+            # File not open — also check buffer tabs by matching buffer_filename.
+            for ed, name, path in self._group_container.all_editors():
+                if path is None and hasattr(ed, "_buffer_filename") and ed._buffer_filename:
+                    old_filename = os.path.basename(old_path)
+                    if ed._buffer_filename == old_filename:
+                        # Found the buffer tab — update tracking.
+                        ed._buffer_filename = os.path.basename(new_path)
+                        new_name = os.path.splitext(ed._buffer_filename)[0]
+                        # Find the group and index for this editor.
+                        for g in self._group_container.groups():
+                            i = g.index_of_editor(ed)
+                            if i >= 0:
+                                g.set_tab_text(i, new_name)
+                                g.update_editor_entry(i, ed, new_name, None)
+                                break
+                        self._update_open_editors()
+                        self._save_session_manifest()
+                        logger.info("Buffer tab renamed: %s -> %s", old_filename, ed._buffer_filename)
+                        return
+            return
+
+        # File-backed tab — update the editor's file path and tab name.
+        editor.file_path = new_path
+        new_tab_name = os.path.basename(new_path)
+        group.set_tab_text(idx, new_tab_name)
+        group.set_tab_icon(idx, self._icon_for_language(editor.language))
+        group.update_editor_entry(idx, editor, new_tab_name, new_path)
+
+        self._update_open_editors()
+        self._save_session_manifest()
+        logger.info("Tab renamed: %s -> %s", os.path.basename(old_path), new_tab_name)
 
     def _save_file(self):
         """
@@ -1396,7 +1469,10 @@ class MCAEditorPanel(QWidget):
                     editors = group.editors()
                     e, name, path = editors[idx]
                     if path is None:
-                        new_name = language
+                        # Include the buffer ID in the tab name so it matches
+                        # the on-disk filename (e.g. "Python_1", "MEL_2").
+                        bid = getattr(e, "_buffer_id", None)
+                        new_name = "{}_{}".format(language, bid) if bid else language
                         modified = e.document().isModified()
                         display = "* {}".format(new_name) if modified else new_name
                         group.set_tab_text(idx, display)
@@ -1415,8 +1491,9 @@ class MCAEditorPanel(QWidget):
         """
         Save a temp buffer's content to the buffers directory.
 
-        Allocates a buffer ID on first save so we don't create files for
-        buffers that are opened but never modified.
+        Buffer IDs are allocated eagerly in ``_new_buffer()`` so the
+        tab name always matches the filename.  This method just writes
+        the content to disk.
 
         :param MCACodeEditor editor: The editor whose content to persist.
         """
@@ -1424,7 +1501,7 @@ class MCAEditorPanel(QWidget):
         if editor.file_path:
             return
 
-        # Allocate an ID on first save.
+        # Fallback: allocate an ID if somehow missing (e.g. restored session).
         if editor._buffer_id is None:
             editor._buffer_id = self._session_manager.allocate_buffer_id()
 
@@ -1588,10 +1665,12 @@ class MCAEditorPanel(QWidget):
                     editor.document().setModified(False)
 
                     # Restore buffer tracking.
+                    # Filename formats: "Python_1.py", "MEL_2.mel", or legacy "buffer_1.py".
+                    # The numeric ID is always the part after the last underscore.
                     if buffer_file:
                         try:
                             basename = os.path.splitext(buffer_file)[0]
-                            editor._buffer_id = int(basename.split("_")[1])
+                            editor._buffer_id = int(basename.rsplit("_", 1)[1])
                         except (IndexError, ValueError):
                             editor._buffer_id = self._session_manager.allocate_buffer_id()
                         editor._buffer_filename = buffer_file
@@ -1759,6 +1838,14 @@ class MCAEditorPanel(QWidget):
 
     def _execute_locally(self, code):
         """Execute Python code locally when no DCC is connected."""
+        # Ensure scripts/ and site-packages/ are on sys.path so imports work.
+        scripts_dir = self._session_manager.scripts_dir
+        site_pkg_dir = self._session_manager.site_packages_dir
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        if site_pkg_dir not in sys.path:
+            sys.path.insert(0, site_pkg_dir)
+
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = io.StringIO()
@@ -1881,13 +1968,14 @@ class MCAEditorPanel(QWidget):
         """Create a new MEL buffer."""
         editor = self._new_buffer()
         editor.set_language("mel")
+        tab_name = "MEL_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
             idx = group.index_of_editor(editor)
             if idx >= 0:
-                group.set_tab_text(idx, "MEL")
+                group.set_tab_text(idx, tab_name)
                 group.set_tab_icon(idx, self._icon_for_language("mel"))
-                group.update_editor_entry(idx, editor, "MEL", None)
+                group.update_editor_entry(idx, editor, tab_name, None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -1895,13 +1983,14 @@ class MCAEditorPanel(QWidget):
         """Create a new Python buffer."""
         editor = self._new_buffer()
         editor.set_language("python")
+        tab_name = "Python_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
             idx = group.index_of_editor(editor)
             if idx >= 0:
-                group.set_tab_text(idx, "Python")
+                group.set_tab_text(idx, tab_name)
                 group.set_tab_icon(idx, self._icon_for_language("python"))
-                group.update_editor_entry(idx, editor, "Python", None)
+                group.update_editor_entry(idx, editor, tab_name, None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -1909,13 +1998,14 @@ class MCAEditorPanel(QWidget):
         """Create a new plain text buffer."""
         editor = self._new_buffer()
         editor.set_language("text")
+        tab_name = "Text_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
             idx = group.index_of_editor(editor)
             if idx >= 0:
-                group.set_tab_text(idx, "Text")
+                group.set_tab_text(idx, tab_name)
                 group.set_tab_icon(idx, self._icon_for_language("text"))
-                group.update_editor_entry(idx, editor, "Text", None)
+                group.update_editor_entry(idx, editor, tab_name, None)
         self._update_language_combo(editor)
         self._update_open_editors()
 
@@ -2627,7 +2717,8 @@ class MCAEditorPanel(QWidget):
         settings.set("sidebar_visible", self._sidebar.isVisible())
         settings.set("ai_panel_visible", self._ai_panel.isVisible())
 
-        # Persist workspace folders so they're restored on next launch.
+        # Persist workspace folders — always [scripts/] in Default mode.
+        # Kept for future Project mode where users can add custom folders.
         folders = self._sidebar.workspace_panel.get_workspace_folders()
         settings.set("workspace_folders", folders)
 

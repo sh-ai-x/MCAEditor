@@ -17,7 +17,7 @@ import platform
 
 from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QLabel, QPushButton, QFileDialog, QLineEdit,
+    QLabel, QPushButton, QFileDialog, QLineEdit, QSplitter,
     QMenu, QApplication, QInputDialog, QMessageBox,
     QAbstractItemView,
     Qt, Signal, QFileSystemWatcher,
@@ -508,6 +508,8 @@ class WorkspacePanel(QWidget):
     file_open_requested = Signal(str)
     # Emitted when a new file is created.
     file_created = Signal(str)
+    # Emitted when a file or folder is renamed. Args: (old_path, new_path).
+    file_renamed = Signal(str, str)
     # Emitted when the user clicks the "New" header button.
     new_tab_requested = Signal()
     # Emitted when the user clicks the "Open" header button.
@@ -574,25 +576,13 @@ class WorkspacePanel(QWidget):
         open_btn.clicked.connect(self.open_file_requested.emit)
         header_layout.addWidget(open_btn)
 
-        # Add folder button.
-        add_btn = QPushButton("+")
-        add_btn.setFixedSize(22, 22)
-        add_btn.setToolTip("Add Folder to Workspace")
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #969696;
-                border: none;
-                font-size: 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                color: #ffffff;
-                background-color: #3e3e42;
-            }
-        """)
-        add_btn.clicked.connect(self.add_folder_dialog)
-        header_layout.addWidget(add_btn)
+        # Refresh button — manually re-scan the workspace tree.
+        refresh_btn = QPushButton("R")
+        refresh_btn.setFixedSize(22, 22)
+        refresh_btn.setToolTip("Refresh Workspace")
+        refresh_btn.setStyleSheet(_header_btn_style)
+        refresh_btn.clicked.connect(self._refresh_tree)
+        header_layout.addWidget(refresh_btn)
 
         layout.addWidget(header)
 
@@ -643,7 +633,7 @@ class WorkspacePanel(QWidget):
         layout.addWidget(self._tree)
 
         # --- Empty state message ---
-        self._empty_label = QLabel("No workspace folders.\nClick + to add a folder.")
+        self._empty_label = QLabel("No workspace folder.\nScripts directory loading...")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet("color: #666666; padding: 20px; font-size: 11px;")
         layout.addWidget(self._empty_label)
@@ -829,6 +819,28 @@ class WorkspacePanel(QWidget):
             self._watcher.addPath(f)
         self._refresh_tree()
         self._update_empty_state()
+
+    def set_locked_folder(self, folder_path):
+        """
+        Lock the workspace to a single folder.
+
+        Clears any existing folders, sets the given folder as the sole
+        workspace root, adds it to the file watcher, and refreshes the
+        tree.  Used in Default mode to pin the workspace to the
+        ``scripts/`` directory.
+
+        :param str folder_path: Absolute path to the folder.
+        """
+        # Remove all existing watched folders.
+        for f in self._workspace_folders:
+            self._watcher.removePath(f)
+
+        # Set the single locked folder.
+        self._workspace_folders = [folder_path]
+        self._watcher.addPath(folder_path)
+        self._refresh_tree()
+        self._update_empty_state()
+        logger.info("Workspace locked to: %s", folder_path)
 
     # --- File Search Filtering -----------------------------------------------
 
@@ -1199,6 +1211,8 @@ class WorkspacePanel(QWidget):
             os.rename(path, new_path)
             logger.info("Renamed '%s' -> '%s'", old_name, new_name)
             self._refresh_tree()
+            # Notify listeners so open tabs can update their name and path.
+            self.file_renamed.emit(path, new_path)
         except Exception as exc:
             QMessageBox.warning(
                 self, "Error",
@@ -1300,6 +1314,7 @@ class MCASidebar(QWidget):
     # Forwarded signals from child panels.
     file_open_requested = Signal(str)
     file_created = Signal(str)
+    file_renamed = Signal(str, str)
     outline_item_clicked = Signal(int)
     editor_selected = Signal(int)
     new_tab_requested = Signal()
@@ -1315,28 +1330,43 @@ class MCASidebar(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        """Build the sidebar layout with all three panels."""
+        """Build the sidebar layout with a vertical splitter for resizable panels."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(1)
+        layout.setSpacing(0)
+
+        # Vertical splitter lets the user drag to resize panels.
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        self._splitter.setHandleWidth(3)
+        self._splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #3f3f46;
+            }
+        """)
 
         # Workspace panel (visible in Advanced mode only).
         self.workspace_panel = WorkspacePanel()
         self.workspace_panel.file_open_requested.connect(self.file_open_requested.emit)
         self.workspace_panel.file_created.connect(self.file_created.emit)
+        self.workspace_panel.file_renamed.connect(self.file_renamed.emit)
         self.workspace_panel.new_tab_requested.connect(self.new_tab_requested.emit)
         self.workspace_panel.open_file_requested.connect(self.open_file_requested.emit)
-        layout.addWidget(self.workspace_panel, stretch=3)
+        self._splitter.addWidget(self.workspace_panel)
 
         # Open editors panel (always visible).
         self.open_editors_panel = OpenEditorsPanel()
         self.open_editors_panel.editor_selected.connect(self.editor_selected.emit)
-        layout.addWidget(self.open_editors_panel, stretch=1)
+        self._splitter.addWidget(self.open_editors_panel)
 
         # Code outline panel (always visible).
         self.outline_panel = CodeOutlinePanel()
         self.outline_panel.item_clicked.connect(self.outline_item_clicked.emit)
-        layout.addWidget(self.outline_panel, stretch=2)
+        self._splitter.addWidget(self.outline_panel)
+
+        # Default sizes: workspace gets most space, editors and outline smaller.
+        self._splitter.setSizes([300, 100, 200])
+
+        layout.addWidget(self._splitter)
 
     def set_simple_mode(self):
         """Switch to simple mode - hide the workspace panel."""

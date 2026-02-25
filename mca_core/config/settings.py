@@ -50,10 +50,10 @@ class MCASettings:
     _DEFAULTS = {
         # --- General (Main Window) ---
         "editor_mode": EditorMode.SIMPLE.value,
-        "last_workspace": "",
+        "last_workspace": "",              # Reserved for future Project mode.
         "recent_files": [],
-        "recent_workspaces": [],
-        "workspace_folders": [],
+        "recent_workspaces": [],          # Reserved for future Project mode.
+        "workspace_folders": [],          # Reserved for future Project mode (always [scripts/] in Default).
         "auto_save_on_execute": True,        # Save all files before executing.
         "save_all_on_exit": True,            # Save all open files when closing.
         "check_modified_files": True,        # Warn if files changed on disk.

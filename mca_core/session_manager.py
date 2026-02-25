@@ -2,17 +2,18 @@
 MCA Core - Session Manager.
 
 Handles buffer persistence and session manifest I/O for the MCA Editor.
-Temp/new tabs are saved as files in a local buffers directory so content
-survives across application restarts.
+Temp/new tabs are saved as files in the ``scripts/`` directory so they
+appear in the workspace tree and are accessible to terminal AI tools.
 
 Storage layout::
 
     ~/Documents/mca_preferences/
-        session.json          # Tab manifest (order, languages, active tab)
-        buffers/
-            buffer_1.py
-            buffer_2.mel
-            buffer_3.txt
+        session.json              # Tab manifest (order, languages, active tab)
+        scripts/                  # Default workspace (also holds buffer files)
+            Python_1.py
+            MEL_2.mel
+            Text_3.txt
+            site-packages/        # User-installed packages (added to sys.path)
 
 Dependencies:
     - None (pure Python stdlib)
@@ -20,11 +21,14 @@ Dependencies:
 Side effects:
     - Creates directories under ~/Documents/mca_preferences/ on first write
     - Reads/writes session.json and buffer files in that directory
+    - One-time migration moves buffers from old ``buffers/`` to ``scripts/``
 """
 
+import glob
 import json
 import os
 import logging
+import shutil
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -36,6 +40,14 @@ LANGUAGE_EXTENSIONS = {
     "text": ".txt",
 }
 
+# Prefix map: language identifier -> filename prefix for buffer files.
+# E.g. a Python buffer becomes "Python_1.py", MEL becomes "MEL_2.mel".
+LANGUAGE_PREFIXES = {
+    "python": "Python",
+    "mel": "MEL",
+    "text": "Text",
+}
+
 
 # =============================================================================
 # Session Manager
@@ -45,9 +57,13 @@ class SessionManager:
     """
     Manages buffer persistence and session state on disk.
 
-    Buffer files are stored in ``~/Documents/mca_preferences/buffers/``
-    and a manifest (``session.json``) tracks which tabs are open, their
-    order, languages, and which tab was active.
+    Buffer files are stored in ``~/Documents/mca_preferences/scripts/``
+    (the same directory used as the workspace root) and a manifest
+    (``session.json``) tracks which tabs are open, their order, languages,
+    and which tab was active.
+
+    On first launch after the migration, existing buffers are moved from
+    the old ``buffers/`` directory into ``scripts/``.
 
     All file I/O is guarded with try/except so a corrupt or missing
     manifest never crashes the editor.
@@ -71,13 +87,20 @@ class SessionManager:
         # Base preferences directory under the user's Documents folder.
         documents = os.path.expanduser("~/Documents")
         self._prefs_dir = os.path.join(documents, "mca_preferences")
-        self._buffers_dir = os.path.join(self._prefs_dir, "buffers")
 
         # Default workspace directories inside mca_preferences.
-        # "scripts" is for user scripts, "site-packages" is added to
-        # sys.path so third-party packages can be imported from there.
+        # "scripts" is for user scripts AND buffer storage (unified).
+        # "site-packages" is added to sys.path so third-party packages
+        # can be imported from there.
         self._scripts_dir = os.path.join(self._prefs_dir, "scripts")
         self._site_packages_dir = os.path.join(self._scripts_dir, "site-packages")
+
+        # Buffers now live in scripts/ so they're visible in the workspace tree
+        # and accessible to terminal AI tools.
+        self._buffers_dir = self._scripts_dir
+
+        # Legacy buffers directory — used only during one-time migration.
+        self._legacy_buffers_dir = os.path.join(self._prefs_dir, "buffers")
 
         # In-memory counter for allocating unique buffer IDs.
         # Loaded from the manifest on first read, starts at 1 otherwise.
@@ -88,16 +111,77 @@ class SessionManager:
 
     def _ensure_dirs(self):
         """
-        Create the preferences and buffers directories if they don't exist.
+        Create the scripts and site-packages directories if they don't exist.
 
         Called lazily on first write to avoid creating empty directories
-        if the user never creates a temp buffer.
+        if the user never creates a temp buffer.  Since buffers now live
+        in ``scripts/``, this also creates ``site-packages/`` inside it.
         """
         if self._dirs_created:
             return
         os.makedirs(self._buffers_dir, exist_ok=True)
+        os.makedirs(self._site_packages_dir, exist_ok=True)
         self._dirs_created = True
         logger.debug("Ensured session directories: %s", self._buffers_dir)
+
+    # --- Legacy Migration ----------------------------------------------------
+
+    def migrate_buffers_to_scripts(self):
+        """
+        One-time migration: move buffer files from old ``buffers/`` to ``scripts/``.
+
+        Scans ``mca_preferences/buffers/`` for buffer files (both legacy
+        ``buffer_*`` and current ``Python_*``/``MEL_*``/``Text_*`` naming)
+        and moves each one into ``scripts/`` (skipping if a same-named file
+        already exists there).  After migration, removes the empty ``buffers/``
+        directory if possible.
+
+        Safe to call on every launch — does nothing if ``buffers/`` doesn't
+        exist or is already empty.
+        """
+        legacy = self._legacy_buffers_dir
+
+        # Nothing to migrate if the old directory doesn't exist.
+        if not os.path.isdir(legacy):
+            return
+
+        # Ensure the target (scripts/) exists before moving anything.
+        self._ensure_dirs()
+
+        # Find all buffer files in the legacy directory.
+        # Match both old naming (buffer_*) and new naming (Python_*, MEL_*, Text_*).
+        patterns = [
+            "buffer_*.py", "buffer_*.mel", "buffer_*.txt",
+            "Python_*.py", "MEL_*.mel", "Text_*.txt",
+        ]
+        moved = 0
+        for pattern in patterns:
+            for src_path in glob.glob(os.path.join(legacy, pattern)):
+                filename = os.path.basename(src_path)
+                dst_path = os.path.join(self._scripts_dir, filename)
+
+                # Skip if a file with the same name already exists in scripts/.
+                if os.path.exists(dst_path):
+                    logger.debug("Migration skip (already exists): %s", filename)
+                    continue
+
+                try:
+                    shutil.move(src_path, dst_path)
+                    moved += 1
+                    logger.debug("Migrated buffer: %s -> %s", src_path, dst_path)
+                except Exception as exc:
+                    logger.warning("Failed to migrate buffer %s: %s", filename, exc)
+
+        if moved:
+            logger.info("Migrated %d buffer(s) from buffers/ to scripts/", moved)
+
+        # Remove the old buffers/ directory if it's now empty.
+        try:
+            if os.path.isdir(legacy) and not os.listdir(legacy):
+                os.rmdir(legacy)
+                logger.info("Removed empty legacy buffers directory: %s", legacy)
+        except Exception as exc:
+            logger.debug("Could not remove legacy buffers dir: %s", exc)
 
     # --- Buffer File I/O -----------------------------------------------------
 
@@ -105,18 +189,20 @@ class SessionManager:
         """
         Write buffer content to a file in the buffers directory.
 
-        The filename is ``buffer_{id}.{ext}`` where ext is determined
-        by the language (e.g. .py, .mel, .txt).
+        The filename is ``{Language}_{id}.{ext}`` where Language is the
+        display name (Python, MEL, Text) and ext is the corresponding
+        extension.  For example: ``Python_1.py``, ``MEL_2.mel``.
 
         :param int buffer_id: Unique buffer identifier.
         :param str content: The text content to save.
         :param str language: Language identifier (python, mel, text).
-        :return: The buffer filename (relative, e.g. "buffer_1.py").
+        :return: The buffer filename (relative, e.g. "Python_1.py").
         :rtype: str
         """
         self._ensure_dirs()
         ext = LANGUAGE_EXTENSIONS.get(language, ".txt")
-        filename = "buffer_{}{}".format(buffer_id, ext)
+        prefix = LANGUAGE_PREFIXES.get(language, "Text")
+        filename = "{}_{}{}".format(prefix, buffer_id, ext)
         filepath = os.path.join(self._buffers_dir, filename)
 
         try:

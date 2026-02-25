@@ -48,6 +48,10 @@ class InternalMayaAdapter(DCCAdapter):
         # We are already inside Maya — mark as connected immediately.
         self._state = ConnectionState.CONNECTED
 
+        # Workspace paths to add to sys.path for user script imports.
+        self._scripts_dir = ""
+        self._site_packages_dir = ""
+
     # --- Abstract Property Implementations -----------------------------------
 
     @property
@@ -85,6 +89,29 @@ class InternalMayaAdapter(DCCAdapter):
         :rtype: int
         """
         return 0
+
+    # --- Workspace Path Injection --------------------------------------------
+
+    def set_workspace_paths(self, scripts_dir, site_packages_dir):
+        """
+        Set workspace paths and add them to ``sys.path`` for user imports.
+
+        Since the internal adapter runs in Maya's process, we can modify
+        ``sys.path`` directly (no wrapper injection needed).
+
+        :param str scripts_dir: Path to the user scripts directory.
+        :param str site_packages_dir: Path to the site-packages directory.
+        """
+        self._scripts_dir = scripts_dir
+        self._site_packages_dir = site_packages_dir
+
+        # Add directly to sys.path since we share Maya's process.
+        if scripts_dir and scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+            logger.info("Added to sys.path (internal): %s", scripts_dir)
+        if site_packages_dir and site_packages_dir not in sys.path:
+            sys.path.insert(0, site_packages_dir)
+            logger.info("Added to sys.path (internal): %s", site_packages_dir)
 
     # --- Connection (no-ops — we're always inside Maya) ----------------------
 

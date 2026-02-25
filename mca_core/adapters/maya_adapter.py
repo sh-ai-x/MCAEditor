@@ -59,6 +59,11 @@ class MayaAdapter(DCCAdapter):
         self._first_recv_timeout = FIRST_RECV_TIMEOUT_SECS
         self._idle_recv_timeout = IDLE_RECV_TIMEOUT_SECS
 
+        # Workspace paths to inject into Maya's sys.path before execution.
+        # Set via set_workspace_paths() during editor initialization.
+        self._scripts_dir = ""
+        self._site_packages_dir = ""
+
     # --- Abstract Property Implementations -----------------------------------
 
     @property
@@ -96,6 +101,24 @@ class MayaAdapter(DCCAdapter):
         :rtype: int
         """
         return DEFAULT_MEL_PORT
+
+    # --- Workspace Path Injection --------------------------------------------
+
+    def set_workspace_paths(self, scripts_dir, site_packages_dir):
+        """
+        Set the workspace paths to inject into Maya's ``sys.path``.
+
+        These directories are added to ``sys.path`` inside the Python wrapper
+        so that user scripts and third-party packages can be imported when
+        executing code in Maya.
+
+        :param str scripts_dir: Path to the user scripts directory.
+        :param str site_packages_dir: Path to the site-packages directory.
+        """
+        self._scripts_dir = scripts_dir
+        self._site_packages_dir = site_packages_dir
+        logger.debug("Maya workspace paths set: scripts=%s, site_packages=%s",
+                      scripts_dir, site_packages_dir)
 
     # --- Connection ----------------------------------------------------------
 
@@ -311,9 +334,25 @@ class MayaAdapter(DCCAdapter):
         # 4. In a finally block: restores stdout (even if code raises).
         # 5. Re-prints captured output so it returns through the socket.
         # 6. If an error occurred, prints the traceback too.
+        # Build sys.path injection lines for workspace directories.
+        # These ensure user scripts and site-packages are importable in Maya.
+        path_inject = ""
+        if self._scripts_dir:
+            # Use repr() for safe string escaping of Windows backslash paths.
+            path_inject += (
+                "if {scripts!r} not in __sys.path: "
+                "__sys.path.insert(0, {scripts!r})\n"
+            ).format(scripts=self._scripts_dir)
+        if self._site_packages_dir:
+            path_inject += (
+                "if {sitepkg!r} not in __sys.path: "
+                "__sys.path.insert(0, {sitepkg!r})\n"
+            ).format(sitepkg=self._site_packages_dir)
+
         wrapper = (
             "import base64 as __b64, sys as __sys, io as __io, traceback as __tb\n"
-            "__mca_old_stdout = __sys.stdout\n"
+            + path_inject
+            + "__mca_old_stdout = __sys.stdout\n"
             "__sys.stdout = __mca_buf = __io.StringIO()\n"
             "__mca_err = None\n"
             "__mca_code = __b64.b64decode('{}').decode('utf-8')\n"
