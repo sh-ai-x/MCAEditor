@@ -40,6 +40,7 @@ from mca_core.config.settings import MCASettings, EditorMode
 from mca_core.session_manager import SessionManager
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_qt.widgets.output_window import OutputWindow
+from mca_qt.widgets.terminal_widget import TerminalWidget
 from mca_qt.widgets.sidebar import MCASidebar
 from mca_qt.widgets.ai_panel import AIPanel
 from mca_qt.widgets.settings_dialog import SettingsDialog
@@ -239,13 +240,13 @@ class MCAEditorPanel(QWidget):
         self._sidebar.setMaximumWidth(400)
         self._main_splitter.addWidget(self._sidebar)
 
-        # --- Center: toolbar + editor tabs + output ---
+        # --- Center: toolbar + output + editor tabs + terminal ---
         center_widget = QWidget()
         self._center_layout = QVBoxLayout(center_widget)
         self._center_layout.setContentsMargins(0, 0, 0, 0)
         self._center_layout.setSpacing(0)
 
-        # Vertical splitter for output and editor tabs (output on top, like CE2).
+        # Vertical splitter for output, editor tabs, and terminal.
         self._center_splitter = QSplitter(Qt.Orientation.Vertical)
 
         # Output window (top panel, like Charcoal Editor 2 layout).
@@ -260,6 +261,17 @@ class MCAEditorPanel(QWidget):
         self._group_container.editors_changed.connect(self._update_open_editors)
         self._group_container.tab_close_requested.connect(self._close_tab_in_group)
         self._center_splitter.addWidget(self._group_container)
+
+        # Terminal panel (bottom, hidden by default).
+        terminal_shell = self._settings.get("terminal_shell", "")
+        terminal_font = self._settings.get("terminal_font_size", 12)
+        self._terminal = TerminalWidget(
+            shell=terminal_shell,
+            font_size=terminal_font,
+            parent=self,
+        )
+        self._terminal.setVisible(False)
+        self._center_splitter.addWidget(self._terminal)
 
         # Default split: 30% output (top), 70% editor (bottom).
         self._center_splitter.setSizes([250, 600])
@@ -654,6 +666,8 @@ class MCAEditorPanel(QWidget):
         self._toggle_output_action = self._create_action(
             view_menu, "Toggle Output", name="Toggle Output",
             shortcut="Ctrl+J", callback=self._toggle_output)
+        self._create_action(view_menu, "Toggle Terminal", name="Toggle Terminal",
+                            shortcut="Ctrl+`", callback=self._toggle_terminal)
         self._toggle_sidebar_action = self._create_action(
             view_menu, "Toggle Side Bar", name="Toggle Side Bar",
             shortcut="Ctrl+B", callback=self._toggle_sidebar)
@@ -935,6 +949,13 @@ class MCAEditorPanel(QWidget):
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
 
+        # Restore terminal visibility (hidden by default).
+        # Defer start so the layout is fully settled and dimensions are correct.
+        terminal_vis = s.get("terminal_visible", False)
+        if terminal_vis:
+            self._terminal.setVisible(True)
+            QTimer.singleShot(500, self._terminal.start)
+
         ai_vis = s.get("ai_panel_visible", False)
         self._ai_panel.setVisible(ai_vis)
 
@@ -979,6 +1000,29 @@ class MCAEditorPanel(QWidget):
         visible = not self._output.isVisible()
         self._output.setVisible(visible)
         self._settings.set("output_visible", visible)
+
+    def _toggle_terminal(self):
+        """Toggle terminal panel visibility (Ctrl+`)."""
+        visible = not self._terminal.isVisible()
+        self._terminal.setVisible(visible)
+        self._settings.set("terminal_visible", visible)
+
+        if visible:
+            # Give the terminal space in the splitter FIRST, before starting.
+            sizes = self._center_splitter.sizes()
+            if len(sizes) >= 3 and sizes[2] < 50:
+                total = sum(sizes)
+                terminal_height = min(200, total // 4)
+                sizes[2] = terminal_height
+                sizes[1] = max(100, sizes[1] - terminal_height)
+                self._center_splitter.setSizes(sizes)
+
+            # Defer start() to the next event loop tick so Qt processes
+            # the layout change first — otherwise the PTY spawns with
+            # a tiny viewport (e.g. 113x2) and output scrolls off.
+            if not self._terminal.is_alive():
+                QTimer.singleShot(0, self._terminal.start)
+            self._terminal.setFocus()
 
     def _toggle_ai_panel(self):
         """Toggle AI panel visibility, expanding it if needed, and persist."""
@@ -2579,6 +2623,7 @@ class MCAEditorPanel(QWidget):
 
         # Panel visibility.
         settings.set("output_visible", self._output.isVisible())
+        settings.set("terminal_visible", self._terminal.isVisible())
         settings.set("sidebar_visible", self._sidebar.isVisible())
         settings.set("ai_panel_visible", self._ai_panel.isVisible())
 
@@ -2605,6 +2650,9 @@ class MCAEditorPanel(QWidget):
         output_text = self._output._output.toPlainText()
         if output_text.strip():
             self._session_manager.save_output(output_text)
+
+        # Terminate the terminal process if running.
+        self._terminal.terminate()
 
         self._adapter_manager.disconnect_all()
         logger.info("MCA Editor panel cleaning up")

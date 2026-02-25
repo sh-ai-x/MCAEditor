@@ -61,7 +61,7 @@ if PYSIDE_VERSION == 6:
     # QtCore
     from PySide6.QtCore import (
         Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
-        QEvent, QObject,
+        QEvent, QObject, QThread,
     )
 
     # QKeyCombination exists natively in PySide6.
@@ -69,7 +69,7 @@ if PYSIDE_VERSION == 6:
 
     # QtGui — in PySide6, QAction lives in QtGui.
     from PySide6.QtGui import (
-        QPalette, QColor, QFont, QFontDatabase, QKeySequence,
+        QPalette, QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor, QAction, QActionGroup,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,
@@ -101,12 +101,12 @@ else:
     # QtCore
     from PySide2.QtCore import (
         Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
-        QEvent, QObject,
+        QEvent, QObject, QThread,
     )
 
     # QtGui
     from PySide2.QtGui import (
-        QPalette, QColor, QFont, QFontDatabase, QKeySequence,
+        QPalette, QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence,
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,

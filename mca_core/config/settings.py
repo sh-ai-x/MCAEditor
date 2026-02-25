@@ -182,12 +182,19 @@ class MCASettings:
         "ai_context_include_output": True,
         "ai_auto_complete": False,
 
+        # --- Terminal ---
+        "terminal_shell": "",                # Custom shell path (empty = system default).
+        "terminal_font_family": "Consolas",  # Terminal font family.
+        "terminal_font_size": 12,            # Terminal font size.
+        "terminal_scrollback_lines": 5000,   # Max scrollback buffer.
+
         # --- Window State ---
         "window_geometry": None,
         "window_state": None,
         "splitter_sizes": None,
         "center_splitter_sizes": None,   # Vertical splitter between output and editor.
         "output_visible": True,          # Whether the output panel is shown.
+        "terminal_visible": False,       # Whether the terminal panel is shown.
         "sidebar_visible": True,         # Whether the sidebar is shown (Advanced mode).
 
         # NOTE: Future tier/licensing hooks would add keys here:
