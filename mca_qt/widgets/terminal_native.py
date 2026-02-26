@@ -594,10 +594,9 @@ class TerminalWidget(QWidget):
             self.copy_selection()
             return True
 
-        # Ctrl+Shift+V — paste clipboard.
+        # Ctrl+V or Ctrl+Shift+V — paste clipboard.
         if (key == Qt.Key.Key_V and
-            modifiers & Qt.KeyboardModifier.ControlModifier and
-            modifiers & Qt.KeyboardModifier.ShiftModifier):
+            modifiers & Qt.KeyboardModifier.ControlModifier):
             self.paste_clipboard()
             return True
 

@@ -2071,6 +2071,20 @@ class MCAEditorPanel(QWidget):
             if success:
                 self._output.write_success("Connected to {}!".format(info["dcc_type"].value))
 
+                # Trigger MCP server setup when connecting to Maya.
+                # This runs in the background so it won't block the UI.
+                if info["dcc_type"] == DCCType.MAYA:
+                    try:
+                        from mca_core import mcp_setup
+                        mcp_setup.ensure_maya_mcp(
+                            background=True,
+                            status_callback=lambda msg: QTimer.singleShot(
+                                0, lambda m=msg: self._show_status(m, 5000)
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning("MCP setup trigger failed: %s", exc)
+
     def _disconnect_dcc(self):
         """Disconnect from all active DCC connections."""
         self._adapter_manager.disconnect_all()

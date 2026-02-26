@@ -30,7 +30,7 @@ import json
 import os
 import logging
 
-from mca_qt.qt_compat import QWidget, QVBoxLayout, Signal, QTimer
+from mca_qt.qt_compat import QWidget, QVBoxLayout, Signal, QTimer, QApplication, Qt
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -260,6 +260,68 @@ class TerminalWidget(QWidget):
 
         layout.addWidget(self._web_view)
 
+        # Install an event filter on the web view's focusProxy (the internal
+        # Chromium widget that actually receives keyboard events).  This lets
+        # us intercept Ctrl+V/Ctrl+C before they reach xterm.js, where the
+        # browser clipboard API would fail inside QWebEngineView.
+        # The focusProxy() may not be available immediately (Chromium is still
+        # initializing), so we also hook into childEvent to catch it later.
+        self._install_key_filter()
+
+    def _install_key_filter(self):
+        """
+        Install an event filter on the QWebEngineView's focus proxy widget.
+
+        The focus proxy is the internal Chromium widget that actually receives
+        keyboard events.  We need to filter there (not on the QWebEngineView
+        itself) to intercept keys before Chromium processes them.
+        """
+        if self._web_view is None:
+            return
+
+        # The focus proxy is the child widget that Chromium renders into.
+        focus_proxy = self._web_view.focusProxy()
+        if focus_proxy:
+            focus_proxy.installEventFilter(self)
+            logger.debug("Key filter installed on web view focus proxy")
+        else:
+            # Focus proxy not ready yet — try again shortly.
+            QTimer.singleShot(200, self._install_key_filter)
+
+    def eventFilter(self, obj, event):
+        """
+        Intercept keyboard events on the Chromium focus proxy.
+
+        Handles Ctrl+V (paste) and Ctrl+Shift+C (copy) since the browser's
+        clipboard API is not available inside QWebEngineView.
+
+        :param QObject obj: The watched object.
+        :param QEvent event: The event.
+        :return: True if the event was consumed.
+        :rtype: bool
+        """
+        from mca_qt.qt_compat import QEvent as QEventType
+
+        etype = event.type()
+
+        if etype == QEventType.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            ctrl = modifiers & Qt.KeyboardModifier.ControlModifier
+            shift = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+            # Ctrl+V or Ctrl+Shift+V — paste from system clipboard.
+            if ctrl and key == Qt.Key.Key_V:
+                self.paste_clipboard()
+                return True
+
+            # Ctrl+Shift+C — copy selection (Ctrl+C alone is SIGINT).
+            if ctrl and shift and key == Qt.Key.Key_C:
+                self.copy_selection()
+                return True
+
+        return super().eventFilter(obj, event)
+
     # --- Process Lifecycle ---------------------------------------------------
 
     def start(self):
@@ -469,6 +531,47 @@ class TerminalWidget(QWidget):
         # Also send Ctrl+L to the shell so it redraws its prompt.
         if self._alive and self._backend:
             self._backend.write(b"\x0c")
+
+    # --- Clipboard -----------------------------------------------------------
+
+    def paste_clipboard(self):
+        """
+        Paste the system clipboard content into the terminal.
+
+        QWebEngineView's embedded Chromium does not have clipboard API
+        permissions, so xterm.js cannot paste via the browser natively.
+        We read the clipboard from Python and push it into xterm.js
+        via the ``pasteText()`` JS function.
+        """
+        if not self._alive or not self._backend:
+            return
+        clipboard = QApplication.clipboard()
+        text = clipboard.text()
+        if text:
+            # Use the JS pasteText() function which calls term.paste().
+            # This properly handles bracketed paste mode for shells that
+            # support it (bash, zsh, fish, etc.).
+            js_text = json.dumps(text)
+            self._run_js("pasteText({})".format(js_text))
+
+    def copy_selection(self):
+        """
+        Copy the current xterm.js selection to the system clipboard.
+
+        xterm.js tracks its own selection state.  We read it via JS and
+        push it to the Python-side system clipboard.
+        """
+        if not self._js_ready or not self._web_page:
+            return
+
+        def _on_selection(result):
+            if result:
+                clipboard = QApplication.clipboard()
+                clipboard.setText(result)
+
+        self._web_page.runJavaScript(
+            "term.getSelection()", _on_selection
+        )
 
     # --- Focus ---------------------------------------------------------------
 

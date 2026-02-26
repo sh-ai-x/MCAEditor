@@ -107,6 +107,15 @@ def initializePlugin(plugin):
     else:
         logger.info("Venv setup OK")
 
+    # Kick off MCP server deployment in the background.  This clones
+    # MayaMCP (if needed), sets up its venv, and registers with Claude Code.
+    # Runs in a daemon thread so it never blocks Maya startup.
+    try:
+        from mca_core import mcp_setup
+        mcp_setup.ensure_maya_mcp(background=True)
+    except Exception as exc:
+        logger.warning("MCP setup trigger failed: %s", exc)
+
     fn_plugin = om2.MFnPlugin(plugin, PLUGIN_VENDOR, PLUGIN_VERSION)
 
     # Register the mcaEditor command.

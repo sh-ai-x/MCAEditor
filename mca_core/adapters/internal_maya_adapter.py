@@ -382,12 +382,19 @@ class InternalMayaAdapter(DCCAdapter):
         """
         Return info about Maya MCP server availability.
 
+        Delegates to ``mcp_setup.get_mcp_server_status()`` for real-time
+        status instead of returning a hardcoded stub.
+
         :return: MCP server metadata dictionary.
         :rtype: dict
         """
-        return {
-            "name": "dcc-mcp-maya",
-            "description": "MCP server for Maya scene manipulation",
-            "url": "https://github.com/loonghao/dcc-mcp-maya",
-            "installed": False,  # TODO: detect if installed
-        }
+        try:
+            from mca_core.mcp_setup import get_mcp_server_status
+            return get_mcp_server_status()
+        except Exception:
+            # Fallback if mcp_setup is unavailable.
+            return {
+                "name": "MCAMayaMCP",
+                "description": "MCP server for Maya scene manipulation",
+                "installed": False,
+            }
