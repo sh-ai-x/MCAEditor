@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCA Terminal</title>
+    <link rel="stylesheet" href="xterm.css">
+    <style>
+        /* Fill the entire viewport with no margin or scrollbar. */
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1e1e1e;
+        }
+        #terminal-container {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="terminal-container"></div>
+
+    <!-- xterm.js core and addons (local bundles) -->
+    <script src="xterm.js"></script>
+    <script src="xterm-addon-fit.js"></script>
+    <script src="xterm-addon-webgl.js"></script>
+
+    <!-- Qt WebChannel bridge (bundled with PySide6-Addons) -->
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+    <script>
+        // ----------------------------------------------------------------
+        // Terminal setup
+        // ----------------------------------------------------------------
+
+        // Create xterm.js terminal with dark theme matching the editor.
+        var term = new Terminal({
+            theme: {
+                background:  "#1e1e1e",
+                foreground:  "#cccccc",
+                cursor:      "#aeafad",
+                cursorAccent:"#1e1e1e",
+                selectionBackground: "rgba(38,79,120,0.5)",
+                black:       "#000000",
+                red:         "#cd3131",
+                green:       "#0dbc79",
+                yellow:      "#e5e510",
+                blue:        "#2472c8",
+                magenta:     "#bc3fbc",
+                cyan:        "#11a8cd",
+                white:       "#e5e5e5",
+                brightBlack: "#666666",
+                brightRed:   "#f14c4c",
+                brightGreen: "#23d18b",
+                brightYellow:"#f5f543",
+                brightBlue:  "#3b8eea",
+                brightMagenta:"#d670d6",
+                brightCyan:  "#29b8db",
+                brightWhite: "#e5e5e5"
+            },
+            fontFamily:      "Consolas, 'Courier New', monospace",
+            fontSize:        12,
+            cursorBlink:     true,
+            cursorStyle:     "block",
+            scrollback:      5000,
+            allowProposedApi: true
+        });
+
+        // Load FitAddon for automatic resizing.
+        var fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        // Open the terminal in the container div.
+        term.open(document.getElementById("terminal-container"));
+
+        // Try to load WebGL addon for GPU-accelerated rendering.
+        // Falls back silently to the default canvas renderer on failure.
+        try {
+            var webglAddon = new WebglAddon.WebglAddon();
+            webglAddon.onContextLoss(function () {
+                webglAddon.dispose();
+            });
+            term.loadAddon(webglAddon);
+        } catch (e) {
+            console.warn("WebGL addon failed, using canvas renderer:", e);
+        }
+
+        // Initial fit so xterm fills the container.
+        fitAddon.fit();
+
+        // Reference to the Python bridge object (set in connectChannel).
+        var api = null;
+
+        // ----------------------------------------------------------------
+        // QWebChannel connection
+        // ----------------------------------------------------------------
+
+        new QWebChannel(qt.webChannelTransport, function (channel) {
+            api = channel.objects.termAPI;
+
+            // PTY output → xterm.js display.
+            api.dataReceived.connect(function (data) {
+                term.write(data);
+            });
+
+            // User keyboard input → Python backend.
+            term.onData(function (data) {
+                api.write(data);
+            });
+
+            // Terminal resize → Python backend.
+            term.onResize(function (size) {
+                api.resize(size.cols, size.rows);
+            });
+
+            // Notify Python that the JS side is fully initialized.
+            api.ready(term.cols, term.rows);
+        });
+
+        // ----------------------------------------------------------------
+        // Window resize → re-fit terminal
+        // ----------------------------------------------------------------
+
+        // ResizeObserver gives more reliable notifications than the
+        // window resize event inside QWebEngineView.
+        var resizeObserver = new ResizeObserver(function () {
+            fitAddon.fit();
+        });
+        resizeObserver.observe(document.getElementById("terminal-container"));
+
+        // ----------------------------------------------------------------
+        // Global JS functions callable from Python via runJavaScript()
+        // ----------------------------------------------------------------
+
+        /**
+         * Change the terminal font size.
+         * @param {number} size - Font size in pixels.
+         */
+        function setFontSize(size) {
+            term.options.fontSize = size;
+            fitAddon.fit();
+        }
+
+        /**
+         * Change the terminal font family.
+         * @param {string} family - CSS font-family string.
+         */
+        function setFontFamily(family) {
+            term.options.fontFamily = family;
+            fitAddon.fit();
+        }
+
+        /**
+         * Clear the terminal screen and scrollback.
+         */
+        function clearTerminal() {
+            term.clear();
+        }
+
+        /**
+         * Focus the terminal so it accepts keyboard input.
+         */
+        function focusTerminal() {
+            term.focus();
+        }
+
+        /**
+         * Paste text into the terminal as if it were typed.
+         * @param {string} text - The text to paste.
+         */
+        function pasteText(text) {
+            term.paste(text);
+        }
+    </script>
+</body>
+</html>

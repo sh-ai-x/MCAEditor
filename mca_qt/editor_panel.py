@@ -40,7 +40,7 @@ from mca_core.config.settings import MCASettings, EditorMode
 from mca_core.session_manager import SessionManager
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_qt.widgets.output_window import OutputWindow
-from mca_qt.widgets.terminal_widget import TerminalWidget
+from mca_qt.widgets.xterm_widget import TerminalWidget
 from mca_qt.widgets.sidebar import MCASidebar
 from mca_qt.widgets.ai_panel import AIPanel
 from mca_qt.widgets.settings_dialog import SettingsDialog

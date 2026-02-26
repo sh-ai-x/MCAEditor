@@ -48,5 +48,10 @@ htmlcov/
 # --- Logs ---
 *.log
 
+# --- Node (xterm.js bundling) ---
+node_modules/
+package.json
+package-lock.json
+
 # --- Claude Code ---
 .claude/
