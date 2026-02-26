@@ -1,10 +1,16 @@
 """
-MCA Qt - xterm.js Terminal Widget.
+MCA Qt - xterm.js Terminal Widget (QWebEngineView frontend).
 
-Drop-in replacement for the old custom terminal widget. Embeds xterm.js
-(the terminal emulator used by VS Code) inside a QWebEngineView, bridged
-to Python via QWebChannel.  The existing TerminalBackend (pywinpty-based)
-is reused unchanged — only the rendering layer is swapped out.
+Embeds xterm.js (the terminal emulator used by VS Code) inside a
+QWebEngineView, bridged to Python via QWebChannel.  The existing
+TerminalBackend (pywinpty-based) is reused unchanged — only the
+rendering layer is swapped out.
+
+This is the preferred frontend for standalone mode (PySide6 with
+QtWebEngine).  Inside Maya (PySide2, no QtWebEngine), the native
+QPlainTextEdit frontend (``terminal_native.py``) is used instead.
+
+The ``terminal_factory.py`` module selects the correct widget at runtime.
 
 Architecture::
 
@@ -45,7 +51,9 @@ except ImportError:
     logger.info("QtWebEngine not available — integrated terminal disabled")
 
 # pywinpty backend (optional — disabled gracefully if missing).
-from mca_qt.widgets.terminal_backend import TerminalBackend, HAS_CONPTY
+# check_conpty() retries the import if it failed at module load time
+# (e.g. venv path wasn't injected yet).
+from mca_qt.widgets.terminal_backend import TerminalBackend, check_conpty
 
 # Path to the bundled xterm.js HTML page.
 _RESOURCES_DIR = os.path.join(
@@ -265,10 +273,17 @@ class TerminalWidget(QWidget):
         if self._alive:
             return
 
-        # Guard: both QtWebEngine and pywinpty must be available.
-        if not HAS_WEBENGINE or not HAS_CONPTY:
-            logger.info("Terminal unavailable (WebEngine=%s, ConPTY=%s)",
-                         HAS_WEBENGINE, HAS_CONPTY)
+        # Guard: QtWebEngine must be available.  pywinpty is checked
+        # by the factory before selecting this widget, so check_conpty()
+        # should always be True here — but verify defensively.
+        if not HAS_WEBENGINE:
+            logger.warning("Terminal cannot start (QtWebEngine not available)")
+            return
+        if not check_conpty():
+            logger.warning(
+                "Terminal cannot start — pywinpty not available. "
+                "The factory should have selected the native terminal instead."
+            )
             return
 
         if not self._js_ready:
@@ -368,7 +383,7 @@ class TerminalWidget(QWidget):
         # more reliable than QWebChannel signal delivery for raw
         # terminal data containing ANSI escape sequences.
         js_str = json.dumps(text)
-        self._web_page.runJavaScript("term.write({})".format(js_str))
+        self._run_js("term.write({})".format(js_str))
 
     def _on_js_write(self, data):
         """
@@ -463,7 +478,12 @@ class TerminalWidget(QWidget):
 
         :param reason: Focus reason (optional).
         """
-        self._web_view.setFocus()
+        if self._web_view is not None:
+            try:
+                self._web_view.setFocus()
+            except RuntimeError:
+                # C++ object already deleted — widget is being torn down.
+                return
         self._run_js("focusTerminal()")
 
     # --- Helper: Run JavaScript ----------------------------------------------
@@ -473,9 +493,18 @@ class TerminalWidget(QWidget):
         Execute a JavaScript expression in the xterm.js page.
 
         Only runs if the JS side has been initialized. Silently
-        skips if the page is not yet ready.
+        skips if the page is not yet ready or if the underlying C++
+        QWebEnginePage has already been destroyed (can happen during
+        widget teardown when Qt deletes child objects).
 
         :param str script: JavaScript code to evaluate.
         """
-        if self._js_ready:
-            self._web_page.runJavaScript(script)
+        if self._js_ready and self._web_page is not None:
+            try:
+                self._web_page.runJavaScript(script)
+            except RuntimeError:
+                # Internal C++ object already deleted — the QWebEnginePage
+                # has been destroyed by Qt.  Mark JS as not ready so future
+                # calls skip silently.
+                logger.debug("QWebEnginePage destroyed — disabling JS calls")
+                self._js_ready = False

@@ -19,6 +19,8 @@ Usage:
 import sys
 import logging
 
+from mca_core.venv_manager import setup_venv
+
 from mca_qt.qt_compat import QApplication, Qt
 from mca_qt.theme import create_dark_palette, GLOBAL_STYLESHEET
 from mca_core import __version__, __app_name__, __org_name__, __org_domain__
@@ -46,6 +48,11 @@ def main():
         datefmt="%H:%M:%S",
     )
     logger.info("Starting %s v%s", __app_name__, __version__)
+
+    # Set up the managed venv and install/inject dependencies before any
+    # imports that rely on venv packages (pywinpty, pyflakes, etc.).
+    # This is fast on subsequent launches — just a sys.path.insert().
+    setup_venv()
 
     # Enable high DPI scaling (passthrough for crisp rendering).
     QApplication.setHighDpiScaleFactorRoundingPolicy(

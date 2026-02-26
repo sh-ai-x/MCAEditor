@@ -225,6 +225,85 @@ def text_icon():
     return _cached("text_icon", _paint_text_icon)
 
 
+# --- Terminal Icon ------------------------------------------------------------
+
+def terminal_icon():
+    """
+    Terminal/console icon ('>_' prompt in a rounded box).
+
+    :return: Terminal icon.
+    :rtype: QIcon
+    """
+    return _cached("terminal_icon", _paint_terminal_icon)
+
+
+def _paint_terminal_icon():
+    """Paint a terminal prompt icon."""
+    pix = QPixmap(ICON_SIZE, ICON_SIZE)
+    pix.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Draw the prompt chevron ">".
+    accent = QColor("#569cd6")
+    pen = QPen(accent, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.drawLine(3, 4, 8, 8)
+    p.drawLine(8, 8, 3, 12)
+
+    # Draw the underscore "_".
+    p.drawLine(9, 12, 14, 12)
+
+    p.end()
+    return QIcon(pix)
+
+
+# --- AI Icon -----------------------------------------------------------------
+
+def ai_icon():
+    """
+    AI / sparkle icon (four-pointed star).
+
+    :return: AI icon.
+    :rtype: QIcon
+    """
+    return _cached("ai_icon", _paint_ai_icon)
+
+
+def _paint_ai_icon():
+    """Paint an AI sparkle/star icon."""
+    pix = QPixmap(ICON_SIZE, ICON_SIZE)
+    pix.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Four-pointed sparkle shape in purple/violet.
+    sparkle_color = QColor("#b48ead")
+
+    # Draw a four-pointed star centered at (8, 8).
+    path = QPainterPath()
+    path.moveTo(8, 1)     # Top point.
+    path.lineTo(10, 6)
+    path.lineTo(15, 8)    # Right point.
+    path.lineTo(10, 10)
+    path.lineTo(8, 15)    # Bottom point.
+    path.lineTo(6, 10)
+    path.lineTo(1, 8)     # Left point.
+    path.lineTo(6, 6)
+    path.closeSubpath()
+
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(sparkle_color)
+    p.drawPath(path)
+
+    p.end()
+    return QIcon(pix)
+
+
 def _paint_text_icon():
     """Paint a simple text/document icon."""
     pix = QPixmap(ICON_SIZE, ICON_SIZE)

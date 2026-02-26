@@ -28,6 +28,8 @@ import maya.api.OpenMaya as om2
 import maya.cmds as cmds
 import maya.mel as mel
 
+from mca_core.venv_manager import setup_venv
+
 # Module-level logger.
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,16 @@ def initializePlugin(plugin):
 
     :param MObject plugin: Maya's plugin MObject.
     """
+    # Set up the managed venv and install/inject dependencies before any
+    # imports that rely on venv packages (pywinpty, pyflakes, etc.).
+    # This is fast on subsequent launches — just a sys.path.insert().
+    venv_ok = setup_venv()
+    if not venv_ok:
+        logger.warning("Venv setup had issues — some features (terminal, "
+                        "code analysis) may be unavailable. Check Script Editor.")
+    else:
+        logger.info("Venv setup OK")
+
     fn_plugin = om2.MFnPlugin(plugin, PLUGIN_VENDOR, PLUGIN_VERSION)
 
     # Register the mcaEditor command.

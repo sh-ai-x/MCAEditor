@@ -490,6 +490,28 @@ class _OutputTextEdit(QPlainTextEdit):
             return
         super().wheelEvent(event)
 
+    def event(self, event):
+        """
+        Override top-level event handler to intercept ShortcutOverride.
+
+        Maya's hotkey system intercepts keyboard events at the
+        application level, before individual widgets see them.  By
+        accepting ShortcutOverride for Ctrl+C, Ctrl+A, and Ctrl+F
+        directly on this widget, we tell Qt to deliver them as
+        normal KeyPress events to our keyPressEvent below — before
+        Maya's MEL-based hotkey layer can steal them.
+
+        :param QEvent event: The Qt event.
+        :return: True if the event was consumed.
+        :rtype: bool
+        """
+        if event.type() == QEvent.Type.ShortcutOverride:
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                if event.key() in (Qt.Key.Key_C, Qt.Key.Key_A, Qt.Key.Key_F):
+                    event.accept()
+                    return True
+        return super().event(event)
+
     def keyPressEvent(self, event):
         """
         Handle Ctrl+C (copy) and Ctrl+A (select all) explicitly.

@@ -1,16 +1,20 @@
 """
-MCA Qt - Terminal Widget.
+MCA Qt - Native Terminal Widget (QPlainTextEdit frontend).
 
 User-facing terminal emulator widget that combines the ConPTY backend
 and ANSI parser into an interactive terminal experience. Renders the
 parsed character grid into a styled QPlainTextEdit and translates Qt
 key events into ANSI escape sequences for the PTY.
 
-Uses the Windows ConPTY API via ctypes — no external packages needed.
-Works in any Python on Windows 10 1809+ (standalone and Maya).
+This is the fallback frontend used inside Maya (where QtWebEngine is
+not available).  The xterm.js frontend (``terminal_xterm.py``) is
+preferred in standalone mode.  Both share the same ``TerminalBackend``.
+
+The ``terminal_factory.py`` module selects the correct widget at runtime.
 
 Dependencies:
     - PySide6 or PySide2 (QWidget, QPlainTextEdit, QFont, etc.)
+    - pywinpty >= 2.0.0 (via managed venv)
     - Windows 10 version 1809+ (for ConPTY)
 """
 
@@ -22,7 +26,7 @@ from mca_qt.qt_compat import (
     QTextCharFormat, QTextCursor, QMenu,
 )
 
-from mca_qt.widgets.terminal_backend import TerminalBackend, HAS_CONPTY
+from mca_qt.widgets.terminal_backend import TerminalBackend, check_conpty
 from mca_qt.widgets.ansi_parser import AnsiParser, DEFAULT_FG, DEFAULT_BG
 
 # Module-level logger.
@@ -100,6 +104,25 @@ class TerminalWidget(QWidget):
         # Last known title for change detection.
         self._last_title = ""
 
+        # First-data flag for diagnostic logging — logs once when data
+        # first arrives so we can confirm the data pipeline is working.
+        self._first_data_logged = False
+
+        # Scrollback rendering state — tracks how many scrollback lines
+        # have already been inserted into the QPlainTextEdit.  New lines
+        # are appended incrementally (once) so we never re-render old
+        # scrollback.  The visible grid (last _rows lines) is rebuilt
+        # every frame but is small (~24 lines).
+        self._scrollback_rendered = 0
+
+        # Local echo mode — enabled when running with the subprocess pipe
+        # fallback (no PTY).  Without a PTY, the shell doesn't echo typed
+        # characters or handle backspace visually, so the terminal must do
+        # it locally.  Characters are displayed immediately and buffered
+        # until Enter sends the complete line to the shell's stdin.
+        self._local_echo = False
+        self._echo_buffer = ""
+
         # Build the UI.
         self._setup_ui()
 
@@ -124,10 +147,13 @@ class TerminalWidget(QWidget):
         layout.setSpacing(0)
 
         # The display area — a read-only QPlainTextEdit with monospace font.
+        # We render our own block cursor (inverted colors) in _render(),
+        # so the native Qt text cursor must be fully hidden.
         self._display = QPlainTextEdit()
         self._display.setReadOnly(True)
         self._display.setUndoRedoEnabled(False)
         self._display.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._display.setCursorWidth(0)
 
         # Monospace font for terminal rendering.
         font = QFont("Consolas", self._font_size)
@@ -154,23 +180,41 @@ class TerminalWidget(QWidget):
 
     def start(self):
         """
-        Start the terminal by spawning the PTY process.
+        Start the terminal by spawning the shell process.
 
         Calculates the initial terminal dimensions from the widget size,
-        creates the backend thread, and starts reading output.  If the
-        ConPTY API is not available (pre-1809 Windows), shows a
-        user-friendly placeholder message instead.
+        creates the backend thread, and starts reading output.  The
+        backend automatically selects the best available driver
+        (pywinpty PTY or subprocess pipe fallback).
         """
         if self._alive:
             return
 
-        # Guard: ConPTY must be available for terminal functionality.
-        if not HAS_CONPTY:
-            self._show_unavailable_message()
-            return
+        # Check if pywinpty is available (retries import if it failed at
+        # module load time — venv path may have been injected later).
+        # When pywinpty is missing, the backend uses subprocess pipes.
+        # Pipes have no line discipline, so typed characters aren't echoed
+        # and backspace doesn't erase — we must handle that locally.
+        if not check_conpty():
+            logger.warning("Terminal start: pywinpty not available "
+                           "(subprocess fallback with local echo)")
+            self._local_echo = True
+            self._echo_buffer = ""
+        else:
+            self._local_echo = False
+
+        # Reset first-data flag and scrollback state for this session.
+        self._first_data_logged = False
+        self._scrollback_rendered = 0
 
         # Calculate dimensions from current widget size.
+        # If the widget hasn't been laid out yet (common in Maya docked
+        # panels), _calculate_dimensions() may silently keep defaults.
         self._calculate_dimensions()
+
+        logger.info("Native terminal starting: shell=%s, cwd=%s, size=%dx%d",
+                     self._shell or "(auto)", self._cwd or "(home)",
+                     self._cols, self._rows)
 
         # Create and wire up the backend.
         self._backend = TerminalBackend(
@@ -180,7 +224,9 @@ class TerminalWidget(QWidget):
             cols=self._cols,
             parent=self,
         )
-        self._backend.data_received.connect(self._on_data_received)
+        # NOTE: We do NOT connect data_received here.  The render timer
+        # polls drain_buffer() directly, which is the reliable data path.
+        # Connecting the signal too would double-feed the ANSI parser.
         self._backend.process_exited.connect(self._on_process_exited)
 
         # Resize the parser to match.
@@ -192,23 +238,11 @@ class TerminalWidget(QWidget):
 
         logger.info("Terminal started: %dx%d", self._cols, self._rows)
 
-    def _show_unavailable_message(self):
-        """
-        Show a placeholder message when ConPTY is not available.
-
-        This should only happen on very old Windows versions (pre-1809).
-        """
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor("#969696"))
-
-        cursor = self._display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-
-        cursor.insertText("Terminal is not available.\n\n", fmt)
-        cursor.insertText("The integrated terminal requires Windows 10\n", fmt)
-        cursor.insertText("version 1809 or later (ConPTY API).\n", fmt)
-
-        logger.info("Terminal unavailable — ConPTY not supported")
+        # Schedule a deferred dimension recalculation after 200ms.
+        # In docked environments (Maya), the widget viewport may not have
+        # its final size yet when start() is called.  This ensures the PTY
+        # gets resized to the correct terminal dimensions once layout settles.
+        QTimer.singleShot(200, self._deferred_resize)
 
     def terminate(self):
         """
@@ -240,18 +274,6 @@ class TerminalWidget(QWidget):
 
     # --- Data Flow -----------------------------------------------------------
 
-    def _on_data_received(self, data):
-        """
-        Handle raw bytes from the PTY backend.
-
-        Feeds the data through the ANSI parser and marks the display
-        as dirty for the next render cycle.
-
-        :param bytes data: Raw bytes from the PTY.
-        """
-        self._parser.feed(data)
-        self._dirty = True
-
     def _on_process_exited(self, exit_code):
         """
         Handle PTY process exit.
@@ -262,96 +284,225 @@ class TerminalWidget(QWidget):
         self.process_exited.emit(exit_code)
         logger.info("Terminal process exited with code %d", exit_code)
 
+    def _deferred_resize(self):
+        """
+        Recalculate terminal dimensions after a short delay.
+
+        Called via QTimer.singleShot() after start() to handle cases
+        where the widget viewport didn't have its final size at start
+        time (common in Maya docked panels).  This sends a resize to
+        the PTY so the shell knows the correct terminal dimensions.
+        """
+        if not self._alive or not self._backend:
+            return
+
+        # Force recalculate — _calculate_dimensions() will resize the
+        # parser and backend if the size has changed.
+        old_cols, old_rows = self._cols, self._rows
+        self._calculate_dimensions()
+
+        if self._cols != old_cols or self._rows != old_rows:
+            logger.info("Deferred resize corrected terminal: %dx%d -> %dx%d",
+                         old_cols, old_rows, self._cols, self._rows)
+
     # --- Rendering -----------------------------------------------------------
 
     def _render(self):
         """
         Rebuild the display from the ANSI parser's character grid.
 
-        Called by the render timer at ~60fps. Polls the backend's
-        thread-safe buffer directly (bypassing cross-thread Signal
-        delivery issues) and feeds any new data to the parser before
-        repainting.
+        Called by the render timer at ~60fps.  Uses a two-phase approach
+        for efficient rendering:
+
+        **Phase 1 — Scrollback (incremental):**
+            New scrollback lines are inserted into the QPlainTextEdit
+            once, as they appear.  Old scrollback is never re-rendered,
+            keeping the cost proportional to new output only.
+
+        **Phase 2 — Visible grid (per-frame):**
+            The last ``_rows`` lines of the document are replaced with
+            the current parser grid on every dirty frame.  This is the
+            only section that changes frequently (~24 lines).
+
+        This gives the user scrollable history while keeping per-frame
+        work minimal (just the visible grid, not the full scrollback).
         """
         # Poll the backend's thread-safe buffer for new data.
-        # This is more reliable than the cross-thread Signal(bytes)
-        # which can silently fail on some PySide6/Qt builds.
         if self._backend:
             chunks = self._backend.drain_buffer()
+            if chunks:
+                total_bytes = sum(len(c) for c in chunks)
+
+                if not self._first_data_logged:
+                    self._first_data_logged = True
+                    logger.info("Terminal: first data received — %d chunk(s), "
+                                "%d bytes (pipeline OK)", len(chunks), total_bytes)
+
             for chunk in chunks:
                 self._parser.feed(chunk)
                 self._dirty = True
 
-        if not self._dirty:
-            return
-        self._dirty = False
+        # Check for new scrollback lines.
+        current_sb_len = self._parser.get_scrollback_length()
+        new_scrollback_count = current_sb_len - self._scrollback_rendered
 
-        # Get the visible lines from the parser.
-        lines = self._parser.get_visible_lines()
+        # If scrollback was trimmed (exceeded max) or cleared, we need
+        # to adjust our counter.  The document may have stale scrollback
+        # lines at the top, but that's acceptable — they just won't be
+        # updated.  Worst case, a clear() call resets everything.
+        if new_scrollback_count < 0:
+            self._scrollback_rendered = current_sb_len
+            new_scrollback_count = 0
+
+        if not self._dirty and new_scrollback_count == 0:
+            return
+
+        # Get the visible grid and cursor position.
+        grid_lines = self._parser.get_visible_lines()
         cursor_row, cursor_col = self._parser.get_cursor_position()
 
-        # Build the display content using rich text formatting.
-        # We use QTextCursor operations for efficient updates.
+        # Check if the user has scrolled up — if so, don't auto-scroll
+        # to the bottom so they can read history without it jumping away.
+        scrollbar = self._display.verticalScrollBar()
+        was_at_bottom = (scrollbar.value() >= scrollbar.maximum() - 5)
+
         self._display.setUpdatesEnabled(False)
+        try:
+            doc = self._display.document()
 
-        cursor = self._display.textCursor()
-        cursor.select(QTextCursor.SelectionType.Document)
-        cursor.removeSelectedText()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
+            # --- Phase 1: Insert new scrollback lines (incremental) ---
+            if new_scrollback_count > 0:
+                # Only convert the new scrollback lines to styled tuples
+                # (not the entire scrollback buffer — much faster).
+                new_sb_lines = self._parser.get_scrollback_lines(
+                    max_lines=new_scrollback_count
+                )
 
-        for row_idx, line in enumerate(lines):
-            if row_idx > 0:
-                cursor.insertText("\n")
+                # Insert before the grid section.  The grid section starts
+                # at: (total blocks) - _rows.
+                grid_start = max(0, doc.blockCount() - self._rows)
+                block = doc.findBlockByNumber(grid_start)
+                cursor = self._display.textCursor()
+                cursor.setPosition(block.position())
 
-            # Group consecutive cells with the same formatting for efficiency.
-            i = 0
-            while i < len(line):
-                char, fg, bg, bold, underline, italic = line[i]
+                for sb_line in new_sb_lines:
+                    self._render_line(cursor, sb_line)
+                    cursor.insertText("\n")
 
-                # Collect a run of identically-formatted characters.
-                run = [char]
-                j = i + 1
-                while j < len(line):
-                    c2, fg2, bg2, b2, u2, it2 = line[j]
-                    if fg2 == fg and bg2 == bg and b2 == bold and u2 == underline and it2 == italic:
-                        run.append(c2)
-                        j += 1
-                    else:
-                        break
+                self._scrollback_rendered = current_sb_len
 
-                # Create the text format for this run.
-                fmt = QTextCharFormat()
-                fmt.setForeground(QColor(fg))
-                if bg != DEFAULT_BG:
-                    fmt.setBackground(QColor(bg))
-                if bold:
-                    fmt.setFontWeight(QFont.Weight.Bold)
-                if underline:
-                    fmt.setFontUnderline(True)
-                if italic:
-                    fmt.setFontItalic(True)
+            # --- Phase 2: Replace the visible grid section ---
+            if self._dirty:
+                self._dirty = False
 
-                # Insert the run.
-                cursor.insertText("".join(run), fmt)
-                i = j
+                # The grid section is always the last _rows lines.
+                grid_start = max(0, doc.blockCount() - self._rows)
+                block = doc.findBlockByNumber(grid_start)
+                cursor = self._display.textCursor()
+                cursor.setPosition(block.position())
 
-        # Position the visible cursor.
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-        for _ in range(cursor_row):
-            cursor.movePosition(QTextCursor.MoveOperation.Down)
-        for _ in range(cursor_col):
-            cursor.movePosition(QTextCursor.MoveOperation.Right)
-        self._display.setTextCursor(cursor)
+                # Select from grid start to end of document.
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.End,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                cursor.removeSelectedText()
 
-        # Ensure the cursor line is visible.
-        self._display.ensureCursorVisible()
-        self._display.setUpdatesEnabled(True)
+                # Render each grid line with cursor indication.
+                for row_idx, line in enumerate(grid_lines):
+                    if row_idx > 0 or grid_start > 0:
+                        cursor.insertText("\n")
+                    self._render_line(
+                        cursor, line,
+                        cursor_row=cursor_row, cursor_col=cursor_col,
+                        line_row=row_idx,
+                    )
+
+                # Position Qt's text cursor near the terminal cursor so
+                # ensureCursorVisible scrolls to the right place.
+                target_block = grid_start + cursor_row
+                if target_block >= doc.blockCount():
+                    target_block = doc.blockCount() - 1
+                block = doc.findBlockByNumber(target_block)
+
+                pos_cursor = self._display.textCursor()
+                target_pos = block.position() + min(cursor_col, max(0, block.length() - 1))
+                pos_cursor.setPosition(target_pos)
+                self._display.setTextCursor(pos_cursor)
+
+                # Only auto-scroll if the user was already at the bottom.
+                if was_at_bottom:
+                    self._display.ensureCursorVisible()
+
+        except Exception as exc:
+            logger.error("Terminal render error: %s", exc, exc_info=True)
+        finally:
+            self._display.setUpdatesEnabled(True)
 
         # Check for title changes.
         new_title = self._parser.get_title()
         if new_title != self._last_title:
             self._last_title = new_title
             self.title_changed.emit(new_title)
+
+    def _render_line(self, cursor, line, cursor_row=-1, cursor_col=-1, line_row=-1):
+        """
+        Render a single styled line into the QTextCursor.
+
+        Groups consecutive cells with identical formatting into runs
+        for efficiency.  Optionally draws a block cursor (inverted
+        colors) at the terminal cursor position.
+
+        :param QTextCursor cursor: The cursor to insert text at.
+        :param list line: List of (char, fg, bg, bold, underline, italic) tuples.
+        :param int cursor_row: Terminal cursor row (-1 to skip cursor drawing).
+        :param int cursor_col: Terminal cursor column.
+        :param int line_row: This line's row index in the grid (for cursor matching).
+        """
+        i = 0
+        while i < len(line):
+            char, fg, bg, bold, underline, italic = line[i]
+
+            # Check if this cell is the cursor position — if so,
+            # invert fg/bg to draw a visible block cursor.
+            is_cursor = (line_row == cursor_row and i == cursor_col)
+            if is_cursor:
+                cell_fg = bg if bg != DEFAULT_BG else DEFAULT_BG
+                cell_bg = fg
+            else:
+                cell_fg = fg
+                cell_bg = bg
+
+            # Collect a run of identically-formatted characters.
+            # The cursor cell always breaks the run (it has unique colors).
+            run = [char]
+            j = i + 1
+            if not is_cursor:
+                while j < len(line):
+                    if line_row == cursor_row and j == cursor_col:
+                        break
+                    c2, fg2, bg2, b2, u2, it2 = line[j]
+                    if (fg2 == fg and bg2 == bg and b2 == bold
+                            and u2 == underline and it2 == italic):
+                        run.append(c2)
+                        j += 1
+                    else:
+                        break
+
+            # Create the text format for this run.
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(cell_fg))
+            if cell_bg != DEFAULT_BG:
+                fmt.setBackground(QColor(cell_bg))
+            if bold:
+                fmt.setFontWeight(QFont.Weight.Bold)
+            if underline:
+                fmt.setFontUnderline(True)
+            if italic:
+                fmt.setFontItalic(True)
+
+            cursor.insertText("".join(run), fmt)
+            i = j
 
     # --- Keyboard Input ------------------------------------------------------
 
@@ -369,13 +520,33 @@ class TerminalWidget(QWidget):
         """
         from mca_qt.qt_compat import QEvent as QEventType
 
-        if obj is self._display and event.type() == QEventType.Type.KeyPress:
-            # Handle Ctrl+Scroll for font zoom.
-            # (Wheel events are handled separately in _display's wheelEvent)
-            return self._handle_key_press(event)
+        if obj is self._display:
+            etype = event.type()
 
-        if obj is self._display and event.type() == QEventType.Type.Wheel:
-            return self._handle_wheel(event)
+            if etype == QEventType.Type.KeyPress:
+                return self._handle_key_press(event)
+
+            # Accept ShortcutOverride for all keys so the QPlainTextEdit
+            # never claims navigation keys (arrows, Home, End, etc.) for
+            # its own cursor movement.  Our KeyPress handler is the sole
+            # consumer of keyboard input.
+            if etype == QEventType.Type.ShortcutOverride:
+                event.accept()
+                return True
+
+            if etype == QEventType.Type.Wheel:
+                return self._handle_wheel(event)
+
+        # Block mouse clicks from repositioning the QPlainTextEdit cursor.
+        # In a terminal, clicking should not move the input cursor — only
+        # the shell controls cursor position.  We still allow mouse press
+        # so that context menus and text selection initiation work via
+        # the right-click handler, but consume single left-clicks.
+        if obj is self._display and event.type() == QEventType.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Give focus to the display so keyboard input works.
+                self._display.setFocus()
+                return True
 
         return super().eventFilter(obj, event)
 
@@ -394,8 +565,10 @@ class TerminalWidget(QWidget):
         modifiers = event.modifiers()
         text = event.text()
 
-        # Ctrl+C — send interrupt signal.
+        # Ctrl+C — send interrupt signal and clear local echo buffer.
         if key == Qt.Key.Key_C and modifiers & Qt.KeyboardModifier.ControlModifier:
+            if self._local_echo:
+                self._echo_buffer = ""
             self._backend.write(b"\x03")
             return True
 
@@ -481,17 +654,40 @@ class TerminalWidget(QWidget):
 
         # Enter / Return.
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._backend.write(b"\r")
+            if self._local_echo:
+                # In local echo mode, send the buffered line to the shell
+                # and echo a newline locally so the cursor moves down.
+                line = self._echo_buffer + "\r\n"
+                self._backend.write(line.encode("utf-8"))
+                self._parser.feed(b"\r\n")
+                self._echo_buffer = ""
+                self._dirty = True
+            else:
+                self._backend.write(b"\r")
             return True
 
         # Tab.
         if key == Qt.Key.Key_Tab:
-            self._backend.write(b"\t")
+            if self._local_echo:
+                # No tab-completion in subprocess mode — echo a tab locally.
+                self._parser.feed(b"\t")
+                self._echo_buffer += "\t"
+                self._dirty = True
+            else:
+                self._backend.write(b"\t")
             return True
 
         # Backspace.
         if key == Qt.Key.Key_Backspace:
-            self._backend.write(b"\x7f")
+            if self._local_echo:
+                # Erase locally: move cursor left, overwrite with space,
+                # move cursor left again (the classic \b \b sequence).
+                if self._echo_buffer:
+                    self._echo_buffer = self._echo_buffer[:-1]
+                    self._parser.feed(b"\x08 \x08")
+                    self._dirty = True
+            else:
+                self._backend.write(b"\x7f")
             return True
 
         # Escape.
@@ -501,7 +697,13 @@ class TerminalWidget(QWidget):
 
         # Regular text input — forward as UTF-8.
         if text:
-            self._backend.write(text.encode("utf-8"))
+            if self._local_echo:
+                # Echo locally and buffer for line-mode send on Enter.
+                self._parser.feed(text.encode("utf-8"))
+                self._echo_buffer += text
+                self._dirty = True
+            else:
+                self._backend.write(text.encode("utf-8"))
             return True
 
         return False
@@ -640,6 +842,13 @@ class TerminalWidget(QWidget):
             if self._backend and self._alive:
                 self._backend.resize(new_rows, new_cols)
 
+            # Clear the document and reset scrollback tracking so the
+            # next render frame rebuilds from scratch.  Without this,
+            # a row-count change leaves stale blocks in the document
+            # that get mistaken for scrollback (blank lines at the top).
+            self._display.clear()
+            self._scrollback_rendered = 0
+
             self._dirty = True
             logger.debug("Terminal resized to %dx%d", new_cols, new_rows)
 
@@ -669,8 +878,11 @@ class TerminalWidget(QWidget):
     # --- Clear ---------------------------------------------------------------
 
     def clear(self):
-        """Clear the terminal screen and scrollback."""
+        """Clear the terminal screen, scrollback, and document history."""
         self._parser.clear()
+        # Clear the entire QPlainTextEdit (removes rendered scrollback too).
+        self._display.clear()
+        self._scrollback_rendered = 0
         self._dirty = True
         # Also send Ctrl+L to the shell so it redraws its prompt.
         if self._alive and self._backend:

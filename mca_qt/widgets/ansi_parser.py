@@ -153,6 +153,8 @@ class AnsiParser:
         self._bold = False
         self._underline = False
         self._italic = False
+        self._reverse = False
+        self._dim = False
 
         # Terminal title (set via OSC sequences).
         self._title = ""
@@ -163,6 +165,16 @@ class AnsiParser:
         # Scroll region (top and bottom row, 0-based, inclusive).
         self._scroll_top = 0
         self._scroll_bottom = rows - 1
+
+        # Alternate screen buffer — TUI programs (Claude Code, vim, etc.)
+        # switch to an alternate screen on startup and restore the original
+        # screen on exit.  We save/restore the grid, cursor, and scrollback
+        # so the shell prompt reappears cleanly after the TUI exits.
+        self._alt_grid = None
+        self._alt_cursor = None
+        self._alt_scrollback = None
+        self._alt_scroll_region = None
+        self._in_alt_screen = False
 
     # --- Grid Construction ---------------------------------------------------
 
@@ -368,6 +380,31 @@ class AnsiParser:
             lines.append(line)
         return lines
 
+    def get_scrollback_lines(self, max_lines=0):
+        """
+        Return scrollback buffer as styled line data.
+
+        Same tuple format as ``get_visible_lines()``.  Use ``max_lines``
+        to cap the number of returned lines for performance — only the
+        most recent scrollback lines are returned.
+
+        :param int max_lines: Maximum lines to return (0 = all).
+        :return: List of styled scrollback lines.
+        :rtype: list
+        """
+        source = self._scrollback
+        if max_lines > 0 and len(source) > max_lines:
+            source = source[-max_lines:]
+
+        lines = []
+        for row in source:
+            line = []
+            for cell in row:
+                line.append((cell.char, cell.fg_color, cell.bg_color,
+                             cell.bold, cell.underline, cell.italic))
+            lines.append(line)
+        return lines
+
     def get_cursor_position(self):
         """
         Return the current cursor position.
@@ -418,10 +455,16 @@ class AnsiParser:
             self._linefeed()
 
         # Write the character with current attributes.
+        # Reverse video swaps fg/bg at write time so that SGR 27 (reverse
+        # off) cleanly restores the original colors without tracking history.
         cell = self._grid[self._cursor_row][self._cursor_col]
         cell.char = ch
-        cell.fg_color = self._fg
-        cell.bg_color = self._bg
+        if self._reverse:
+            cell.fg_color = self._bg
+            cell.bg_color = self._fg
+        else:
+            cell.fg_color = self._fg
+            cell.bg_color = self._bg
         cell.bold = self._bold
         cell.underline = self._underline
         cell.italic = self._italic
@@ -572,18 +615,33 @@ class AnsiParser:
             self._cursor_row = max(0, min(row, self._rows - 1))
 
         elif cmd == "h" or cmd == "l":
-            # SM/RM — Set/Reset Mode. We ignore most private modes.
-            # ?25h/l = cursor show/hide, ?1049h/l = alternate screen.
-            # We don't implement alternate screen — just ignore.
-            pass
+            # SM/RM — Set/Reset Mode.
+            if is_private:
+                # Parse the private mode number from the params string.
+                mode_str = params_str.lstrip("?")
+                try:
+                    mode = int(mode_str.split(";")[0]) if mode_str else 0
+                except ValueError:
+                    mode = 0
+
+                if mode in (1049, 47):
+                    # Alternate screen buffer — used by TUI programs
+                    # (Claude Code, vim, less) to draw their UI without
+                    # overwriting the shell session.
+                    if cmd == "h":
+                        self._enter_alt_screen()
+                    else:
+                        self._leave_alt_screen()
+            # Other modes (cursor visibility, etc.) are silently ignored.
 
         elif cmd == "X":
             # ECH — Erase Character (blank N chars at cursor).
+            # Uses current background color per VT100 spec.
             n = params[0] if params else 1
             for j in range(n):
                 c = self._cursor_col + j
                 if c < self._cols:
-                    self._grid[self._cursor_row][c].reset()
+                    self._erase_cell(self._cursor_row, c)
 
         elif cmd == "P":
             # DCH — Delete Character (shift left).
@@ -645,15 +703,22 @@ class AnsiParser:
                 self._bold = False
                 self._underline = False
                 self._italic = False
+                self._reverse = False
+                self._dim = False
 
             elif p == 1:
                 self._bold = True
+            elif p == 2:
+                # Dim/faint text — reduce intensity.
+                self._dim = True
             elif p == 3:
                 self._italic = True
             elif p == 4:
                 self._underline = True
             elif p == 22:
+                # Normal intensity — turns off both bold and dim.
                 self._bold = False
+                self._dim = False
             elif p == 23:
                 self._italic = False
             elif p == 24:
@@ -702,9 +767,14 @@ class AnsiParser:
                     self._bg = color
                 i += consumed
 
-            # Reversed video (swap fg/bg).
+            # Reverse video — colors are swapped at write time in _put_char().
+            # Tracked as a flag so SGR 27 can cleanly turn it off.
             elif p == 7:
-                self._fg, self._bg = self._bg, self._fg
+                self._reverse = True
+
+            # Reverse video off.
+            elif p == 27:
+                self._reverse = False
 
             # Other SGR params are ignored silently.
 
@@ -771,32 +841,34 @@ class AnsiParser:
         """
         Erase part or all of the display.
 
+        Per VT100 spec, erased cells use the current background color
+        (not always the default).  TUI programs use "set bg then erase"
+        to paint colored regions.
+
         :param int mode: 0 = cursor to end, 1 = start to cursor,
             2 = entire screen, 3 = entire screen + scrollback.
         """
         if mode == 0:
             # Erase from cursor to end of screen.
-            # Clear rest of current line.
             for c in range(self._cursor_col, self._cols):
-                self._grid[self._cursor_row][c].reset()
-            # Clear all lines below.
+                self._erase_cell(self._cursor_row, c)
             for r in range(self._cursor_row + 1, self._rows):
                 for c in range(self._cols):
-                    self._grid[r][c].reset()
+                    self._erase_cell(r, c)
 
         elif mode == 1:
             # Erase from start of screen to cursor.
             for r in range(self._cursor_row):
                 for c in range(self._cols):
-                    self._grid[r][c].reset()
+                    self._erase_cell(r, c)
             for c in range(self._cursor_col + 1):
-                self._grid[self._cursor_row][c].reset()
+                self._erase_cell(self._cursor_row, c)
 
         elif mode == 2:
             # Erase entire screen (keep scrollback).
             for r in range(self._rows):
                 for c in range(self._cols):
-                    self._grid[r][c].reset()
+                    self._erase_cell(r, c)
 
         elif mode == 3:
             # Erase entire screen AND scrollback.
@@ -806,6 +878,8 @@ class AnsiParser:
         """
         Erase part or all of the current line.
 
+        Erased cells use the current background color per VT100 spec.
+
         :param int mode: 0 = cursor to end, 1 = start to cursor,
             2 = entire line.
         """
@@ -814,17 +888,95 @@ class AnsiParser:
         if mode == 0:
             # Erase from cursor to end of line.
             for c in range(self._cursor_col, self._cols):
-                self._grid[row][c].reset()
+                self._erase_cell(row, c)
 
         elif mode == 1:
             # Erase from start of line to cursor.
             for c in range(self._cursor_col + 1):
-                self._grid[row][c].reset()
+                self._erase_cell(row, c)
 
         elif mode == 2:
             # Erase entire line.
             for c in range(self._cols):
-                self._grid[row][c].reset()
+                self._erase_cell(row, c)
+
+    def _erase_cell(self, row, col):
+        """
+        Erase a single cell, filling it with the current background color.
+
+        Per VT100 spec, erase operations use the current SGR background,
+        not the default.  This allows TUI programs to paint colored
+        regions by setting a bg color and then erasing.
+
+        :param int row: Row index (0-based).
+        :param int col: Column index (0-based).
+        """
+        cell = self._grid[row][col]
+        cell.char = " "
+        cell.fg_color = DEFAULT_FG
+        cell.bg_color = self._bg
+        cell.bold = False
+        cell.underline = False
+        cell.italic = False
+
+    # --- Alternate Screen Buffer ---------------------------------------------
+
+    def _enter_alt_screen(self):
+        """
+        Switch to the alternate screen buffer.
+
+        Saves the current grid, cursor position, scrollback, and scroll
+        region, then clears the screen.  TUI programs (Claude Code, vim,
+        less) use this so their UI doesn't overwrite the shell session.
+        When the program exits, ``_leave_alt_screen()`` restores the
+        original content.
+        """
+        if self._in_alt_screen:
+            return
+
+        # Save the main screen state.
+        self._alt_grid = self._grid
+        self._alt_cursor = (self._cursor_row, self._cursor_col)
+        self._alt_scrollback = self._scrollback
+        self._alt_scroll_region = (self._scroll_top, self._scroll_bottom)
+
+        # Switch to a fresh screen.
+        self._grid = self._make_grid(self._rows, self._cols)
+        self._scrollback = []
+        self._cursor_row = 0
+        self._cursor_col = 0
+        self._scroll_top = 0
+        self._scroll_bottom = self._rows - 1
+        self._in_alt_screen = True
+
+        logger.debug("Entered alternate screen buffer")
+
+    def _leave_alt_screen(self):
+        """
+        Switch back to the main screen buffer.
+
+        Restores the grid, cursor, scrollback, and scroll region that
+        were saved when entering the alternate screen.  If we were never
+        in alt screen, this is a no-op.
+        """
+        if not self._in_alt_screen:
+            return
+
+        # Restore the main screen state.
+        if self._alt_grid is not None:
+            self._grid = self._alt_grid
+            self._cursor_row, self._cursor_col = self._alt_cursor
+            self._scrollback = self._alt_scrollback
+            self._scroll_top, self._scroll_bottom = self._alt_scroll_region
+
+        # Clear saved state.
+        self._alt_grid = None
+        self._alt_cursor = None
+        self._alt_scrollback = None
+        self._alt_scroll_region = None
+        self._in_alt_screen = False
+
+        logger.debug("Left alternate screen buffer — main screen restored")
 
     # --- OSC Sequence Handlers -----------------------------------------------
 

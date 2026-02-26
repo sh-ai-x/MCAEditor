@@ -41,6 +41,19 @@ DIST_PACKAGES = ["mca_core", "mca_qt", "mca_maya"]
 # Resource directories to bundle alongside the compiled packages.
 RESOURCE_DIRS = ["resources/images"]
 
+# Pure-Python files that must ship uncompiled in the Maya distribution.
+# venv_manager.py runs at plugin init before the venv exists, so it
+# cannot be a compiled .pyd — it needs to work with just stdlib.
+# Terminal files are included so the native frontend works in Maya;
+# terminal_xterm.py is excluded since Maya lacks QtWebEngine.
+DIST_PURE_PYTHON = [
+    os.path.join("mca_core", "venv_manager.py"),
+    os.path.join("mca_qt", "widgets", "terminal_factory.py"),
+    os.path.join("mca_qt", "widgets", "terminal_native.py"),
+    os.path.join("mca_qt", "widgets", "terminal_backend.py"),
+    os.path.join("mca_qt", "widgets", "ansi_parser.py"),
+]
+
 # Project root (directory containing this script).
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -62,17 +75,23 @@ a plugin stub so the editor appears in Maya's Plug-in Manager.
 
 Usage:
     python install_maya.py
+    python install_maya.py --setup-venv   # Pre-create venv and install deps
 """
 
+import argparse
 import os
+import subprocess
 import sys
 
-def install():
+def install(setup_venv=False):
     """
     Install MCA Editor into Maya's user directories.
 
     Creates a ``.mod`` module file and a plugin stub for each
     detected Maya version (2024+).
+
+    :param bool setup_venv: If True, also create the managed venv and
+        install required packages now rather than on first launch.
     """
     # The package root is wherever this script lives.
     package_root = os.path.dirname(os.path.abspath(__file__))
@@ -135,6 +154,25 @@ def install():
     if not found_versions:
         print("\nWARNING: No Maya version directories found in {}".format(maya_dir))
 
+    # --- Optional: pre-create venv and install dependencies ---
+    if setup_venv:
+        print()
+        print("--- Setting up managed venv ---")
+        # Add the package root to sys.path so we can import the venv manager.
+        if package_root not in sys.path:
+            sys.path.insert(0, package_root)
+        try:
+            from mca_core.venv_manager import setup_venv as do_setup
+            ok = do_setup()
+            if ok:
+                print("Venv created and packages installed successfully.")
+            else:
+                print("WARNING: Venv setup had issues. Dependencies will be")
+                print("         installed automatically on first launch.")
+        except Exception as exc:
+            print("WARNING: Could not set up venv: {}".format(exc))
+            print("         Dependencies will be installed on first launch.")
+
     print()
     print("Installation complete!")
     print()
@@ -147,7 +185,15 @@ def install():
 
 
 if __name__ == "__main__":
-    install()
+    parser = argparse.ArgumentParser(description="Install MCA Editor for Maya.")
+    parser.add_argument(
+        "--setup-venv", action="store_true",
+        help="Pre-create the managed venv and install dependencies now "
+             "instead of on first launch. Useful for studios where artist "
+             "machines may not have internet access later.",
+    )
+    args = parser.parse_args()
+    install(setup_venv=args.setup_venv)
 '''.replace("__VERSION__", VERSION)
 
 # Standalone uninstall script placed in the distribution root.
@@ -326,8 +372,8 @@ def create_dist_structure():
         package_path = os.path.join(PROJECT_ROOT, package)
 
         for root, dirs, files in os.walk(package_path):
-            # Skip __pycache__ directories.
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            # Skip __pycache__ and .venv directories.
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".venv")]
 
             # Compute the relative path from project root.
             rel_root = os.path.relpath(root, PROJECT_ROOT)
@@ -336,7 +382,14 @@ def create_dist_structure():
             # Collect files to copy: .pyd (compiled) and __init__.py (package marker).
             pyd_files = [f for f in files if f.endswith(".pyd")]
             init_files = [f for f in files if f == "__init__.py"]
-            files_to_copy = pyd_files + init_files
+
+            # Include any pure-Python files that must ship uncompiled.
+            pure_files = [
+                f for f in files
+                if os.path.join(rel_root, f) in DIST_PURE_PYTHON
+            ]
+
+            files_to_copy = pyd_files + init_files + pure_files
 
             # Only create the directory if there are files to put in it.
             if files_to_copy:
