@@ -121,8 +121,8 @@ class StandaloneWindow(QMainWindow):
         encoding_label.setStyleSheet(label_style)
         self._statusbar.addPermanentWidget(encoding_label)
 
-        # Mode indicator (Simple / Advanced).
-        self._mode_label = QLabel("Simple")
+        # Project indicator (shows project name or "No Project").
+        self._mode_label = QLabel("No Project")
         self._mode_label.setStyleSheet(label_style)
         self._statusbar.addPermanentWidget(self._mode_label)
 
@@ -165,11 +165,16 @@ class StandaloneWindow(QMainWindow):
 
     def _on_mode_changed(self, mode_label):
         """
-        Update the mode label in the status bar.
+        Update the title bar and status bar project indicator.
 
-        :param str mode_label: 'Simple' or 'Advanced'.
+        :param str mode_label: Project name when active, empty string when idle.
         """
-        self._mode_label.setText(mode_label)
+        if mode_label:
+            self.setWindowTitle("MCA Editor -- {}".format(mode_label))
+            self._mode_label.setText(mode_label)
+        else:
+            self.setWindowTitle("MCA Editor")
+            self._mode_label.setText("No Project")
 
     def _on_counts_changed(self, errors, warnings):
         """

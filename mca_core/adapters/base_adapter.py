@@ -75,6 +75,10 @@ class DCCAdapter(ABC):
         self._on_output = None
         self._on_error = None
         self._on_state_changed = None
+        # Project paths injected separately from workspace paths.
+        # These are added to sys.path with higher priority so project
+        # modules take precedence over workspace site-packages.
+        self._project_paths = []
 
     # --- Abstract Properties ------------------------------------------------
 
@@ -273,6 +277,31 @@ class DCCAdapter(ABC):
         :rtype: str or None
         """
         return None
+
+    # --- Project Paths ------------------------------------------------------
+
+    def set_project_paths(self, paths):
+        """
+        Set project-specific paths to inject into ``sys.path``.
+
+        These paths are added with higher priority than workspace paths
+        so that project modules are importable from both the editor and
+        the connected DCC application.
+
+        :param list paths: List of absolute directory path strings.
+        """
+        self._project_paths = list(paths)
+        logger.debug("Project paths set: %s", paths)
+
+    def clear_project_paths(self):
+        """
+        Remove all project-specific paths.
+
+        Subclasses that modify ``sys.path`` directly (e.g. the internal
+        Maya adapter) should also remove the paths from ``sys.path``.
+        """
+        self._project_paths = []
+        logger.debug("Project paths cleared")
 
     # --- MCP ----------------------------------------------------------------
 

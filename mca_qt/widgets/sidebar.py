@@ -523,6 +523,7 @@ class WorkspacePanel(QWidget):
         """
         super().__init__(parent)
         self._workspace_folders = []
+        self._excluded_folders = set()    # Folder names to hide in the tree.
         self._watcher = QFileSystemWatcher()
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._setup_ui()
@@ -540,9 +541,9 @@ class WorkspacePanel(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 0, 4, 0)
 
-        title = QLabel("WORKSPACE")
-        title.setStyleSheet("color: #bbbbbb; font-size: 11px; font-weight: bold;")
-        header_layout.addWidget(title)
+        self._header_title = QLabel("WORKSPACE")
+        self._header_title.setStyleSheet("color: #bbbbbb; font-size: 11px; font-weight: bold;")
+        header_layout.addWidget(self._header_title)
         header_layout.addStretch()
 
         # Shared style for the small header buttons.
@@ -715,9 +716,11 @@ class WorkspacePanel(QWidget):
         except PermissionError:
             return
 
-        # Sort directories first, then files.
+        # Sort directories first, then files. Skip hidden and excluded folders.
         dirs = [e for e in entries
-                if os.path.isdir(os.path.join(folder_path, e)) and not e.startswith(".")]
+                if os.path.isdir(os.path.join(folder_path, e))
+                and not e.startswith(".")
+                and e not in self._excluded_folders]
         files = [e for e in entries
                  if os.path.isfile(os.path.join(folder_path, e)) and not e.startswith(".")]
 
@@ -841,6 +844,29 @@ class WorkspacePanel(QWidget):
         self._refresh_tree()
         self._update_empty_state()
         logger.info("Workspace locked to: %s", folder_path)
+
+    def set_header_title(self, text):
+        """
+        Change the workspace panel header text.
+
+        Used to show the project name when a project is open (e.g.
+        ``"PROJECT: MyApp"``), reverting to ``"WORKSPACE"`` on close.
+
+        :param str text: New header text.
+        """
+        self._header_title.setText(text)
+
+    def set_excluded_folders(self, excluded):
+        """
+        Set the folder names to exclude from the workspace tree.
+
+        Triggers a full tree refresh so the exclusions take effect
+        immediately.
+
+        :param set excluded: Set of folder name strings to hide.
+        """
+        self._excluded_folders = set(excluded)
+        self._refresh_tree()
 
     # --- File Search Filtering -----------------------------------------------
 
@@ -1382,6 +1408,22 @@ class MCASidebar(QWidget):
     def set_advanced_mode(self):
         """Switch to advanced mode - show the workspace panel."""
         self.workspace_panel.setVisible(True)
+
+    def set_workspace_title(self, text):
+        """
+        Forward header title change to the workspace panel.
+
+        :param str text: New header text.
+        """
+        self.workspace_panel.set_header_title(text)
+
+    def set_excluded_folders(self, excluded):
+        """
+        Forward excluded folders to the workspace panel.
+
+        :param set excluded: Set of folder name strings to hide.
+        """
+        self.workspace_panel.set_excluded_folders(excluded)
 
     def splitter_sizes(self):
         """

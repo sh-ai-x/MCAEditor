@@ -57,6 +57,8 @@ class InternalMayaAdapter(DCCAdapter):
         # Workspace paths to add to sys.path for user script imports.
         self._scripts_dir = ""
         self._site_packages_dir = ""
+        # Project paths (higher priority than workspace paths).
+        self._project_paths = []
 
     # --- Abstract Property Implementations -----------------------------------
 
@@ -118,6 +120,36 @@ class InternalMayaAdapter(DCCAdapter):
         if site_packages_dir and site_packages_dir not in sys.path:
             sys.path.insert(0, site_packages_dir)
             logger.info("Added to sys.path (internal): %s", site_packages_dir)
+
+    def set_project_paths(self, paths):
+        """
+        Set project-specific paths and add them directly to ``sys.path``.
+
+        Clears any previously set project paths first, then inserts
+        the new paths at position 0 in reverse order so the first path
+        has the highest priority.
+
+        :param list paths: List of absolute directory path strings.
+        """
+        # Remove old project paths before adding new ones.
+        self.clear_project_paths()
+        self._project_paths = list(paths)
+
+        # Insert in reverse so the first path ends up at index 0.
+        for p in reversed(self._project_paths):
+            if p and p not in sys.path:
+                sys.path.insert(0, p)
+                logger.info("Added project path to sys.path (internal): %s", p)
+
+    def clear_project_paths(self):
+        """
+        Remove all project-specific paths from ``sys.path``.
+        """
+        for p in self._project_paths:
+            while p in sys.path:
+                sys.path.remove(p)
+                logger.info("Removed project path from sys.path (internal): %s", p)
+        self._project_paths = []
 
     # --- Connection (no-ops — we're always inside Maya) ----------------------
 

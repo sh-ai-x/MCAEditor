@@ -36,7 +36,10 @@ from mca_qt.qt_compat import (
     QAction, QActionGroup, QKeySequence, QTextCursor,
 )
 
-from mca_core.config.settings import MCASettings, EditorMode
+from mca_core.config.settings import MCASettings
+from mca_core.project import (
+    MCAProject, has_project_file, detect_python_paths, create_default_project,
+)
 from mca_core.session_manager import SessionManager
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_qt.widgets.output_window import OutputWindow
@@ -119,7 +122,7 @@ class MCAEditorPanel(QWidget):
         self._embedded_in_dcc = adapter_manager is not None
         # NOTE: _editors list is no longer maintained here — editors are
         # tracked inside EditorGroupContainer -> EditorGroup instances.
-        self._editor_mode = settings.get_editor_mode()
+        self._active_project = None  # MCAProject instance or None.
         self._closed_files = []  # Track recently closed files for reopen feature.
         # Restore saved font size (falls back to 12 if never changed).
         self._default_font_size = settings.get("font_size", 12)
@@ -147,10 +150,8 @@ class MCAEditorPanel(QWidget):
         )
 
         # Menu-dependent action references (set when build_menus is called).
-        # Initialized here so _apply_editor_mode doesn't crash before menus exist.
-        self._simple_mode_action = None
-        self._advanced_mode_action = None
         self._recent_files_menu = None
+        self._recent_projects_menu = None
 
         # Build UI components.
         self._setup_ui()
@@ -175,10 +176,13 @@ class MCAEditorPanel(QWidget):
         # and add site-packages to sys.path for user imports.
         self._init_default_workspace()
 
-        # Apply the saved editor mode.
-        self._apply_editor_mode()
+        # Sidebar always starts visible (the old Simple/Advanced mode toggle
+        # is removed — visibility is controlled via the left tool stripe).
+        self._sidebar.setVisible(True)
+        self._sidebar.set_advanced_mode()
+        self._main_splitter.setSizes([240, 800, 0])
 
-        # Override mode defaults with user's last-saved UI state.
+        # Override layout defaults with user's last-saved UI state.
         self._restore_ui_state()
 
         # Splitter setSizes() during __init__ can be overridden when Qt
@@ -412,15 +416,15 @@ class MCAEditorPanel(QWidget):
         self._dcc_indicator.setVisible(not self._embedded_in_dcc)
         self._toolbar.addWidget(self._dcc_indicator)
 
-        # Spacer to push mode toggle to the right.
+        # Spacer to push project button to the right.
         spacer = QWidget()
         spacer.setStyleSheet("background: transparent;")
         self._toolbar.addWidget(spacer)
 
-        # --- Mode toggle button ---
-        self._mode_toggle = QPushButton("Advanced")
-        self._mode_toggle.setToolTip("Toggle Simple/Advanced mode")
-        self._mode_toggle.setStyleSheet("""
+        # --- Project button (replaces old mode toggle) ---
+        self._project_button = QPushButton("No Project")
+        self._project_button.setToolTip("Project menu")
+        self._project_button.setStyleSheet("""
             QPushButton {
                 background-color: #3c3c3c;
                 color: #cccccc;
@@ -433,8 +437,28 @@ class MCAEditorPanel(QWidget):
                 background-color: #4e4e52;
             }
         """)
-        self._mode_toggle.clicked.connect(self._toggle_mode)
-        self._toolbar.addWidget(self._mode_toggle)
+        self._project_button.clicked.connect(self._show_project_menu)
+        self._toolbar.addWidget(self._project_button)
+
+        # --- Refresh button (visible only when a project is active) ---
+        self._refresh_button = QPushButton("Refresh")
+        self._refresh_button.setToolTip("Re-read project file and refresh paths")
+        self._refresh_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: 1px solid #555;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #4e4e52;
+            }
+        """)
+        self._refresh_button.clicked.connect(self._on_refresh_project)
+        self._refresh_button.setVisible(False)
+        self._toolbar.addWidget(self._refresh_button)
 
     def _setup_connections(self):
         """Wire up signals between all UI components."""
@@ -555,6 +579,14 @@ class MCAEditorPanel(QWidget):
         # Recent Files submenu (rebuilt dynamically).
         self._recent_files_menu = file_menu.addMenu("Recent Files")
         self._build_recent_files_menu()
+
+        file_menu.addSeparator()
+
+        # --- Project actions ---
+        self._create_action(file_menu, "Open Project...",
+                            callback=self._open_project_dialog)
+        self._recent_projects_menu = file_menu.addMenu("Recent Projects")
+        self._build_recent_projects_menu()
 
         file_menu.addSeparator()
 
@@ -748,18 +780,8 @@ class MCAEditorPanel(QWidget):
         self._create_action(view_menu, "Reset Font Size", name="Reset Font Size",
                             shortcut="Ctrl+0", callback=self._reset_font_size)
 
-        view_menu.addSeparator()
-
-        # --- Editor mode toggles (checkable, stored for _apply_editor_mode) ---
-        self._simple_mode_action = self._create_action(
-            view_menu, "Simple Mode",
-            callback=lambda: self._set_editor_mode(EditorMode.SIMPLE))
-        self._simple_mode_action.setCheckable(True)
-
-        self._advanced_mode_action = self._create_action(
-            view_menu, "Advanced Mode",
-            callback=lambda: self._set_editor_mode(EditorMode.ADVANCED))
-        self._advanced_mode_action.setCheckable(True)
+        # (Simple/Advanced mode toggle removed — sidebar visibility is
+        # controlled by the left tool stripe button.)
 
 
     def _build_go_menu(self, menubar):
@@ -907,44 +929,377 @@ class MCAEditorPanel(QWidget):
                             callback=self._show_about)
 
     # =========================================================================
-    # Editor Mode (Simple / Advanced)
+    # Project System
     # =========================================================================
 
-    def _set_editor_mode(self, mode):
+    def _show_project_menu(self):
         """
-        Switch between simple and advanced mode.
+        Show the project dropdown menu under the project button.
 
-        :param EditorMode mode: The mode to activate.
+        Contains "Open Project...", "Recent Projects" submenu, and
+        "Close Project" (enabled only when a project is active).
         """
-        self._editor_mode = mode
-        self._settings.set_editor_mode(mode)
-        self._apply_editor_mode()
+        menu = QMenu(self)
 
-    def _apply_editor_mode(self):
-        """Apply the current editor mode to the UI layout."""
-        is_simple = self._editor_mode == EditorMode.SIMPLE
+        menu.addAction("Open Project...", self._open_project_dialog)
 
-        if is_simple:
-            self._sidebar.setVisible(False)
-            self._right_terminal_panel.setVisible(False)
-            self._main_splitter.setSizes([0, 1000, 0])
-            self._mode_toggle.setText("Advanced")
-            if self._simple_mode_action:
-                self._simple_mode_action.setChecked(True)
-            if self._advanced_mode_action:
-                self._advanced_mode_action.setChecked(False)
-            self.mode_changed.emit("Simple")
+        # Recent Projects submenu.
+        recent_sub = menu.addMenu("Recent Projects")
+        self._populate_recent_projects_submenu(recent_sub)
+
+        menu.addSeparator()
+
+        settings_action = menu.addAction("Project Settings...", self._show_project_settings)
+        settings_action.setEnabled(self._active_project is not None)
+
+        close_action = menu.addAction("Close Project", self._close_project)
+        close_action.setEnabled(self._active_project is not None)
+
+        # Show the menu below the project button.
+        menu.exec(self._project_button.mapToGlobal(
+            self._project_button.rect().bottomLeft()
+        ))
+
+    def _open_project_dialog(self):
+        """Open a folder picker and then open the selected folder as a project."""
+        folder = QFileDialog.getExistingDirectory(self, "Open Project Folder")
+        if folder:
+            self._open_project(folder)
+
+    def _open_project(self, folder_path):
+        """
+        Open a folder as a project.
+
+        If a ``.mca-project`` file already exists, loads it. Otherwise
+        shows the creation dialog so the user can configure the project.
+
+        :param str folder_path: Absolute path to the project root.
+        """
+        # Close any existing project first.
+        if self._active_project:
+            self._close_project()
+
+        if has_project_file(folder_path):
+            # Load the existing project file.
+            project = MCAProject(folder_path)
         else:
-            self._sidebar.setVisible(True)
-            self._sidebar.set_advanced_mode()
-            self._right_terminal_panel.setVisible(False)
-            self._main_splitter.setSizes([240, 800, 0])
-            self._mode_toggle.setText("Simple")
-            if self._simple_mode_action:
-                self._simple_mode_action.setChecked(False)
-            if self._advanced_mode_action:
-                self._advanced_mode_action.setChecked(True)
-            self.mode_changed.emit("Advanced")
+            # Show creation dialog for the user to confirm name and paths.
+            from mca_qt.widgets.create_project_dialog import CreateProjectDialog
+            detected = detect_python_paths(folder_path)
+            dialog = CreateProjectDialog(folder_path, detected, parent=self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            name, selected_paths = dialog.result()
+            project = create_default_project(folder_path, name, selected_paths)
+
+        # Validate the project.
+        warnings = project.validate()
+        for w in warnings:
+            self._output.write_warning("Project: {}".format(w))
+
+        # Store and apply.
+        self._active_project = project
+        self._apply_project_mode()
+
+        # Persist to settings.
+        self._settings.add_recent_project(folder_path)
+        self._settings.set_last_project_path(folder_path)
+
+        self._output.write_info("Opened project: {}".format(project.name))
+
+    def _close_project(self):
+        """
+        Close the active project and return to the default workspace.
+
+        Removes project paths from sys.path, re-locks the workspace tree
+        to the scripts/ directory, hides the refresh button, and resets
+        the project button text.
+        """
+        if not self._active_project:
+            return
+
+        project_name = self._active_project.name
+
+        # Remove project env vars and paths.
+        self._remove_env_vars()
+        self._remove_project_paths()
+
+        self._active_project = None
+
+        # Re-lock workspace to the default scripts directory.
+        scripts_dir = self._session_manager.scripts_dir
+        self._sidebar.workspace_panel.set_locked_folder(scripts_dir)
+        self._sidebar.set_workspace_title("WORKSPACE")
+        self._sidebar.set_excluded_folders(set())
+
+        # Reset UI elements.
+        self._project_button.setText("No Project")
+        self._refresh_button.setVisible(False)
+
+        # Reset terminal cwd back to scripts directory.
+        self._bottom_terminal_panel._cwd = scripts_dir
+        self._right_terminal_panel._cwd = scripts_dir
+
+        # Clear last project path so it doesn't auto-reopen.
+        self._settings.set_last_project_path("")
+
+        # Emit signal for host windows (empty string = no project).
+        self.mode_changed.emit("")
+
+        self._output.write_info("Closed project: {}".format(project_name))
+
+    def _apply_project_mode(self):
+        """
+        Apply the active project's settings to the UI.
+
+        Unlocks the workspace tree to the project root, sets excluded
+        folders, updates the header and button text, shows the refresh
+        button, injects paths, and emits the mode_changed signal.
+        """
+        project = self._active_project
+        if not project:
+            return
+
+        # Unlock workspace tree to the project root.
+        self._sidebar.workspace_panel.set_locked_folder(project.project_root)
+
+        # Update header to show project name.
+        self._sidebar.set_workspace_title("PROJECT: {}".format(project.name))
+
+        # Set excluded folders so the tree hides them.
+        self._sidebar.set_excluded_folders(set(project.excluded_folders))
+
+        # Update toolbar button and show refresh.
+        self._project_button.setText(project.name)
+        self._refresh_button.setVisible(True)
+
+        # Inject project paths into adapters and local sys.path.
+        self._inject_project_paths()
+
+        # Apply environment variables to os.environ.
+        self._apply_env_vars()
+
+        # Set terminal cwd to project root.
+        self._bottom_terminal_panel._cwd = project.project_root
+        self._right_terminal_panel._cwd = project.project_root
+
+        # Emit signal for host windows (project name for title bar).
+        self.mode_changed.emit(project.name)
+
+        # Run the startup script if one is configured.
+        self._run_startup_script()
+
+    def _inject_project_paths(self):
+        """
+        Add the active project's resolved Python paths to sys.path
+        and tell all adapters about them.
+        """
+        project = self._active_project
+        if not project:
+            return
+
+        paths = project.resolved_python_paths
+
+        # Add to local sys.path so the editor's own Python can import.
+        for p in reversed(paths):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+                logger.info("Added project path to sys.path: %s", p)
+
+        # Tell adapters so DCC execution also has these paths.
+        for adapter in self._adapter_manager.get_all_adapters().values():
+            if hasattr(adapter, "set_project_paths"):
+                adapter.set_project_paths(paths)
+
+    def _remove_project_paths(self):
+        """
+        Remove the active project's resolved Python paths from sys.path
+        and tell all adapters to clear them.
+        """
+        project = self._active_project
+        if not project:
+            return
+
+        paths = project.resolved_python_paths
+
+        # Remove from local sys.path.
+        for p in paths:
+            while p in sys.path:
+                sys.path.remove(p)
+                logger.info("Removed project path from sys.path: %s", p)
+
+        # Tell adapters to clear project paths.
+        for adapter in self._adapter_manager.get_all_adapters().values():
+            if hasattr(adapter, "clear_project_paths"):
+                adapter.clear_project_paths()
+
+    def _apply_env_vars(self):
+        """
+        Set the active project's environment variables in ``os.environ``.
+
+        Stores the original values (or a sentinel for keys that didn't
+        exist) so ``_remove_env_vars()`` can restore them on close.
+        """
+        project = self._active_project
+        if not project or not project.env_vars:
+            return
+
+        # Track originals for clean removal later.
+        self._saved_env_originals = {}
+        for key, value in project.env_vars.items():
+            # Remember what was there before (None = key didn't exist).
+            self._saved_env_originals[key] = os.environ.get(key)
+            os.environ[key] = value
+            logger.info("Set env var: %s=%s", key, value)
+
+    def _remove_env_vars(self):
+        """
+        Restore environment variables to their pre-project state.
+
+        Keys that existed before the project was opened are restored to
+        their original values. Keys that were newly created by the
+        project are removed entirely.
+        """
+        originals = getattr(self, "_saved_env_originals", {})
+        for key, original_value in originals.items():
+            if original_value is None:
+                # Key didn't exist before — remove it.
+                os.environ.pop(key, None)
+                logger.info("Removed env var: %s", key)
+            else:
+                # Restore the original value.
+                os.environ[key] = original_value
+                logger.info("Restored env var: %s=%s", key, original_value)
+        self._saved_env_originals = {}
+
+    def _on_refresh_project(self):
+        """
+        Re-read the ``.mca-project`` file and re-inject paths.
+
+        Called when the user clicks the Refresh button.
+        """
+        if not self._active_project:
+            return
+
+        # Remove old env vars and paths first.
+        self._remove_env_vars()
+        self._remove_project_paths()
+
+        # Reload the project file from disk.
+        self._active_project.load()
+
+        # Re-apply everything.
+        self._apply_project_mode()
+
+        self._output.write_info("Project refreshed: {}".format(
+            self._active_project.name))
+
+    def _run_startup_script(self):
+        """
+        Execute the project's startup script if one is configured.
+
+        The script runs after paths are injected so imports from
+        the project's python_paths are available. Execution is routed
+        through the active DCC adapter (if connected) or the local
+        Python interpreter, matching the normal "Execute" behavior.
+        """
+        project = self._active_project
+        if not project or not project.startup_script:
+            return
+
+        script_path = project.resolved_startup_script
+        if not os.path.isfile(script_path):
+            self._output.write_warning(
+                "Startup script not found: {}".format(project.startup_script))
+            return
+
+        self._output.write_info("Running startup script: {}".format(
+            project.startup_script))
+
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                code = f.read()
+        except OSError as exc:
+            self._output.write_error(
+                "Could not read startup script: {}".format(exc))
+            return
+
+        # Route through the active adapter if connected, otherwise run locally.
+        adapter = self._adapter_manager.get_active_adapter()
+        if adapter and adapter.is_connected:
+            adapter.execute(code, "python")
+        else:
+            self._execute_locally(code)
+
+    def _show_project_settings(self):
+        """
+        Open the Project Settings dialog for the active project.
+
+        On accept, updates the MCAProject, saves the file, and re-applies
+        the project mode so changes take effect immediately.
+        """
+        if not self._active_project:
+            return
+
+        from mca_qt.widgets.project_settings_dialog import ProjectSettingsDialog
+        dialog = ProjectSettingsDialog(self._active_project, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        result = dialog.result()
+        if not result:
+            return
+
+        # Remove old env vars and paths before applying changes.
+        self._remove_env_vars()
+        self._remove_project_paths()
+
+        # Apply the user's changes to the project model.
+        self._active_project.name = result["name"]
+        self._active_project.python_paths = result["python_paths"]
+        self._active_project.excluded_folders = result["excluded_folders"]
+        self._active_project.startup_script = result["startup_script"]
+        self._active_project.env_vars = result["env_vars"]
+
+        # Save the updated .mca-project file.
+        self._active_project.save()
+
+        # Re-apply everything (paths, tree, title, etc.).
+        self._apply_project_mode()
+
+        self._output.write_info("Project settings saved: {}".format(
+            self._active_project.name))
+
+    def _build_recent_projects_menu(self):
+        """Rebuild the Recent Projects submenu in the File menu."""
+        if not self._recent_projects_menu:
+            return
+        self._populate_recent_projects_submenu(self._recent_projects_menu)
+
+    def _populate_recent_projects_submenu(self, menu):
+        """
+        Fill a QMenu with recent project entries.
+
+        :param QMenu menu: The menu to populate.
+        """
+        try:
+            menu.clear()
+        except RuntimeError:
+            return
+
+        recent = self._settings.get_recent_projects()
+        if recent:
+            for project_path in recent:
+                # Show just the folder name with the full path as tooltip.
+                display_name = os.path.basename(project_path)
+                act = menu.addAction(display_name)
+                act.setToolTip(project_path)
+                act.triggered.connect(
+                    lambda checked=False, p=project_path: self._open_project(p)
+                )
+        else:
+            empty = menu.addAction("No recent projects")
+            empty.setEnabled(False)
 
     def showEvent(self, event):
         """
@@ -997,9 +1352,9 @@ class MCAEditorPanel(QWidget):
         """
         Restore saved UI state from settings, overriding mode defaults.
 
-        Must be called AFTER ``_apply_editor_mode()`` because mode
-        application resets splitter sizes and panel visibility to
-        defaults. This method layers the user's last-saved state on top.
+        Must be called AFTER the initial sidebar setup because it
+        resets splitter sizes and panel visibility to defaults. This
+        method layers the user's last-saved state on top.
         """
         s = self._settings
 
@@ -1029,11 +1384,9 @@ class MCAEditorPanel(QWidget):
                 pass
 
         # --- Panel visibility ---
-        # Only restore sidebar visibility in Advanced mode (Simple always hides it).
-        if self._editor_mode == EditorMode.ADVANCED:
-            sidebar_vis = s.get("sidebar_visible", True)
-            self._sidebar.setVisible(sidebar_vis)
-            self._left_stripe.set_button_active("sidebar", sidebar_vis)
+        sidebar_vis = s.get("sidebar_visible", True)
+        self._sidebar.setVisible(sidebar_vis)
+        self._left_stripe.set_button_active("sidebar", sidebar_vis)
 
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
@@ -1098,13 +1451,6 @@ class MCAEditorPanel(QWidget):
         if saved_text:
             self._output.write_bulk(saved_text)
             logger.info("Restored output log (%d chars)", len(saved_text))
-
-    def _toggle_mode(self):
-        """Toggle between simple and advanced mode."""
-        if self._editor_mode == EditorMode.SIMPLE:
-            self._set_editor_mode(EditorMode.ADVANCED)
-        else:
-            self._set_editor_mode(EditorMode.SIMPLE)
 
     def _toggle_sidebar(self):
         """Toggle sidebar visibility and persist the choice."""
@@ -3300,8 +3646,7 @@ class MCAEditorPanel(QWidget):
                       self._right_stripe.is_button_active("terminal"))
         settings.set("sidebar_visible", self._sidebar.isVisible())
 
-        # Persist workspace folders — always [scripts/] in Default mode.
-        # Kept for future Project mode where users can add custom folders.
+        # Persist workspace folders (scripts/ or project root when active).
         folders = self._sidebar.workspace_panel.get_workspace_folders()
         settings.set("workspace_folders", folders)
 

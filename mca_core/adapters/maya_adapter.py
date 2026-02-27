@@ -63,6 +63,8 @@ class MayaAdapter(DCCAdapter):
         # Set via set_workspace_paths() during editor initialization.
         self._scripts_dir = ""
         self._site_packages_dir = ""
+        # Project paths (higher priority than workspace paths).
+        self._project_paths = []
 
     # --- Abstract Property Implementations -----------------------------------
 
@@ -119,6 +121,44 @@ class MayaAdapter(DCCAdapter):
         self._site_packages_dir = site_packages_dir
         logger.debug("Maya workspace paths set: scripts=%s, site_packages=%s",
                       scripts_dir, site_packages_dir)
+
+    def set_project_paths(self, paths):
+        """
+        Set project-specific paths to inject into Maya's ``sys.path``.
+
+        These paths are injected BEFORE workspace paths so project modules
+        take precedence.
+
+        :param list paths: List of absolute directory path strings.
+        """
+        self._project_paths = list(paths)
+        logger.debug("Maya project paths set: %s", paths)
+
+    def clear_project_paths(self):
+        """
+        Remove project paths from Maya's ``sys.path``.
+
+        Sends ``sys.path.remove()`` commands to Maya for each stored
+        project path, then clears the local list.
+        """
+        if self._project_paths and self.is_connected:
+            # Build a cleanup command that removes project paths from Maya.
+            remove_lines = []
+            for p in self._project_paths:
+                remove_lines.append(
+                    "while {path!r} in sys.path: sys.path.remove({path!r})"
+                    .format(path=p)
+                )
+            cleanup_code = "import sys\n" + "\n".join(remove_lines)
+            try:
+                self._send_command(
+                    self._wrap_python_for_port(cleanup_code),
+                    self._python_port
+                )
+            except Exception as exc:
+                logger.warning("Failed to remove project paths from Maya: %s", exc)
+        self._project_paths = []
+        logger.debug("Maya project paths cleared")
 
     # --- Connection ----------------------------------------------------------
 
@@ -348,6 +388,14 @@ class MayaAdapter(DCCAdapter):
                 "if {sitepkg!r} not in __sys.path: "
                 "__sys.path.insert(0, {sitepkg!r})\n"
             ).format(sitepkg=self._site_packages_dir)
+
+        # Inject project paths with highest priority (insert at position 0
+        # in reverse order so the first path ends up first in sys.path).
+        for proj_path in reversed(self._project_paths):
+            path_inject += (
+                "if {path!r} not in __sys.path: "
+                "__sys.path.insert(0, {path!r})\n"
+            ).format(path=proj_path)
 
         wrapper = (
             "import base64 as __b64, sys as __sys, io as __io, traceback as __tb\n"

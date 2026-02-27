@@ -18,14 +18,13 @@ from enum import Enum
 logger = logging.getLogger(__name__)
 
 
-# --- Editor Mode Enum ------------------------------------------------------
+# --- Editor Mode Enum (DEPRECATED) ------------------------------------------
+# Kept for import compatibility during migration. The Simple/Advanced mode
+# toggle has been removed — the editor always starts with sidebar visible
+# and users toggle it via the left tool stripe button.
 
 class EditorMode(Enum):
-    """Represents the two UI modes the editor can operate in.
-
-    SIMPLE mirrors Charcoal Editor 2's minimal UI (tabs + editor + output).
-    ADVANCED adds a sidebar, workspace tree, and AI panel.
-    """
+    """DEPRECATED — retained for import compatibility only."""
     SIMPLE = "simple"
     ADVANCED = "advanced"
 
@@ -49,11 +48,12 @@ class MCASettings:
     # Default values for every known setting key.
     _DEFAULTS = {
         # --- General (Main Window) ---
-        "editor_mode": EditorMode.SIMPLE.value,
-        "last_workspace": "",              # Reserved for future Project mode.
+        "last_workspace": "",              # Reserved for future use.
         "recent_files": [],
-        "recent_workspaces": [],          # Reserved for future Project mode.
-        "workspace_folders": [],          # Reserved for future Project mode (always [scripts/] in Default).
+        "recent_workspaces": [],          # Reserved for future use.
+        "workspace_folders": [],          # Active workspace folders.
+        "recent_projects": [],            # MRU list of project root paths.
+        "last_project_path": "",          # Last opened project root for auto-reopen.
         "auto_save_on_execute": True,        # Save all files before executing.
         "save_all_on_exit": True,            # Save all open files when closing.
         "check_modified_files": True,        # Warn if files changed on disk.
@@ -273,28 +273,52 @@ class MCASettings:
         else:
             self._settings[key] = value
 
-    def get_editor_mode(self):
-        """
-        Get the current editor mode (simple or advanced).
+    # --- Project Settings ---------------------------------------------------
 
-        :return: The active editor mode.
-        :rtype: EditorMode
+    def get_recent_projects(self):
         """
-        mode_str = self.get("editor_mode", EditorMode.SIMPLE.value)
-        try:
-            return EditorMode(mode_str)
-        except ValueError:
-            # Fall back to simple mode if stored value is corrupted.
-            logger.warning("Invalid editor_mode '%s', falling back to SIMPLE", mode_str)
-            return EditorMode.SIMPLE
+        Get the list of recently opened project root paths.
 
-    def set_editor_mode(self, mode):
+        :return: Project paths ordered most-recent-first.
+        :rtype: list
         """
-        Set the editor mode.
+        projects = self.get("recent_projects", [])
+        # Guard against QSettings returning a single string instead of list.
+        return projects if isinstance(projects, list) else []
 
-        :param EditorMode mode: The mode to activate.
+    def add_recent_project(self, project_path, max_entries=10):
         """
-        self.set("editor_mode", mode.value)
+        Add a project to the recent projects list.
+
+        Moves the path to the front if it already exists, and trims
+        the list to *max_entries*.
+
+        :param str project_path: Absolute path to the project root.
+        :param int max_entries: Maximum number of entries to keep.
+        """
+        recent = self.get_recent_projects()
+        # Remove duplicates so the path always lands at the front.
+        if project_path in recent:
+            recent.remove(project_path)
+        recent.insert(0, project_path)
+        self.set("recent_projects", recent[:max_entries])
+
+    def get_last_project_path(self):
+        """
+        Get the last opened project path (for auto-reopen on startup).
+
+        :return: Absolute path to the last project root, or empty string.
+        :rtype: str
+        """
+        return self.get("last_project_path", "")
+
+    def set_last_project_path(self, path):
+        """
+        Set the last opened project path.
+
+        :param str path: Absolute path to the project root, or empty string.
+        """
+        self.set("last_project_path", path)
 
     def get_recent_files(self):
         """
