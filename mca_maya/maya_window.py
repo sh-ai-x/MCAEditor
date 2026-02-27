@@ -582,6 +582,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         text = message.rstrip()
         output = self._panel._output
 
+        # Preserve keyboard focus during output writes.  Writing to the
+        # output QPlainTextEdit can trigger cursor/scroll changes that
+        # inadvertently move Qt focus away from the code editor, causing
+        # the user's typing to suddenly go to Maya instead.
+        app = QApplication.instance()
+        saved_focus = app.focusWidget() if app else None
+
         # Route to the appropriate output method based on message type.
         if message_type == om2.MCommandMessage.kError:
             output.write_error(text)
@@ -594,6 +601,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         else:
             # kDisplay and any other types — standard output.
             output.write_output(text)
+
+        # Restore focus if it moved away during the write.
+        if saved_focus and app:
+            current_focus = app.focusWidget()
+            if current_focus is not saved_focus:
+                saved_focus.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # --- Status Bar ----------------------------------------------------------
 

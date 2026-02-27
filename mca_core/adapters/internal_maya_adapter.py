@@ -221,10 +221,22 @@ class InternalMayaAdapter(DCCAdapter):
         output = buf.getvalue()
 
         # Echo the executed code and output to Maya's script editor.
-        # sys.__stdout__ is Maya's original stdout — writing here shows
-        # in the script editor history without triggering our
-        # MCommandMessage output hook (which only captures MGlobal calls).
+        # MGlobal.displayInfo() can trigger Maya UI updates that steal
+        # keyboard focus from the code editor, so save and restore focus.
+        try:
+            from mca_qt.qt_compat import QApplication, Qt as _Qt
+            _app = QApplication.instance()
+            _saved = _app.focusWidget() if _app else None
+        except Exception:
+            _app, _saved = None, None
+
         self._echo_to_script_editor(code, output, error)
+
+        # Restore focus if displayInfo() stole it.
+        if _saved and _app:
+            _current = _app.focusWidget()
+            if _current is not _saved:
+                _saved.setFocus(_Qt.FocusReason.OtherFocusReason)
 
         # If there was an error, format the traceback.
         if error:
