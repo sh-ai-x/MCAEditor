@@ -151,6 +151,22 @@ class _MayaHotkeyFilter(QObject):
 
         return None
 
+    def _find_parent_terminal(self, widget):
+        """
+        Walk up the widget parent chain looking for a NativeTerminalWidget.
+
+        :param QWidget widget: The starting widget (usually the focused child).
+        :return: The NativeTerminalWidget ancestor, or None.
+        :rtype: QWidget or None
+        """
+        from mca_qt.widgets.terminal_native import NativeTerminalWidget
+        parent = widget
+        while parent:
+            if isinstance(parent, NativeTerminalWidget):
+                return parent
+            parent = parent.parent() if hasattr(parent, "parent") else None
+        return None
+
     def eventFilter(self, watched, event):
         """
         Two-phase keyboard interception for Maya hotkey suppression.
@@ -206,15 +222,22 @@ class _MayaHotkeyFilter(QObject):
                     # tree to Maya's main window (where Maya would process
                     # it as a hotkey like Ctrl+G = Group, etc.).
                     #
-                    # Call the focused widget's keyPressEvent directly so
-                    # built-in text editing shortcuts (Ctrl+Z, Ctrl+C,
-                    # Ctrl+V, Ctrl+X, Ctrl+A, Ctrl+Y) still work —
-                    # QPlainTextEdit handles those in keyPressEvent.
-                    # Direct call bypasses the event system, so unhandled
-                    # keys simply do nothing instead of reaching Maya.
+                    # For terminal widgets, the key handling lives in the
+                    # NativeTerminalWidget's eventFilter (not in the
+                    # QPlainTextEdit's keyPressEvent), so we need to find
+                    # the terminal parent and route through its eventFilter.
+                    # For regular text editors, call keyPressEvent directly
+                    # so built-in shortcuts (Ctrl+Z/C/V/X/A/Y) still work.
                     focus = QApplication.instance().focusWidget()
-                    if focus and hasattr(focus, "keyPressEvent"):
-                        focus.keyPressEvent(event)
+                    if focus:
+                        # Walk up the parent chain looking for a terminal.
+                        terminal = self._find_parent_terminal(focus)
+                        if terminal:
+                            # Route through the terminal's eventFilter which
+                            # handles Ctrl+V paste, Ctrl+C interrupt, etc.
+                            terminal.eventFilter(focus, event)
+                        elif hasattr(focus, "keyPressEvent"):
+                            focus.keyPressEvent(event)
                     return True
 
         return super().eventFilter(watched, event)
@@ -606,6 +629,26 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         logger.info("MCA Maya Editor window closed")
 
 
+# --- Command Port Setup -----------------------------------------------------
+
+def _ensure_command_ports():
+    """
+    Open Maya's MEL (7001) and Python (7002) command ports if not already open.
+
+    The MCP server runs as a separate process and communicates with Maya
+    over TCP on port 7002.  These ports must be open for Claude Code's
+    MCP tools to work.  If a port is already open, the call is a no-op.
+    """
+    for port, src_type in [("7001", "mel"), ("7002", "python")]:
+        port_name = ":{}".format(port)
+        try:
+            cmds.commandPort(name=port_name, sourceType=src_type, echoOutput=True)
+            logger.info("Opened %s command port %s", src_type, port_name)
+        except RuntimeError:
+            # RuntimeError means the port is already open — that's fine.
+            logger.debug("Command port %s already open", port_name)
+
+
 # --- Public API (called from plugin_main and MEL override) ------------------
 
 def show_mca_editor():
@@ -638,6 +681,21 @@ def show_mca_editor():
         # recreate cleanly with a new widget instance.
         cmds.deleteUI(WORKSPACE_CONTROL_NAME)
         logger.info("Deleted stale workspace control: %s", WORKSPACE_CONTROL_NAME)
+
+    # Ensure command ports are open so the MCP server (a separate process)
+    # can communicate with Maya.  Claude Code talks to the MCP server via
+    # stdio, and the MCP server talks to Maya via TCP on port 7002.
+    _ensure_command_ports()
+
+    # Kick off MCP server deployment in the background (idempotent).
+    # This is also done in plugin_main.initializePlugin(), but when the
+    # editor is launched via show_mca_editor() directly (without the
+    # plugin system), initializePlugin never runs.
+    try:
+        from mca_core import mcp_setup
+        mcp_setup.ensure_maya_mcp(background=True)
+    except Exception as exc:
+        logger.warning("MCP setup trigger failed: %s", exc)
 
     # Create the window widget.
     _mca_editor_window = MCAMayaWindow()

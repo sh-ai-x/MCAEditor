@@ -27,6 +27,7 @@ import logging
 import maya.api.OpenMaya as om2
 import maya.cmds as cmds
 import maya.mel as mel
+import maya.utils
 
 from mca_core.venv_manager import setup_venv
 
@@ -107,6 +108,26 @@ def initializePlugin(plugin):
     else:
         logger.info("Venv setup OK")
 
+    # Open Maya's command ports so external processes (like the MCP server)
+    # can communicate with Maya over TCP.  The MCP server runs as a separate
+    # process and sends Python commands to port 7002.  Port 7001 is the MEL
+    # port, opened for completeness.
+    # Use maya.utils.executeDeferred because command ports cannot be opened
+    # reliably during initializePlugin — Maya's networking isn't ready yet.
+    def _open_command_ports():
+        """Open MEL (7001) and Python (7002) command ports for MCP access."""
+        import maya.cmds as _cmds
+        for port, src_type in [("7001", "mel"), ("7002", "python")]:
+            port_name = ":{}".format(port)
+            try:
+                _cmds.commandPort(name=port_name, sourceType=src_type, echoOutput=True)
+                print("[MCA Editor] Opened {} command port {}".format(src_type, port_name))
+            except RuntimeError as exc:
+                # RuntimeError is raised if the port is already open — that's fine.
+                print("[MCA Editor] Command port {} already open (or error: {})".format(port_name, exc))
+
+    maya.utils.executeDeferred(_open_command_ports)
+
     # Kick off MCP server deployment in the background.  This clones
     # MayaMCP (if needed), sets up its venv, and registers with Claude Code.
     # Runs in a daemon thread so it never blocks Maya startup.
@@ -164,6 +185,17 @@ def uninitializePlugin(plugin):
         logger.info("Deregistered command: %s", MCAEditorCommand.COMMAND_NAME)
     except Exception as exc:
         logger.error("Failed to deregister command %s: %s", MCAEditorCommand.COMMAND_NAME, exc)
+
+    # Close the command ports we opened during init.
+    try:
+        if cmds.commandPort(":7001", query=True):
+            cmds.commandPort(name=":7001", close=True)
+            logger.info("Closed MEL command port :7001")
+        if cmds.commandPort(":7002", query=True):
+            cmds.commandPort(name=":7002", close=True)
+            logger.info("Closed Python command port :7002")
+    except Exception as exc:
+        logger.warning("Could not close command ports: %s", exc)
 
     # Restore Maya's default ScriptEditor procedure.
     # The default implementation lives in Maya's MEL scripts and gets

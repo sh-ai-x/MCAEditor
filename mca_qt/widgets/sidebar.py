@@ -1375,3 +1375,20 @@ class MCASidebar(QWidget):
     def set_advanced_mode(self):
         """Switch to advanced mode - show the workspace panel."""
         self.workspace_panel.setVisible(True)
+
+    def splitter_sizes(self):
+        """
+        Return the current sizes of the sidebar's internal splitter.
+
+        :return: List of pixel sizes for each panel [workspace, open editors, outline].
+        :rtype: list
+        """
+        return self._splitter.sizes()
+
+    def set_splitter_sizes(self, sizes):
+        """
+        Restore the sidebar's internal splitter sizes.
+
+        :param list sizes: List of pixel sizes for each panel.
+        """
+        self._splitter.setSizes(sizes)

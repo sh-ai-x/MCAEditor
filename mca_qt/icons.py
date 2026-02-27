@@ -304,6 +304,46 @@ def _paint_ai_icon():
     return QIcon(pix)
 
 
+# --- Sidebar Icon ------------------------------------------------------------
+
+def sidebar_icon():
+    """
+    Sidebar toggle icon (panel layout with left sidebar highlighted).
+
+    :return: Sidebar icon.
+    :rtype: QIcon
+    """
+    return _cached("sidebar_icon", _paint_sidebar_icon)
+
+
+def _paint_sidebar_icon():
+    """Paint a sidebar/panel layout icon."""
+    pix = QPixmap(ICON_SIZE, ICON_SIZE)
+    pix.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Outer frame representing the editor window.
+    frame_color = QColor("#969696")
+    p.setPen(QPen(frame_color, 1.2))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(1, 2, 14, 12, 1.5, 1.5)
+
+    # Left sidebar panel (filled to indicate sidebar area).
+    sidebar_color = QColor("#569cd6")
+    sidebar = QPainterPath()
+    sidebar.addRoundedRect(1, 2, 5, 12, 1.0, 1.0)
+    p.fillPath(sidebar, sidebar_color)
+
+    # Vertical divider between sidebar and main area.
+    p.setPen(QPen(frame_color, 1.0))
+    p.drawLine(6, 2, 6, 14)
+
+    p.end()
+    return QIcon(pix)
+
+
 def _paint_text_icon():
     """Paint a simple text/document icon."""
     pix = QPixmap(ICON_SIZE, ICON_SIZE)

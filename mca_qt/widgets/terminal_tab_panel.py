@@ -134,27 +134,6 @@ class TerminalTabPanel(QWidget):
             }
         """)
 
-        # "+" button in the top-right corner to add new terminals.
-        add_btn = QPushButton("+")
-        add_btn.setToolTip("New Terminal")
-        add_btn.setFixedSize(28, 22)
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #569cd6;
-                border: none;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background-color: #3e3e42;
-            }
-        """)
-        add_btn.clicked.connect(self.add_terminal)
-        self._tabs.setCornerWidget(add_btn, Qt.Corner.TopRightCorner)
-
         layout.addWidget(self._tabs)
 
     # --- Public API ----------------------------------------------------------

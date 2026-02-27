@@ -44,7 +44,6 @@ from mca_qt.widgets.terminal_tab_panel import TerminalTabPanel
 from mca_qt.widgets.terminal_factory import is_terminal_available
 from mca_qt.widgets.tool_stripe import ToolStripe
 from mca_qt.widgets.sidebar import MCASidebar
-from mca_qt.widgets.ai_panel import AIPanel
 from mca_qt.widgets.settings_dialog import SettingsDialog
 from mca_qt.widgets.connection_dialog import ConnectionDialog
 from mca_qt.widgets.new_tab_dialog import NewTabDialog
@@ -53,7 +52,7 @@ from mca_qt.widgets.find_replace_bar import FindReplaceBar
 from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup
 from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
-from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, ai_icon
+from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -245,6 +244,7 @@ class MCAEditorPanel(QWidget):
 
         # --- Left tool stripe (thin vertical button bar) ---
         self._left_stripe = ToolStripe()
+        self._left_stripe.add_button("sidebar", sidebar_icon(), "Toggle Sidebar")
         self._left_stripe.add_button("terminal", terminal_icon(), "Terminal (Bottom)", bottom=True)
         self._left_stripe.button_clicked.connect(self._on_left_stripe_clicked)
         main_layout.addWidget(self._left_stripe)
@@ -305,58 +305,25 @@ class MCAEditorPanel(QWidget):
         self._center_layout.addWidget(self._center_splitter)
         self._main_splitter.addWidget(center_widget)
 
-        # --- Right panel (tabbed: AI + Terminal) ---
-        self._right_panel = QTabWidget()
-        self._right_panel.setMinimumWidth(250)
-        self._right_panel.setDocumentMode(True)
-        self._right_panel.setStyleSheet("""
-            QTabWidget::pane {
-                border: none;
-                background-color: #1e1e1e;
-            }
-            QTabBar::tab {
-                background-color: #2d2d30;
-                color: #969696;
-                border: none;
-                padding: 4px 12px;
-                min-width: 60px;
-                font-size: 11px;
-            }
-            QTabBar::tab:selected {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border-bottom: 2px solid #569cd6;
-            }
-            QTabBar::tab:hover {
-                background-color: #3e3e42;
-                color: #ffffff;
-            }
-        """)
-
-        # AI panel as the first tab in the right panel.
-        self._ai_panel = AIPanel(self._settings)
-        self._right_panel.addTab(self._ai_panel, "AI")
-
-        # Right-side terminal panel as the second tab.
+        # --- Right terminal panel (directly in splitter, no wrapper tabs) ---
         self._right_terminal_panel = TerminalTabPanel(
             shell=terminal_shell,
             cwd=self._session_manager.scripts_dir,
             font_size=terminal_font,
             parent=self,
         )
+        self._right_terminal_panel.setMinimumWidth(250)
         self._right_terminal_panel.all_terminals_closed.connect(self._on_right_terminals_closed)
-        self._right_panel.addTab(self._right_terminal_panel, "Terminal")
 
         # Right panel starts hidden.
-        self._right_panel.setVisible(False)
-        self._main_splitter.addWidget(self._right_panel)
+        self._right_terminal_panel.setVisible(False)
+        self._main_splitter.addWidget(self._right_terminal_panel)
 
         # Default: sidebar visible, right panel hidden.
         self._main_splitter.setSizes([240, 800, 0])
 
         # --- Right tool stripe (thin vertical button bar) ---
         self._right_stripe = ToolStripe()
-        self._right_stripe.add_button("ai", ai_icon(), "AI Panel")
         self._right_stripe.add_button("terminal", terminal_icon(), "Terminal (Right)")
         self._right_stripe.button_clicked.connect(self._on_right_stripe_clicked)
         main_layout.addWidget(self._right_stripe)
@@ -798,10 +765,6 @@ class MCAEditorPanel(QWidget):
             callback=lambda: self._set_editor_mode(EditorMode.ADVANCED))
         self._advanced_mode_action.setCheckable(True)
 
-        # --- AI panel toggle (stored for external access) ---
-        self._toggle_ai_action = self._create_action(
-            view_menu, "Toggle AI Panel",
-            shortcut="Ctrl+Shift+A", callback=self._toggle_ai_panel)
 
     def _build_go_menu(self, menubar):
         """Build the Go menu."""
@@ -969,7 +932,7 @@ class MCAEditorPanel(QWidget):
 
         if is_simple:
             self._sidebar.setVisible(False)
-            self._right_panel.setVisible(False)
+            self._right_terminal_panel.setVisible(False)
             self._main_splitter.setSizes([0, 1000, 0])
             self._mode_toggle.setText("Advanced")
             if self._simple_mode_action:
@@ -980,7 +943,7 @@ class MCAEditorPanel(QWidget):
         else:
             self._sidebar.setVisible(True)
             self._sidebar.set_advanced_mode()
-            self._right_panel.setVisible(False)
+            self._right_terminal_panel.setVisible(False)
             self._main_splitter.setSizes([240, 800, 0])
             self._mode_toggle.setText("Simple")
             if self._simple_mode_action:
@@ -1016,11 +979,20 @@ class MCAEditorPanel(QWidget):
             except (TypeError, ValueError):
                 pass
 
+        # --- Sidebar internal splitter (Workspace | Open Editors | Outline) ---
+        saved_sidebar = s.get("sidebar_splitter_sizes")
+        if saved_sidebar:
+            try:
+                self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
+            except (TypeError, ValueError):
+                pass
+
         # --- Panel visibility ---
         # Only restore sidebar visibility in Advanced mode (Simple always hides it).
         if self._editor_mode == EditorMode.ADVANCED:
             sidebar_vis = s.get("sidebar_visible", True)
             self._sidebar.setVisible(sidebar_vis)
+            self._left_stripe.set_button_active("sidebar", sidebar_vis)
 
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
@@ -1047,11 +1019,10 @@ class MCAEditorPanel(QWidget):
             QTimer.singleShot(500, self._bottom_terminal_panel.ensure_terminal)
             self._left_stripe.set_button_active("terminal", True)
 
-        # Restore right panel visibility and determine which tab to show.
-        ai_vis = s.get("ai_panel_visible", False)
+        # Restore right terminal panel visibility.
         right_term_vis = s.get("right_terminal_visible", False)
-        if ai_vis or right_term_vis:
-            self._right_panel.setVisible(True)
+        if right_term_vis:
+            self._right_terminal_panel.setVisible(True)
             # Expand the right panel in the main splitter if needed.
             sizes = self._main_splitter.sizes()
             if sizes[-1] == 0:
@@ -1059,17 +1030,10 @@ class MCAEditorPanel(QWidget):
                 sizes[-1] = 300
                 sizes[1] = total - sizes[0] - sizes[-1]
                 self._main_splitter.setSizes(sizes)
-            if ai_vis:
-                self._right_panel.setCurrentWidget(self._ai_panel)
-                self._right_stripe.set_button_active("ai", True)
-            if right_term_vis:
-                QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
-                self._right_stripe.set_button_active("terminal", True)
-                # If AI is not visible, switch to the terminal tab.
-                if not ai_vis:
-                    self._right_panel.setCurrentWidget(self._right_terminal_panel)
+            QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
+            self._right_stripe.set_button_active("terminal", True)
         else:
-            self._right_panel.setVisible(False)
+            self._right_terminal_panel.setVisible(False)
 
         # --- Whitespace rendering ---
         show_ws = s.get("show_whitespace", False)
@@ -1105,6 +1069,7 @@ class MCAEditorPanel(QWidget):
         """Toggle sidebar visibility and persist the choice."""
         visible = not self._sidebar.isVisible()
         self._sidebar.setVisible(visible)
+        self._left_stripe.set_button_active("sidebar", visible)
         self._settings.set("sidebar_visible", visible)
 
     def _toggle_output(self):
@@ -1138,27 +1103,19 @@ class MCAEditorPanel(QWidget):
             self._bottom_terminal_panel.focus_current()
 
     def _open_terminal_right(self):
-        """Show the right panel and switch to the Terminal tab."""
+        """Toggle the right terminal panel visibility."""
         if not self._terminal_available:
             return
 
-        # If the right panel is already showing the terminal tab, toggle it off.
-        if (self._right_panel.isVisible() and
-                self._right_panel.currentWidget() is self._right_terminal_panel):
-            # Hide the terminal tab indicator.
+        # If already visible, toggle it off.
+        if self._right_terminal_panel.isVisible():
+            self._right_terminal_panel.setVisible(False)
             self._right_stripe.set_button_active("terminal", False)
             self._settings.set("right_terminal_visible", False)
-            # If AI is also not active, hide the entire right panel.
-            if not self._right_stripe.is_button_active("ai"):
-                self._right_panel.setVisible(False)
-            else:
-                # Switch back to AI tab.
-                self._right_panel.setCurrentWidget(self._ai_panel)
             return
 
-        # Show the right panel and switch to the Terminal tab.
-        self._right_panel.setVisible(True)
-        self._right_panel.setCurrentWidget(self._right_terminal_panel)
+        # Show the right terminal panel.
+        self._right_terminal_panel.setVisible(True)
         self._right_stripe.set_button_active("terminal", True)
         self._settings.set("right_terminal_visible", True)
 
@@ -1174,35 +1131,6 @@ class MCAEditorPanel(QWidget):
         self._right_terminal_panel.ensure_terminal()
         self._right_terminal_panel.focus_current()
 
-    def _toggle_ai_panel(self):
-        """Toggle AI panel visibility via the right panel, expanding if needed."""
-        # If right panel is showing AI, toggle it off.
-        if (self._right_panel.isVisible() and
-                self._right_panel.currentWidget() is self._ai_panel):
-            self._right_stripe.set_button_active("ai", False)
-            self._settings.set("ai_panel_visible", False)
-            # If terminal is also not active in the right panel, hide it entirely.
-            if not self._right_stripe.is_button_active("terminal"):
-                self._right_panel.setVisible(False)
-            else:
-                # Switch to terminal tab.
-                self._right_panel.setCurrentWidget(self._right_terminal_panel)
-            return
-
-        # Show the right panel and switch to AI tab.
-        self._right_panel.setVisible(True)
-        self._right_panel.setCurrentWidget(self._ai_panel)
-        self._right_stripe.set_button_active("ai", True)
-        self._settings.set("ai_panel_visible", True)
-
-        # Expand the right panel in the main splitter if needed.
-        sizes = self._main_splitter.sizes()
-        if sizes[-1] == 0:
-            total = sum(sizes)
-            sizes[-1] = 300
-            sizes[1] = total - sizes[0] - sizes[-1]
-            self._main_splitter.setSizes(sizes)
-
     # --- Tool Stripe Callbacks -----------------------------------------------
 
     def _on_left_stripe_clicked(self, name):
@@ -1211,7 +1139,9 @@ class MCAEditorPanel(QWidget):
 
         :param str name: The button name that was clicked.
         """
-        if name == "terminal":
+        if name == "sidebar":
+            self._toggle_sidebar()
+        elif name == "terminal":
             self._open_terminal_bottom()
 
     def _on_right_stripe_clicked(self, name):
@@ -1220,9 +1150,7 @@ class MCAEditorPanel(QWidget):
 
         :param str name: The button name that was clicked.
         """
-        if name == "ai":
-            self._toggle_ai_panel()
-        elif name == "terminal":
+        if name == "terminal":
             self._open_terminal_right()
 
     def _on_bottom_terminals_closed(self):
@@ -1232,12 +1160,10 @@ class MCAEditorPanel(QWidget):
         self._left_stripe.set_button_active("terminal", False)
 
     def _on_right_terminals_closed(self):
-        """Update stripe button when all right terminal tabs are closed."""
+        """Hide the right terminal panel when all tabs are closed."""
+        self._right_terminal_panel.setVisible(False)
         self._right_stripe.set_button_active("terminal", False)
         self._settings.set("right_terminal_visible", False)
-        # If AI is also not active, hide the right panel entirely.
-        if not self._right_stripe.is_button_active("ai"):
-            self._right_panel.setVisible(False)
 
     # =========================================================================
     # Tab / Buffer Management
@@ -2909,6 +2835,7 @@ class MCAEditorPanel(QWidget):
         # Splitter positions.
         settings.set("splitter_sizes", self._main_splitter.sizes())
         settings.set("center_splitter_sizes", self._center_splitter.sizes())
+        settings.set("sidebar_splitter_sizes", self._sidebar.splitter_sizes())
 
         # Panel visibility.
         settings.set("output_visible", self._output.isVisible())
@@ -2916,8 +2843,6 @@ class MCAEditorPanel(QWidget):
         settings.set("right_terminal_visible",
                       self._right_stripe.is_button_active("terminal"))
         settings.set("sidebar_visible", self._sidebar.isVisible())
-        settings.set("ai_panel_visible",
-                      self._right_stripe.is_button_active("ai"))
 
         # Persist workspace folders — always [scripts/] in Default mode.
         # Kept for future Project mode where users can add custom folders.

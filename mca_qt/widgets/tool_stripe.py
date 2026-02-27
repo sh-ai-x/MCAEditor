@@ -164,12 +164,13 @@ class ToolStripe(QWidget):
         # Button registry: name -> ToolStripeButton.
         self._buttons = {}
 
-        # Fixed width matching the buttons.
-        self.setFixedWidth(STRIPE_WIDTH)
+        # Fixed width: button width + 4px padding on each side.
+        self.setFixedWidth(STRIPE_WIDTH + 8)
 
         # Vertical layout with buttons at the top, stretch at the bottom.
+        # 4px horizontal margins give the buttons breathing room.
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 4, 0, 4)
+        self._layout.setContentsMargins(4, 4, 4, 4)
         self._layout.setSpacing(2)
         self._layout.addStretch()
 
