@@ -127,7 +127,42 @@ fixes for focus handling, auto-complete dismissal, popup positioning, and more.
 | `mca_qt/widgets/sidebar.py` | Show in Explorer fix (shell=True + normpath) |
 | `mca_editor/ui/main_window.py` | Sidebar splitter save/restore, deferred restore |
 | `mca_maya/maya_window.py` | Focus fix, log filtering, pre-reload cleanup |
-| `mca_core/adapters/internal_maya_adapter.py` | Removed _echo_to_maya (caused duplicates) |
+| `mca_core/adapters/internal_maya_adapter.py` | Echo to Maya script editor via MGlobal.displayInfo + suppression flag, focus preservation |
+| `mca_qt/icons.py` | Added `settings_icon()` (gear with radial teeth) |
+
+## Additional Fixes (Late Session)
+
+### Echo Execution to Maya's Script Editor
+- **Goal**: Executed code should appear in Maya's script editor like Charcoal Editor 2
+- **Attempt 1**: `sys.__stdout__` — doesn't route to Maya's script editor
+- **Attempt 2**: `MGlobal.displayInfo()` — works but gets captured by our own
+  `MCommandMessage` output hook, causing duplicates in MCA Editor
+- **Solution**: `MGlobal.displayInfo()` with a module-level `_suppress_output_hook`
+  flag. The adapter sets it `True` before echoing, the output hook checks it and
+  skips, clearing it in `finally`. No prefix, no duplicates.
+
+### Focus Theft During Output Writes
+- **Symptom**: Typing in editor randomly loses focus to Maya
+- **Root cause**: `_on_maya_output()` writes to the output QPlainTextEdit via
+  `setTextCursor()` + `ensureCursorVisible()`, which can move Qt focus away
+- **Fix 1**: Save/restore `focusWidget()` around output panel writes in `_on_maya_output()`
+- **Fix 2**: Save/restore focus around `MGlobal.displayInfo()` echo in `_execute_python()`
+- Both guards use `setFocus(OtherFocusReason)` to silently return focus
+
+### Settings Button Moved to Left Stripe
+- Removed the Unicode gear button from the toolbar
+- Added proper `settings_icon()` to `icons.py` (gear with radial lines + circles)
+- Button placed below the terminal button in the left tool stripe (`bottom=True`)
+- Handled in `_on_left_stripe_clicked()` → `_show_settings()`
+
+### Replace in Files Now Updates Open Editors
+- Replace All wrote to disk but open editor tabs still showed old content
+- Added `replace_done_callback` parameter to `FindInFilesDialog`
+- Added `_reload_editors_for_paths()` that re-reads affected files from disk
+  and updates editor content while preserving cursor position
+
+### Minor
+- Licensing text changed from "Free / Open Source" to "Free"
 
 ## Key Learnings
 
@@ -142,8 +177,13 @@ fixes for focus handling, auto-complete dismissal, popup positioning, and more.
   eventFilter catching MouseButtonPress is more robust.
 - **`explorer /select,` on Windows** must be a single string command with
   shell=True — splitting into a list breaks the argument parsing.
-- **`MGlobal.displayInfo()` gets captured by MCommandMessage hooks** — echoing
-  to Maya's script editor this way causes duplicates in MCA Editor's output panel
-  because the output hook picks them up.
+- **`MGlobal.displayInfo()` gets captured by MCommandMessage hooks** — use a
+  module-level suppression flag to prevent the output hook from re-capturing
+  messages that were intentionally echoed to Maya's script editor.
+- **`sys.__stdout__` does NOT route to Maya's script editor** — only
+  `MGlobal.displayInfo/Warning/Error()` appear in Maya's history panel.
 - **`cmds.deleteUI()` does NOT trigger `dockCloseEventTriggered`** — must
   explicitly save state before deleting the workspace control.
+- **`setTextCursor()` on a QPlainTextEdit can steal focus** — always
+  save/restore `focusWidget()` when writing to UI widgets from callbacks
+  that fire during user interaction (e.g. Maya output hooks).

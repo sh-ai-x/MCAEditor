@@ -3241,7 +3241,7 @@ class MCAEditorPanel(QWidget):
         QMessageBox.information(
             self, "Licensing",
             "<h3>MCA Editor Licensing</h3>"
-            "<p><b>Current Tier:</b> Free / Open Source</p>"
+            "<p><b>Current Tier:</b> Free</p>"
             "<p>MCA Editor is currently in early development.<br>"
             "Future licensing tiers (Standard, Pro, Studio) are planned.</p>"
             "<hr>"
