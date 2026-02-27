@@ -180,7 +180,9 @@ class InternalMayaAdapter(DCCAdapter):
         2. Fall back to "exec" for statements (imports, assignments, etc.).
 
         Stdout is redirected to a StringIO buffer so print() output is
-        captured and returned instead of going to Maya's script editor.
+        captured and returned to the MCA Editor output panel.  After
+        execution, the code and any output/errors are also echoed to
+        Maya's script editor so the history is visible there too.
 
         :param str code: Python source code to execute.
         :return: Captured output.

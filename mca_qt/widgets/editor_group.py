@@ -478,6 +478,8 @@ class EditorGroup(QWidget):
     split_left_requested = Signal(int)
     split_down_requested = Signal(int)
     split_up_requested = Signal(int)
+    # Emitted when the user double-clicks empty space on the tab bar.
+    new_tab_requested = Signal()
 
     def __init__(self, parent=None):
         """
@@ -862,6 +864,10 @@ class EditorGroup(QWidget):
 
         :param MCASettings settings: Settings instance.
         """
+        # Build the color scheme once and share across all editors.
+        from mca_core.config.color_scheme import build_scheme_dict
+        scheme = build_scheme_dict(settings)
+
         font_family = settings.get("font_family")
         font_size = settings.get("font_size")
         tab_size = settings.get("tab_size")
@@ -873,6 +879,8 @@ class EditorGroup(QWidget):
             editor.setTabStopDistance(
                 editor.fontMetrics().horizontalAdvance(" ") * tab_size
             )
+            # Push the color scheme so highlighters pick up any changes.
+            editor.set_color_scheme(scheme)
 
         # Apply tab bar settings.
         self._tab_widget.tabBar().setVisible(settings.get("show_tab_bar"))
@@ -895,8 +903,8 @@ class EditorGroup(QWidget):
             if event.type() == QEvent.Type.MouseButtonDblClick:
                 tab_index = self._tab_widget.tabBar().tabAt(event.pos())
                 if tab_index == -1:
-                    # Bubble up to the container/panel for new tab creation.
-                    return False
+                    self.new_tab_requested.emit()
+                    return True
 
         # Reposition overlay widgets when the tab widget resizes.
         if obj is self._tab_widget and event.type() == QEvent.Type.Resize:

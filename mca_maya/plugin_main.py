@@ -34,6 +34,19 @@ from mca_core.venv_manager import setup_venv
 # Module-level logger.
 logger = logging.getLogger(__name__)
 
+# --- Silence MCA INFO/DEBUG Logging in the UI --------------------------------
+# Every mca_* module uses logging.getLogger(__name__), which means their
+# loggers are children of "mca_core", "mca_qt", and "mca_maya".  By
+# setting these parent loggers to WARNING, all routine INFO/DEBUG messages
+# (window opened, terminal started, panel expanded, etc.) are suppressed.
+# Warnings and errors still come through.  To re-enable verbose output for
+# debugging, run in Maya's script editor:
+#     import logging; logging.getLogger("mca_core").setLevel(logging.DEBUG)
+#     import logging; logging.getLogger("mca_qt").setLevel(logging.DEBUG)
+#     import logging; logging.getLogger("mca_maya").setLevel(logging.DEBUG)
+for _pkg in ("mca_core", "mca_qt", "mca_maya"):
+    logging.getLogger(_pkg).setLevel(logging.WARNING)
+
 # Tell Maya this plugin uses Maya Python API 2.0.
 maya_useNewAPI = True
 
@@ -121,10 +134,10 @@ def initializePlugin(plugin):
             port_name = ":{}".format(port)
             try:
                 _cmds.commandPort(name=port_name, sourceType=src_type, echoOutput=True)
-                print("[MCA Editor] Opened {} command port {}".format(src_type, port_name))
-            except RuntimeError as exc:
+                logger.info("Opened %s command port %s", src_type, port_name)
+            except RuntimeError:
                 # RuntimeError is raised if the port is already open — that's fine.
-                print("[MCA Editor] Command port {} already open (or error: {})".format(port_name, exc))
+                logger.debug("Command port %s already open", port_name)
 
     maya.utils.executeDeferred(_open_command_ports)
 

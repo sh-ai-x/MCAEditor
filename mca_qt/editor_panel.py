@@ -49,7 +49,8 @@ from mca_qt.widgets.connection_dialog import ConnectionDialog
 from mca_qt.widgets.new_tab_dialog import NewTabDialog
 from mca_qt.widgets.completer import CodeCompleter, CompletionProvider
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
-from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup
+from mca_qt.widgets.find_in_files import FindInFilesDialog
+from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup, GoToDeclarationPopup
 from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon
@@ -133,6 +134,13 @@ class MCAEditorPanel(QWidget):
         # Session manager for buffer persistence across restarts.
         self._session_manager = SessionManager()
 
+        # Debounce timer for outline refresh — reparse 500ms after the user
+        # stops typing, rather than on every keystroke.
+        self._outline_timer = QTimer(self)
+        self._outline_timer.setSingleShot(True)
+        self._outline_timer.setInterval(500)
+        self._outline_timer.timeout.connect(self._refresh_outline)
+
         # Shared completion provider — one instance used by all editor tabs.
         self._completion_provider = CompletionProvider(
             self._settings, self._adapter_manager
@@ -172,6 +180,11 @@ class MCAEditorPanel(QWidget):
 
         # Override mode defaults with user's last-saved UI state.
         self._restore_ui_state()
+
+        # Splitter setSizes() during __init__ can be overridden when Qt
+        # performs the first layout pass on show.  Schedule a deferred
+        # re-apply so saved sizes survive the initial layout.
+        self._splitter_restore_pending = True
 
         # Restore the output panel content from the previous session.
         self._restore_output()
@@ -278,6 +291,7 @@ class MCAEditorPanel(QWidget):
         self._group_container.active_editor_changed.connect(self._on_active_editor_changed)
         self._group_container.editors_changed.connect(self._update_open_editors)
         self._group_container.tab_close_requested.connect(self._close_tab_in_group)
+        self._group_container.new_tab_requested.connect(self._show_new_tab_dialog)
         self._center_splitter.addWidget(self._group_container)
 
         # Bottom terminal tab panel (hidden by default).
@@ -544,7 +558,7 @@ class MCAEditorPanel(QWidget):
 
         # --- New buffer actions ---
         self._create_action(file_menu, "New...", name="New Buffer",
-                            shortcut="Ctrl+N", callback=self._new_buffer)
+                            shortcut="Ctrl+N", callback=self._show_new_tab_dialog)
         self._create_action(file_menu, "New MEL Buffer", name="New MEL Buffer",
                             shortcut="Ctrl+Alt+N", callback=self._new_mel_buffer)
         self._create_action(file_menu, "New Python Buffer", name="New Python Buffer",
@@ -670,7 +684,7 @@ class MCAEditorPanel(QWidget):
         self._create_action(edit_menu, "Find in Files...", name="Find in Files",
                             shortcut="Ctrl+Shift+F", callback=self._find_in_files)
         self._create_action(edit_menu, "Replace in Files...", name="Replace in Files",
-                            shortcut="Ctrl+Shift+H", callback=self._replace_in_files)
+                            shortcut="Ctrl+Shift+R", callback=self._replace_in_files)
 
         edit_menu.addSeparator()
 
@@ -713,7 +727,7 @@ class MCAEditorPanel(QWidget):
                             callback=self._open_terminal_right)
         self._toggle_sidebar_action = self._create_action(
             view_menu, "Toggle Side Bar", name="Toggle Side Bar",
-            shortcut="Ctrl+B", callback=self._toggle_sidebar)
+            shortcut="Ctrl+Shift+B", callback=self._toggle_sidebar)
         # Activity bar toggle — emits signal so the host window can toggle its status bar.
         self._create_action(view_menu, "Toggle Activity Bar",
                             callback=lambda: self.activity_bar_toggled.emit())
@@ -801,6 +815,11 @@ class MCAEditorPanel(QWidget):
         self._create_action(go_menu, "Go to Line...", name="Go to Line",
                             shortcut="Ctrl+G", callback=self._show_goto_line)
 
+        go_menu.addSeparator()
+
+        self._create_action(go_menu, "Go to Declaration", name="Go to Declaration",
+                            shortcut="Ctrl+B", callback=self._go_to_declaration)
+
     def _build_output_menu(self, menubar):
         """Build the Output menu."""
         output_menu = menubar.addMenu("&Output")
@@ -869,13 +888,6 @@ class MCAEditorPanel(QWidget):
             # Each env var action uses a lambda with captured variable.
             self._create_action(env_menu, var,
                                 callback=lambda checked, v=var: self._show_env_var(v))
-
-        cmd_menu.addSeparator()
-
-        # --- Stub submenus ---
-        pylint_menu = cmd_menu.addMenu("Pylint")
-        pl_stub = pylint_menu.addAction("Pylint integration coming soon")
-        pl_stub.setEnabled(False)
 
     def _build_dcc_menu(self, menubar):
         """Build the DCC menu."""
@@ -951,6 +963,53 @@ class MCAEditorPanel(QWidget):
             if self._advanced_mode_action:
                 self._advanced_mode_action.setChecked(True)
             self.mode_changed.emit("Advanced")
+
+    def showEvent(self, event):
+        """
+        Re-apply saved splitter sizes after the first show.
+
+        Qt's initial layout pass can override ``setSizes()`` calls made
+        during ``__init__`` before the widget has a non-zero size.  This
+        one-shot re-apply ensures the user's last-saved positions stick.
+
+        :param QShowEvent event: The show event.
+        """
+        super().showEvent(event)
+
+        if getattr(self, "_splitter_restore_pending", False):
+            self._splitter_restore_pending = False
+            # Defer slightly so the layout pass fully completes first.
+            QTimer.singleShot(0, self._restore_splitter_sizes)
+
+    def _restore_splitter_sizes(self):
+        """
+        Re-apply saved splitter sizes from settings.
+
+        Called once after the first show event to ensure sizes survive
+        Qt's initial layout pass.
+        """
+        s = self._settings
+
+        saved_main = s.get("splitter_sizes")
+        if saved_main:
+            try:
+                self._main_splitter.setSizes([int(v) for v in saved_main])
+            except (TypeError, ValueError):
+                pass
+
+        saved_center = s.get("center_splitter_sizes")
+        if saved_center:
+            try:
+                self._center_splitter.setSizes([int(v) for v in saved_center])
+            except (TypeError, ValueError):
+                pass
+
+        saved_sidebar = s.get("sidebar_splitter_sizes")
+        if saved_sidebar:
+            try:
+                self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
+            except (TypeError, ValueError):
+                pass
 
     def _restore_ui_state(self):
         """
@@ -1079,16 +1138,16 @@ class MCAEditorPanel(QWidget):
         self._settings.set("output_visible", visible)
 
     def _open_terminal_bottom(self):
-        """Toggle bottom terminal panel visibility (Ctrl+`)."""
+        """Add a new terminal tab in the bottom panel (Ctrl+`)."""
         if not self._terminal_available:
             return
 
-        visible = not self._bottom_terminal_panel.isVisible()
-        self._bottom_terminal_panel.setVisible(visible)
-        self._settings.set("bottom_terminal_visible", visible)
-        self._left_stripe.set_button_active("terminal", visible)
+        # Show the panel if hidden.
+        if not self._bottom_terminal_panel.isVisible():
+            self._bottom_terminal_panel.setVisible(True)
+            self._settings.set("bottom_terminal_visible", True)
+            self._left_stripe.set_button_active("terminal", True)
 
-        if visible:
             # Give the terminal panel space in the center splitter.
             sizes = self._center_splitter.sizes()
             if len(sizes) >= 3 and sizes[2] < 50:
@@ -1098,37 +1157,31 @@ class MCAEditorPanel(QWidget):
                 sizes[1] = max(100, sizes[1] - terminal_height)
                 self._center_splitter.setSizes(sizes)
 
-            # Ensure at least one terminal tab exists.
-            self._bottom_terminal_panel.ensure_terminal()
-            self._bottom_terminal_panel.focus_current()
+        # Always add a new terminal tab.
+        self._bottom_terminal_panel.add_terminal()
+        self._bottom_terminal_panel.focus_current()
 
     def _open_terminal_right(self):
-        """Toggle the right terminal panel visibility."""
+        """Add a new terminal tab in the right panel."""
         if not self._terminal_available:
             return
 
-        # If already visible, toggle it off.
-        if self._right_terminal_panel.isVisible():
-            self._right_terminal_panel.setVisible(False)
-            self._right_stripe.set_button_active("terminal", False)
-            self._settings.set("right_terminal_visible", False)
-            return
+        # Show the panel if hidden.
+        if not self._right_terminal_panel.isVisible():
+            self._right_terminal_panel.setVisible(True)
+            self._right_stripe.set_button_active("terminal", True)
+            self._settings.set("right_terminal_visible", True)
 
-        # Show the right terminal panel.
-        self._right_terminal_panel.setVisible(True)
-        self._right_stripe.set_button_active("terminal", True)
-        self._settings.set("right_terminal_visible", True)
+            # Expand the right panel in the main splitter if needed.
+            sizes = self._main_splitter.sizes()
+            if sizes[-1] == 0:
+                total = sum(sizes)
+                sizes[-1] = 300
+                sizes[1] = total - sizes[0] - sizes[-1]
+                self._main_splitter.setSizes(sizes)
 
-        # Expand the right panel in the main splitter if needed.
-        sizes = self._main_splitter.sizes()
-        if sizes[-1] == 0:
-            total = sum(sizes)
-            sizes[-1] = 300
-            sizes[1] = total - sizes[0] - sizes[-1]
-            self._main_splitter.setSizes(sizes)
-
-        # Ensure at least one terminal tab exists.
-        self._right_terminal_panel.ensure_terminal()
+        # Always add a new terminal tab.
+        self._right_terminal_panel.add_terminal()
         self._right_terminal_panel.focus_current()
 
     # --- Tool Stripe Callbacks -----------------------------------------------
@@ -1180,21 +1233,28 @@ class MCAEditorPanel(QWidget):
 
     def _new_buffer(self):
         """
-        Create a new temporary buffer.
+        Create a new buffer file in the workspace scripts directory.
 
-        The tab name matches the buffer filename stem (e.g. "Python_1",
-        "MEL_2") so the tab label and the file in the workspace tree
-        are consistent.
+        The file is written to disk immediately so it appears in the
+        workspace tree and is searchable by Find in Files / Go to
+        Declaration from the moment it's created.
 
         :return: The newly created editor widget.
         :rtype: MCACodeEditor
         """
         editor = MCACodeEditor()
 
-        # Allocate a buffer ID immediately so the tab name matches the
-        # eventual filename (e.g. "Python_1" -> "Python_1.py").
+        # Allocate a buffer ID and immediately save an empty file to disk.
         editor._buffer_id = self._session_manager.allocate_buffer_id()
-        editor._buffer_filename = None
+        editor._buffer_filename = self._session_manager.save_buffer(
+            editor._buffer_id, "", editor.language
+        )
+
+        # Build the full on-disk path so this is a file-backed tab.
+        filepath = os.path.join(
+            self._session_manager.scripts_dir, editor._buffer_filename
+        )
+        editor.file_path = filepath
 
         editor.execute_requested.connect(self._execute_all)
         editor.execute_selected_requested.connect(self._execute_selected)
@@ -1202,6 +1262,8 @@ class MCAEditorPanel(QWidget):
         editor.cursor_position_changed_info.connect(self._update_cursor_pos)
         editor.file_modified.connect(lambda mod: self._on_editor_modified(editor, mod))
         editor.zoom_requested.connect(self._on_zoom_requested)
+        # Refresh the outline panel after a typing pause.
+        editor.document().contentsChanged.connect(self._on_editor_content_changed)
 
         # Attach a code completer to the new buffer.
         self._attach_completer(editor)
@@ -1209,14 +1271,11 @@ class MCAEditorPanel(QWidget):
         # Inherit current font size and whitespace setting so new tabs match.
         self._apply_editor_state(editor)
 
-        # Tab name = language prefix + buffer ID, matching the on-disk filename.
-        lang_prefix = {"python": "Python", "mel": "MEL", "text": "Text"}
-        tab_name = "{}_{}".format(
-            lang_prefix.get(editor.language, "Python"), editor._buffer_id
-        )
+        # Tab name = filename without extension (e.g. "Python_1").
+        tab_name = os.path.splitext(editor._buffer_filename)[0]
 
         icon = self._icon_for_language(editor.language)
-        self._group_container.add_editor(editor, tab_name, None, icon)
+        self._group_container.add_editor(editor, tab_name, filepath, icon)
 
         self._update_open_editors()
         return editor
@@ -1267,6 +1326,8 @@ class MCAEditorPanel(QWidget):
         editor.cursor_position_changed_info.connect(self._update_cursor_pos)
         editor.file_modified.connect(lambda mod: self._on_editor_modified(editor, mod))
         editor.zoom_requested.connect(self._on_zoom_requested)
+        # Refresh the outline panel after a typing pause.
+        editor.document().contentsChanged.connect(self._on_editor_content_changed)
 
         # Attach a code completer to the opened file's editor.
         self._attach_completer(editor)
@@ -1542,6 +1603,26 @@ class MCAEditorPanel(QWidget):
             lambda manual: completer.trigger(manual=manual)
         )
 
+    def _on_editor_content_changed(self):
+        """
+        Handle editor content changes by scheduling an outline refresh.
+
+        Restarts the debounce timer so the outline is reparsed 500ms
+        after the user stops typing, avoiding expensive re-parsing on
+        every single keystroke.
+        """
+        self._outline_timer.start()
+
+    def _refresh_outline(self):
+        """
+        Refresh the outline panel from the current editor.
+
+        Called by the debounce timer after a typing pause.
+        """
+        editor = self._current_editor()
+        if editor:
+            self._update_outline(editor)
+
     def _update_outline(self, editor):
         """Update the code outline panel."""
         outline = editor.get_code_outline()
@@ -1778,6 +1859,9 @@ class MCAEditorPanel(QWidget):
                     # Restore buffer tracking.
                     # Filename formats: "Python_1.py", "MEL_2.mel", or legacy "buffer_1.py".
                     # The numeric ID is always the part after the last underscore.
+                    # Since buffers now live in scripts_dir, set file_path so the
+                    # tab is treated as file-backed (searchable, saveable).
+                    buf_filepath = None
                     if buffer_file:
                         try:
                             basename = os.path.splitext(buffer_file)[0]
@@ -1785,9 +1869,13 @@ class MCAEditorPanel(QWidget):
                         except (IndexError, ValueError):
                             editor._buffer_id = self._session_manager.allocate_buffer_id()
                         editor._buffer_filename = buffer_file
+                        buf_filepath = os.path.join(
+                            self._session_manager.scripts_dir, buffer_file
+                        )
+                        editor.file_path = buf_filepath
 
                     icon = self._icon_for_language(language)
-                    group.add_editor(editor, title, None, icon)
+                    group.add_editor(editor, title, buf_filepath, icon)
                     restored_count += 1
 
             # Unblock signals and set active tab within this group.
@@ -1843,6 +1931,8 @@ class MCAEditorPanel(QWidget):
             lambda mod, e=editor: self._on_editor_modified(e, mod)
         )
         editor.zoom_requested.connect(self._on_zoom_requested)
+        # Refresh the outline panel after a typing pause.
+        editor.document().contentsChanged.connect(self._on_editor_content_changed)
         self._attach_completer(editor)
         self._apply_editor_state(editor)
 
@@ -2472,10 +2562,142 @@ class MCAEditorPanel(QWidget):
         group.show_replace(selected)
 
     def _find_in_files(self):
-        self._show_status("Find in Files: coming soon")
+        """
+        Open the Find in Files dialog (Ctrl+Shift+F).
+
+        Searches across all workspace folders for text matches and
+        displays results in a tree.  Double-clicking navigates.
+        """
+        folders = self._get_workspace_folders()
+        if not folders:
+            self._show_status("No workspace folders — add one first")
+            return
+
+        dlg = FindInFilesDialog(self, folders, self._navigate_to_file_line, mode="find")
+        dlg.show()
 
     def _replace_in_files(self):
-        self._show_status("Replace in Files: coming soon")
+        """
+        Open the Replace in Files dialog (Ctrl+Shift+R).
+
+        Same as Find in Files but with an additional replace input row
+        and a Replace All button.
+        """
+        folders = self._get_workspace_folders()
+        if not folders:
+            self._show_status("No workspace folders — add one first")
+            return
+
+        dlg = FindInFilesDialog(
+            self, folders, self._navigate_to_file_line,
+            mode="replace",
+            replace_done_callback=self._reload_editors_for_paths,
+        )
+        dlg.show()
+
+    def _reload_editors_for_paths(self, filepaths):
+        """
+        Reload open editor tabs whose files were modified on disk.
+
+        Called after Replace All so the editor content matches the
+        updated file.  Preserves the cursor position in each editor.
+
+        :param list filepaths: Absolute paths of files that changed.
+        """
+        # Normalize for reliable comparison.
+        norm_paths = {os.path.normpath(fp) for fp in filepaths}
+
+        for editor, _name, stored_path in self._group_container.all_editors():
+            # Check both the stored path and the editor's file_path attribute.
+            ep = getattr(editor, "file_path", None)
+            check_path = ep or stored_path
+            if not check_path:
+                continue
+            if os.path.normpath(check_path) not in norm_paths:
+                continue
+
+            # Re-read the file content from disk.
+            try:
+                with open(check_path, "r", encoding="utf-8") as f:
+                    new_content = f.read()
+            except Exception:
+                continue
+
+            # Save cursor position, replace content, restore cursor.
+            cursor = editor.textCursor()
+            pos = cursor.position()
+            editor.setPlainText(new_content)
+            editor.document().setModified(False)
+            cursor = editor.textCursor()
+            cursor.setPosition(min(pos, len(new_content)))
+            editor.setTextCursor(cursor)
+
+        logger.info("Reloaded %d editor(s) after Replace All", len(norm_paths))
+
+    def _get_workspace_folders(self):
+        """
+        Collect workspace folders from the sidebar.
+
+        :return: List of workspace folder paths, or empty list.
+        :rtype: list
+        """
+        folders = []
+        if hasattr(self, "_sidebar") and self._sidebar:
+            panel = getattr(self._sidebar, "workspace_panel", None)
+            if panel:
+                folders = panel.get_workspace_folders()
+        return folders
+
+    def _navigate_to_file_line(self, filepath, line_number):
+        """
+        Open a file and jump to a specific line number.
+
+        Used as the navigation callback for Find in Files and
+        Go to Declaration popups.  If the file is already open in
+        any tab (matched by either the tab's stored path or the
+        editor's ``file_path`` attribute), switches to that tab
+        instead of opening a duplicate.
+
+        :param str filepath: Absolute path to the file.
+        :param int line_number: 1-based line number to navigate to.
+        """
+        norm_path = os.path.normpath(filepath)
+
+        # First, try the standard path lookup (handles file-backed tabs).
+        group, idx, existing = self._group_container.find_editor_by_path(filepath)
+
+        # If not found, also check each editor's file_path attribute.
+        # Buffer tabs store path=None in the group, but editor.file_path
+        # may be set if the buffer was saved or loaded from a file.
+        if group is None:
+            for editor, _name, _stored_path in self._group_container.all_editors():
+                ep = getattr(editor, "file_path", None)
+                if ep and os.path.normpath(ep) == norm_path:
+                    # Found a match — switch to that editor's group and tab.
+                    for g in self._group_container.groups():
+                        idx2, found = g.find_editor_by_path(_stored_path)
+                        # find_editor_by_path won't match None paths,
+                        # so search by identity instead.
+                        if idx2 < 0:
+                            for i, (ed, _n, _p) in enumerate(g.editors()):
+                                if ed is editor:
+                                    idx2 = i
+                                    break
+                        if idx2 >= 0:
+                            g.set_current_index(idx2)
+                            self._group_container._on_group_activated(g)
+                            group = g
+                            break
+                    break
+
+        if group is None:
+            # Not open in any tab — open it normally.
+            self._open_file_path(filepath)
+
+        # Jump to the target line after the file is loaded / switched.
+        editor = self._current_editor()
+        if editor:
+            editor.go_to_line(line_number)
 
     def _insert_path(self):
         editor = self._current_editor()
@@ -2687,6 +2909,256 @@ class MCAEditorPanel(QWidget):
         if ok:
             editor.go_to_line(line)
 
+    # --- Go to Declaration / Find Usages (Ctrl+B) -----------------------------
+
+    # Regex patterns that match symbol definitions in Python and MEL.
+    _DEFINITION_PATTERNS = [
+        r"^\s*class\s+{symbol}\b",
+        r"^\s*def\s+{symbol}\b",
+        r"^\s*global\s+proc\s+\w*\s*{symbol}\b",
+        r"^\s*proc\s+\w*\s*{symbol}\b",
+    ]
+
+    # Directories to skip during workspace scanning (matches quick_open.py).
+    _DECL_SKIP_DIRS = {
+        "__pycache__", ".git", ".venv", "venv", "node_modules",
+        ".mypy_cache", ".pytest_cache", ".tox", ".eggs", "dist",
+        "build", ".idea", ".vs", ".vscode",
+    }
+
+    # Binary / non-text extensions to skip.
+    _DECL_SKIP_EXTS = {
+        ".pyc", ".pyo", ".exe", ".dll", ".so", ".dylib", ".png", ".jpg",
+        ".jpeg", ".gif", ".bmp", ".ico", ".ttf", ".otf", ".woff", ".woff2",
+        ".zip", ".gz", ".tar", ".7z", ".rar", ".db", ".sqlite",
+    }
+
+    _DECL_MAX_DEPTH = 5
+
+    def _go_to_declaration(self):
+        """
+        Go to Declaration or Find Usages for the word under the cursor.
+
+        If the cursor is on a definition (class/def/proc), searches the
+        workspace for all **usages** of that symbol.  If the cursor is
+        on a usage, searches for the symbol's **definition**.
+
+        Single result: navigates directly.
+        Multiple results: shows a ``GoToDeclarationPopup``.
+        """
+        editor = self._current_editor()
+        if not editor:
+            self._show_status("No active editor")
+            return
+
+        # Get the word under the cursor.  WordUnderCursor can sometimes
+        # grab punctuation (e.g. "():" if the cursor is on parentheses),
+        # so we validate the result is a valid identifier.
+        import re as _re
+        cursor = editor.textCursor()
+
+        # Save the original column BEFORE WordUnderCursor moves the
+        # cursor position to the end of the selection.
+        original_col = cursor.positionInBlock()
+
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        word = cursor.selectedText().strip()
+
+        # If the selection isn't a clean identifier, try extracting one
+        # from the line text at the original cursor position instead.
+        if not word or not _re.match(r'^[A-Za-z_]\w*$', word):
+            line_text = cursor.block().text()
+            col = original_col
+            # Walk backward to find the start of the identifier.
+            start = col
+            while start > 0 and (line_text[start - 1].isalnum() or line_text[start - 1] == '_'):
+                start -= 1
+            # Walk forward to find the end.
+            end = col
+            while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
+                end += 1
+            word = line_text[start:end].strip()
+
+        if not word or not _re.match(r'^[A-Za-z_]\w*$', word):
+            self._show_status("No symbol under cursor")
+            return
+
+        # Determine whether cursor is on a definition or a usage.
+        line_text = cursor.block().text()
+        on_definition = self._is_on_definition(word, line_text)
+
+        folders = self._get_workspace_folders()
+        if not folders:
+            self._show_status("No workspace folders — add one first")
+            return
+
+        if on_definition:
+            # Cursor is on a definition — find all usages of this symbol.
+            results = self._find_symbol_usages(word, folders)
+            popup_title = "Usages of '{}'".format(word)
+        else:
+            # Cursor is on a usage — find the definition.
+            results = self._find_symbol_definition(word, folders)
+            popup_title = "Definition of '{}'".format(word)
+
+        if not results:
+            if on_definition:
+                self._show_status("No usages of '{}' found in workspace".format(word))
+            else:
+                self._show_status("No definition of '{}' found in workspace".format(word))
+            return
+
+        if len(results) == 1:
+            # Single result — navigate directly.
+            filepath, line_num, _ = results[0]
+            self._navigate_to_file_line(filepath, line_num)
+        else:
+            # Multiple results — show popup.
+            popup = GoToDeclarationPopup(self, results, self._navigate_to_file_line, popup_title)
+            popup.exec()
+
+    def _is_on_definition(self, word, line_text):
+        """
+        Check whether the given line contains a definition of *word*.
+
+        Looks for Python ``class`` / ``def`` and MEL ``proc`` keywords
+        preceding the symbol name on the same line.
+
+        :param str word: The symbol name.
+        :param str line_text: The full text of the current line.
+        :return: True if the line defines the symbol.
+        :rtype: bool
+        """
+        import re
+        for pat_template in self._DEFINITION_PATTERNS:
+            pat = pat_template.format(symbol=re.escape(word))
+            if re.search(pat, line_text):
+                return True
+        return False
+
+    def _find_symbol_definition(self, symbol, folders):
+        """
+        Search workspace files for definitions of *symbol*.
+
+        Scans for ``class symbol``, ``def symbol``, and ``proc symbol``
+        patterns across all workspace files.
+
+        :param str symbol: The symbol name to find definitions for.
+        :param list folders: Workspace folder paths.
+        :return: List of (filepath, line_number, line_text) tuples.
+        :rtype: list
+        """
+        import re
+        # Build a combined regex matching any definition form.
+        patterns = []
+        for pat_template in self._DEFINITION_PATTERNS:
+            patterns.append(pat_template.format(symbol=re.escape(symbol)))
+        combined = "|".join("({})".format(p) for p in patterns)
+        regex = re.compile(combined)
+
+        return self._scan_files_for_patterns(regex, folders)
+
+    def _find_symbol_usages(self, symbol, folders):
+        """
+        Search workspace files for usages of *symbol*.
+
+        Uses a word-boundary regex to find all occurrences, excluding
+        lines that are definitions of the symbol.
+
+        :param str symbol: The symbol name to find usages for.
+        :param list folders: Workspace folder paths.
+        :return: List of (filepath, line_number, line_text) tuples.
+        :rtype: list
+        """
+        import re
+        # Match the symbol as a whole word.
+        usage_regex = re.compile(r"\b" + re.escape(symbol) + r"\b")
+
+        # Also compile definition patterns so we can exclude them.
+        def_patterns = []
+        for pat_template in self._DEFINITION_PATTERNS:
+            def_patterns.append(re.compile(pat_template.format(symbol=re.escape(symbol))))
+
+        all_matches = self._scan_files_for_patterns(usage_regex, folders)
+
+        # Filter out lines that are definitions.
+        results = []
+        for filepath, line_num, line_text in all_matches:
+            is_def = any(dp.search(line_text) for dp in def_patterns)
+            if not is_def:
+                results.append((filepath, line_num, line_text))
+
+        return results
+
+    def _scan_files_for_patterns(self, regex, folders):
+        """
+        Walk workspace folders and search each file for *regex* matches.
+
+        Synchronous scan — suitable for small-to-medium workspaces.
+
+        :param re.Pattern regex: Compiled regex to search for.
+        :param list folders: Workspace folder paths to scan.
+        :return: List of (filepath, line_number, line_text) tuples.
+        :rtype: list
+        """
+        import os
+        results = []
+
+        for folder in folders:
+            folder = os.path.normpath(folder)
+            self._scan_dir(folder, folder, 0, regex, results)
+
+        return results
+
+    def _scan_dir(self, root, current, depth, regex, results):
+        """
+        Recursively scan a directory for regex matches in files.
+
+        :param str root: Workspace root folder.
+        :param str current: Current directory being scanned.
+        :param int depth: Current recursion depth.
+        :param re.Pattern regex: Compiled search regex.
+        :param list results: Accumulator for (filepath, line_number, line_text) tuples.
+        """
+        import os
+        if depth > self._DECL_MAX_DEPTH:
+            return
+
+        try:
+            entries = os.listdir(current)
+        except PermissionError:
+            return
+
+        for entry in sorted(entries):
+            full_path = os.path.join(current, entry)
+
+            if os.path.isdir(full_path):
+                if entry in self._DECL_SKIP_DIRS:
+                    continue
+                self._scan_dir(root, full_path, depth + 1, regex, results)
+
+            elif os.path.isfile(full_path):
+                _, ext = os.path.splitext(entry)
+                if ext.lower() in self._DECL_SKIP_EXTS:
+                    continue
+                self._scan_single_file(full_path, regex, results)
+
+    def _scan_single_file(self, filepath, regex, results):
+        """
+        Search a single file line-by-line for regex matches.
+
+        :param str filepath: Absolute path to the file.
+        :param re.Pattern regex: Compiled search pattern.
+        :param list results: Accumulator for (filepath, line_number, line_text) tuples.
+        """
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh, start=1):
+                    if regex.search(line):
+                        results.append((filepath, i, line.rstrip("\n\r")))
+        except (OSError, IOError):
+            pass
+
     # --- Split / Group handlers -----------------------------------------------
 
     def _split_editor_right(self):
@@ -2858,9 +3330,17 @@ class MCAEditorPanel(QWidget):
         Saves all temp buffer contents, the session manifest, and the
         output panel content so the editor can restore them on next launch.
         """
-        # Persist all temp buffers to disk before shutting down.
+        # Save every open tab to disk before shutting down.
+        # File-backed tabs (including buffers) write to their file_path.
+        # Legacy pathless buffers fall back to _save_buffer_content().
         for editor, name, path in self._group_container.all_editors():
-            if not path:
+            if editor.file_path:
+                try:
+                    with open(editor.file_path, "w", encoding="utf-8") as f:
+                        f.write(editor.toPlainText())
+                except Exception as exc:
+                    logger.warning("Failed to save tab on close: %s", exc)
+            elif not path:
                 self._save_buffer_content(editor)
         self._save_session_manifest()
 

@@ -48,6 +48,24 @@ from mca_core.adapters.internal_maya_adapter import InternalMayaAdapter
 # Module-level logger.
 logger = logging.getLogger(__name__)
 
+# --- Silence MCA INFO/DEBUG Logging in Maya ---------------------------------
+# Every mca_* module uses logging.getLogger(__name__), so their loggers are
+# children of "mca_core", "mca_qt", and "mca_maya".  Setting these parent
+# loggers to WARNING suppresses all routine INFO/DEBUG messages (window opened,
+# terminal started, session restored, etc.) that would otherwise flood the
+# output panel via Maya's output hook.  Warnings and errors still come through.
+#
+# This must live here (not just in plugin_main.py) because the user may launch
+# the editor directly via  show_mca_editor()  without going through the plugin
+# system, in which case plugin_main.py is never imported.
+#
+# To re-enable verbose output for debugging, run in Maya's script editor:
+#     import logging; logging.getLogger("mca_core").setLevel(logging.DEBUG)
+#     import logging; logging.getLogger("mca_qt").setLevel(logging.DEBUG)
+#     import logging; logging.getLogger("mca_maya").setLevel(logging.DEBUG)
+for _pkg in ("mca_core", "mca_qt", "mca_maya"):
+    logging.getLogger(_pkg).setLevel(logging.WARNING)
+
 # Widget object name — Maya appends "WorkspaceControl" to derive the
 # workspace control name, so the control becomes "MCAEditorWorkspaceControl".
 WINDOW_OBJECT_NAME = "MCAEditor"
@@ -122,6 +140,23 @@ class _MayaHotkeyFilter(QObject):
             return False
         return focus is self._target or self._target.isAncestorOf(focus)
 
+    def _widget_in_editor(self, widget):
+        """
+        Check whether *widget* belongs to our editor's widget tree.
+
+        Unlike ``_focus_in_editor()`` (which relies on the global focus
+        widget), this tests a specific widget directly. Useful for mouse
+        events where the click target is known but Qt focus has not yet
+        transferred.
+
+        :param QObject widget: The widget to test.
+        :return: True if *widget* is our target or a descendant of it.
+        :rtype: bool
+        """
+        if not widget or not isinstance(widget, _QWidget):
+            return False
+        return widget is self._target or self._target.isAncestorOf(widget)
+
     def _find_matching_action(self, key_event):
         """
         Find a panel action whose shortcut matches the given key event.
@@ -153,16 +188,16 @@ class _MayaHotkeyFilter(QObject):
 
     def _find_parent_terminal(self, widget):
         """
-        Walk up the widget parent chain looking for a NativeTerminalWidget.
+        Walk up the widget parent chain looking for a TerminalWidget.
 
         :param QWidget widget: The starting widget (usually the focused child).
-        :return: The NativeTerminalWidget ancestor, or None.
+        :return: The TerminalWidget ancestor, or None.
         :rtype: QWidget or None
         """
-        from mca_qt.widgets.terminal_native import NativeTerminalWidget
+        from mca_qt.widgets.terminal_native import TerminalWidget
         parent = widget
         while parent:
-            if isinstance(parent, NativeTerminalWidget):
+            if isinstance(parent, TerminalWidget):
                 return parent
             parent = parent.parent() if hasattr(parent, "parent") else None
         return None
@@ -179,9 +214,57 @@ class _MayaHotkeyFilter(QObject):
         :return: True if the event was consumed, False otherwise.
         :rtype: bool
         """
+        # --- Phase 0: Force focus on first click into our editor -----------
+        # When the user clicks into our editor from Maya's viewport, Qt
+        # does not always transfer keyboard focus immediately — the click
+        # registers on the child widget, but focusWidget() still returns
+        # the previous Maya widget.  Any keyboard shortcut fired in that
+        # gap (e.g. Ctrl+C from Maya's cutCopyPaste.mel) will bypass our
+        # filter because _focus_in_editor() returns False.
+        #
+        # Fix: intercept MouseButtonPress events targeting any widget in
+        # our tree.  First activate the top-level window so Qt considers
+        # it the active window, then setFocus() on the clicked child so
+        # focus is transferred BEFORE any subsequent key events arrive.
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if isinstance(watched, _QWidget) and self._widget_in_editor(watched):
+                # Activate the top-level window first — setFocus() has
+                # no effect if the window isn't active (common when
+                # clicking from Maya's viewport into a docked panel).
+                top = self._target.window()
+                if top:
+                    top.activateWindow()
+
+                # Find the appropriate focus target.
+                focus_target = watched
+                # Walk down to the actual focusable child if the clicked
+                # widget doesn't accept focus (e.g. a QFrame layout).
+                if focus_target.focusPolicy() == Qt.FocusPolicy.NoFocus:
+                    child = focus_target.focusProxy()
+                    if child:
+                        focus_target = child
+                    else:
+                        # No focus proxy — walk children for the first
+                        # widget that accepts focus (depth-first).
+                        for c in focus_target.findChildren(_QWidget):
+                            if c.focusPolicy() != Qt.FocusPolicy.NoFocus:
+                                focus_target = c
+                                break
+
+                focus_target.setFocus(Qt.FocusReason.MouseFocusReason)
+                # Mark that we forced focus so Phase 1 treats the very
+                # next ShortcutOverride as ours even if focusWidget()
+                # hasn't updated yet.
+                self._focus_forced = True
+
         # --- Phase 1: Block Maya's hotkey system entirely ---
         if event.type() == QEvent.Type.ShortcutOverride:
-            if self._focus_in_editor():
+            # Check both the regular focus test AND the forced-focus flag.
+            # After Phase 0 forces focus via setFocus(), Qt may not have
+            # updated focusWidget() yet when the very next ShortcutOverride
+            # arrives in the same event loop iteration.
+            if self._focus_in_editor() or getattr(self, "_focus_forced", False):
+                self._focus_forced = False
                 # Accept ALL shortcut overrides. This prevents Maya's
                 # hotkey system from seeing any key while our editor
                 # has focus. The key will arrive as a normal KeyPress.
@@ -190,7 +273,7 @@ class _MayaHotkeyFilter(QObject):
 
         # --- Phase 2: Manually dispatch modifier combos to our actions ---
         if event.type() == QEvent.Type.KeyPress:
-            if self._focus_in_editor():
+            if self._focus_in_editor() or getattr(self, "_focus_forced", False):
                 key = event.key()
 
                 # Skip pure modifier key presses (Ctrl, Shift, Alt, Meta
@@ -223,7 +306,7 @@ class _MayaHotkeyFilter(QObject):
                     # it as a hotkey like Ctrl+G = Group, etc.).
                     #
                     # For terminal widgets, the key handling lives in the
-                    # NativeTerminalWidget's eventFilter (not in the
+                    # TerminalWidget's eventFilter (not in the
                     # QPlainTextEdit's keyPressEvent), so we need to find
                     # the terminal parent and route through its eventFilter.
                     # For regular text editors, call keyPressEvent directly
@@ -350,6 +433,35 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
         logger.info("MCA Maya Editor window initialized")
 
+    # --- Focus Handling (Maya transition) ------------------------------------
+
+    def event(self, event):
+        """
+        Catch WindowActivate to ensure keyboard focus lands inside our editor.
+
+        When the user clicks into our docked panel from Maya's viewport, Qt
+        fires a WindowActivate event on our top-level window.  At this point
+        ``focusWidget()`` may still point to a Maya widget, so keyboard events
+        (including plain typing) would be intercepted by Maya's hotkey system.
+
+        By forcing focus into our last-focused child widget on activation, we
+        guarantee the hotkey filter's ``_focus_in_editor()`` test passes
+        immediately for the very first keystroke.
+
+        :param QEvent event: The Qt event.
+        :return: True if consumed.
+        :rtype: bool
+        """
+        if event.type() == QEvent.Type.WindowActivate:
+            # If nothing in our tree currently has focus, give it to the
+            # panel (which will forward to the active editor via Qt's
+            # focus chain).
+            if not self._hotkey_filter._focus_in_editor():
+                self._panel.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+                self._hotkey_filter._focus_forced = True
+
+        return super().event(event)
+
     # --- Maya Output Hook ---------------------------------------------------
 
     def _install_output_hook(self):
@@ -407,9 +519,20 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not history or not history.strip():
             return
 
-        # Filter out blank lines — the raw reporter text has empty lines
-        # between entries that create distracting double-spacing.
-        lines = [line for line in history.splitlines() if line.strip()]
+        # Filter out blank lines and internal MCA log messages.  The raw
+        # reporter text has empty lines between entries, and MCA's Python
+        # loggers may have emitted INFO messages before setLevel(WARNING)
+        # took effect (e.g., during initializePlugin).
+        lines = []
+        for line in history.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip internal MCA logger lines — they follow the pattern
+            # "mca_core.module : ..." or "mca_qt.module : ..." etc.
+            if stripped.startswith(("mca_core.", "mca_qt.", "mca_maya.", "mca_editor.")):
+                continue
+            lines.append(line)
         if not lines:
             return
 
@@ -439,6 +562,14 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
         # during focus transitions and nothing is selected in the viewport.
         if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
+            return
+
+        # Suppress internal MCA log messages that leak through Maya's output
+        # system.  Even though we set parent loggers to WARNING, Maya's root
+        # logging handler or sys.stdout/stderr capture can still forward
+        # messages from before the level was set, or from direct print calls.
+        stripped = message.strip()
+        if stripped.startswith(("mca_core.", "mca_qt.", "mca_maya.", "mca_editor.")):
             return
 
         text = message.rstrip()
@@ -676,6 +807,20 @@ def show_mca_editor():
             cmds.workspaceControl(WORKSPACE_CONTROL_NAME, edit=True, restore=True)
             logger.info("MCA Editor workspace control restored (already visible)")
             return
+
+        # Clean up the old panel before destroying the workspace control.
+        # deleteUI does NOT trigger dockCloseEventTriggered, so output
+        # and session data would be lost without this explicit save.
+        if _mca_editor_window is not None:
+            try:
+                _mca_editor_window._panel.save_window_state(
+                    _mca_editor_window._settings
+                )
+                _mca_editor_window._panel.cleanup()
+                logger.info("Cleaned up previous editor panel before reload")
+            except Exception as exc:
+                logger.warning("Pre-reload cleanup failed: %s", exc)
+            _mca_editor_window = None
 
         # Control exists but is not visible — delete it so we can
         # recreate cleanly with a new widget instance.

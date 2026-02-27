@@ -937,7 +937,7 @@ class WorkspacePanel(QWidget):
         """
         Build the context menu for a folder item.
 
-        Actions: New File, New Folder, Reveal in Explorer,
+        Actions: New File, New Folder, Show in Explorer,
         Find in Folder, Paste, Copy Path, Delete.
 
         :param QMenu menu: The menu to populate.
@@ -956,8 +956,8 @@ class WorkspacePanel(QWidget):
             lambda: self._new_folder_in_folder(folder_path)
         )
 
-        # --- Reveal in Explorer ---
-        reveal_action = menu.addAction("Reveal in Explorer")
+        # --- Show in Explorer ---
+        reveal_action = menu.addAction("Show in Explorer")
         reveal_action.triggered.connect(
             lambda: self._reveal_in_explorer(folder_path)
         )
@@ -1000,7 +1000,7 @@ class WorkspacePanel(QWidget):
         """
         Build the context menu for a file item.
 
-        Actions: Open, Reveal in Explorer, Copy, Copy Path, Rename, Delete.
+        Actions: Open, Show in Explorer, Copy, Copy Path, Rename, Delete.
 
         :param QMenu menu: The menu to populate.
         :param QTreeWidgetItem item: The clicked tree item.
@@ -1012,8 +1012,8 @@ class WorkspacePanel(QWidget):
             lambda: self.file_open_requested.emit(file_path)
         )
 
-        # --- Reveal in Explorer ---
-        reveal_action = menu.addAction("Reveal in Explorer")
+        # --- Show in Explorer ---
+        reveal_action = menu.addAction("Show in Explorer")
         reveal_action.triggered.connect(
             lambda: self._reveal_in_explorer(file_path)
         )
@@ -1129,11 +1129,18 @@ class WorkspacePanel(QWidget):
         """
         try:
             if platform.system() == "Windows":
-                # /select highlights the file/folder in Explorer.
-                if os.path.isfile(path):
-                    subprocess.Popen(["explorer", "/select,", path])
+                # Normalize to backslashes — Explorer ignores forward slashes.
+                native_path = os.path.normpath(path)
+                # /select, highlights the file.  Must be passed as a single
+                # command string — list form splits the args and Explorer
+                # can't parse them correctly.
+                if os.path.isfile(native_path):
+                    subprocess.Popen(
+                        'explorer /select,"{}"'.format(native_path),
+                        shell=True,
+                    )
                 else:
-                    subprocess.Popen(["explorer", path])
+                    subprocess.Popen(["explorer", native_path])
             elif platform.system() == "Darwin":
                 subprocess.Popen(["open", "-R", path])
             else:

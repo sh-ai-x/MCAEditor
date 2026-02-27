@@ -56,6 +56,8 @@ class EditorGroupContainer(QWidget):
     editors_changed = Signal()
     cursor_position_changed = Signal(int, int)
     tab_close_requested = Signal(object, int)
+    # Forwarded from EditorGroup when the user double-clicks the tab bar.
+    new_tab_requested = Signal()
 
     def __init__(self, parent=None):
         """
@@ -127,6 +129,9 @@ class EditorGroupContainer(QWidget):
         group.tab_widget().tabCloseRequested.connect(
             lambda idx, g=group: self.tab_close_requested.emit(g, idx)
         )
+
+        # Forward double-click on empty tab bar space for new tab creation.
+        group.new_tab_requested.connect(self.new_tab_requested.emit)
 
         # Install the drag tab manager as event filter on the new group.
         self._drag_manager.install_on_group(group)
@@ -410,6 +415,9 @@ class EditorGroupContainer(QWidget):
         group.tab_widget().tabCloseRequested.connect(
             lambda idx, g=group: self.tab_close_requested.emit(g, idx)
         )
+
+        # Forward double-click on empty tab bar space for new tab creation.
+        group.new_tab_requested.connect(self.new_tab_requested.emit)
 
         # Install drag manager.
         self._drag_manager.install_on_group(group)

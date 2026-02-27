@@ -55,7 +55,7 @@ if PYSIDE_VERSION == 6:
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
         QSplitter, QTabWidget, QTabBar, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
-        QFrame, QMenuBar, QMenu, QToolTip,
+        QFrame, QMenuBar, QMenu, QToolTip, QColorDialog,
     )
 
     # QtCore
@@ -92,7 +92,7 @@ else:
         QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QMainWindow,
         QSplitter, QTabWidget, QTabBar, QToolBar, QStatusBar, QMessageBox,
         QFormLayout, QDialogButtonBox, QInputDialog, QScrollArea,
-        QFrame, QMenuBar, QMenu, QToolTip,
+        QFrame, QMenuBar, QMenu, QToolTip, QColorDialog,
     )
 
     # In PySide2, QAction and QActionGroup live in QtWidgets.

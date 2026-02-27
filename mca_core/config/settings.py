@@ -155,14 +155,6 @@ class MCASettings:
         "py_native_maya_fallback": False,    # Fall back to native Maya auto-complete.
         "py_forced_imports": "",             # Comma-separated forced import modules.
 
-        # --- Pylint ---
-        "pylint_enabled": False,             # Enable Pylint code analysis.
-        "pylint_executable": "",             # Path to pylint binary.
-        "pylint_config": "",                 # Path to pylintrc configuration file.
-        "pylint_additional_paths": "",       # Extra Python paths for Pylint.
-        "pylint_minimal_checkers": True,     # Use minimal checker set (overrides pylintrc).
-        "pylint_log_errors": False,          # Log output errors for debugging.
-
         # --- DCC Connection ---
         "dcc_auto_detect": True,
         "dcc_maya_port": 7001,            # Maya MEL command port

@@ -19,7 +19,7 @@ import logging
 
 from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-    Qt, QEvent,
+    Qt, QEvent, QPoint,
 )
 
 # Module-level logger.
@@ -213,19 +213,23 @@ class QuickOpenPopup(QDialog):
 
     def _position_popup(self):
         """
-        Center the popup horizontally at the top of the parent window,
+        Center the popup horizontally at the top of the parent widget,
         with a small vertical offset (60px from top).
+
+        Uses ``mapToGlobal()`` so the position is correct regardless
+        of whether the parent is a top-level window or a docked panel
+        inside Maya.
         """
         parent = self.parentWidget()
         if not parent:
             return
 
-        # Map the parent's top-left to global coordinates.
-        parent_rect = parent.geometry()
-        parent_center_x = parent_rect.x() + parent_rect.width() // 2
+        # Get the parent's top-left corner in screen (global) coordinates.
+        parent_global_tl = parent.mapToGlobal(QPoint(0, 0))
+        parent_center_x = parent_global_tl.x() + parent.width() // 2
         popup_x = parent_center_x - self.width() // 2
-        # 60px below the top of the parent window.
-        popup_y = parent_rect.y() + 60
+        # 60px below the top of the parent widget.
+        popup_y = parent_global_tl.y() + 60
 
         self.move(popup_x, popup_y)
 
@@ -535,3 +539,64 @@ class GoToSymbolPopup(QuickOpenPopup):
         """
         logger.info("GoToSymbol: jumping to line %d", item_data)
         self._editor.go_to_line(item_data)
+
+
+# =============================================================================
+# GoToDeclarationPopup
+# =============================================================================
+
+class GoToDeclarationPopup(QuickOpenPopup):
+    """
+    Go to Declaration / Find Usages popup (Ctrl+B).
+
+    Shows a list of pre-computed results (definitions or usages) with
+    file path, line number, and the matching line text.  On confirm,
+    navigates to the selected location via the provided callback.
+
+    :param QWidget parent: Parent window.
+    :param list results: List of (filepath, line_number, line_text) tuples.
+    :param callable navigate_callback: ``fn(filepath, line_number)`` to open results.
+    :param str title: Placeholder text describing what the popup shows.
+    """
+
+    def __init__(self, parent, results, navigate_callback, title="Go to Declaration"):
+        """
+        Initialize the Go to Declaration popup.
+
+        :param QWidget parent: Parent window for positioning.
+        :param list results: Pre-computed (filepath, line_number, line_text) tuples.
+        :param callable navigate_callback: Called with (filepath, line_number) on confirm.
+        :param str title: Placeholder / title text for the filter field.
+        """
+        super().__init__(parent, placeholder=title)
+        self._results = results
+        self._navigate_callback = navigate_callback
+
+    def _get_items(self):
+        """
+        Convert pre-computed results to popup items.
+
+        :return: List of (display_text, search_text, item_data) tuples.
+        :rtype: list
+        """
+        items = []
+
+        for filepath, line_num, line_text in self._results:
+            # Show just the filename + line number, with the matched text.
+            filename = os.path.basename(filepath)
+            display = "{}:{}  {}".format(filename, line_num, line_text.strip()[:120])
+            search_text = filename + " " + line_text
+            # item_data is the (filepath, line_number) tuple for navigation.
+            items.append((display, search_text, (filepath, line_num)))
+
+        return items
+
+    def _on_confirm(self, item_data):
+        """
+        Navigate to the confirmed location.
+
+        :param tuple item_data: (filepath, line_number) to navigate to.
+        """
+        filepath, line_num = item_data
+        logger.info("GoToDeclaration: navigating to %s:%d", filepath, line_num)
+        self._navigate_callback(filepath, line_num)

@@ -42,8 +42,12 @@ def main():
     the Qt event loop.
     """
     # Configure logging for the entire application.
+    # Root logger stays at WARNING so routine MCA INFO/DEBUG messages
+    # don't clutter the output window.  Warnings and errors still appear.
+    # To enable verbose output for debugging, run:
+    #     import logging; logging.getLogger("mca_core").setLevel(logging.DEBUG)
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )

@@ -236,6 +236,10 @@ class MCAMainWindow(QMainWindow):
         # Override mode defaults with user's last-saved UI state.
         self._restore_ui_state()
 
+        # Splitter setSizes() during __init__ can be overridden when Qt
+        # performs the first layout pass on show.  Flag for deferred re-apply.
+        self._splitter_restore_pending = True
+
         # Restore window geometry (position and size) from last session.
         saved_geom = self._settings.get("window_geometry")
         if saved_geom:
@@ -1129,6 +1133,53 @@ class MCAMainWindow(QMainWindow):
             self._simple_mode_action.setChecked(False)
             self._advanced_mode_action.setChecked(True)
 
+    def showEvent(self, event):
+        """
+        Re-apply saved splitter sizes after the first show.
+
+        Qt's initial layout pass can override ``setSizes()`` calls made
+        during ``__init__`` before the widget has a non-zero size.  This
+        one-shot re-apply ensures the user's last-saved positions stick.
+
+        :param QShowEvent event: The show event.
+        """
+        super().showEvent(event)
+
+        if getattr(self, "_splitter_restore_pending", False):
+            self._splitter_restore_pending = False
+            # Defer slightly so the layout pass fully completes first.
+            QTimer.singleShot(0, self._restore_splitter_sizes)
+
+    def _restore_splitter_sizes(self):
+        """
+        Re-apply saved splitter sizes from settings.
+
+        Called once after the first show event to ensure sizes survive
+        Qt's initial layout pass.
+        """
+        s = self._settings
+
+        saved_main = s.get("splitter_sizes")
+        if saved_main:
+            try:
+                self._main_splitter.setSizes([int(v) for v in saved_main])
+            except (TypeError, ValueError):
+                pass
+
+        saved_center = s.get("center_splitter_sizes")
+        if saved_center:
+            try:
+                self._center_splitter.setSizes([int(v) for v in saved_center])
+            except (TypeError, ValueError):
+                pass
+
+        saved_sidebar = s.get("sidebar_splitter_sizes")
+        if saved_sidebar:
+            try:
+                self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
+            except (TypeError, ValueError):
+                pass
+
     def _restore_ui_state(self):
         """
         Restore saved UI state from settings, overriding mode defaults.
@@ -1153,6 +1204,14 @@ class MCAMainWindow(QMainWindow):
         if saved_center:
             try:
                 self._center_splitter.setSizes([int(v) for v in saved_center])
+            except (TypeError, ValueError):
+                pass
+
+        # --- Sidebar internal splitter (Workspace | Open Editors | Outline) ---
+        saved_sidebar = s.get("sidebar_splitter_sizes")
+        if saved_sidebar:
+            try:
+                self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
             except (TypeError, ValueError):
                 pass
 
@@ -2222,6 +2281,10 @@ class MCAMainWindow(QMainWindow):
         """
         s = self._settings
 
+        # Build the color scheme once and share across all editors.
+        from mca_core.config.color_scheme import build_scheme_dict
+        scheme = build_scheme_dict(s)
+
         # Read the relevant appearance/behavior settings.
         font_family = s.get("font_family")
         font_size = s.get("font_size")
@@ -2236,6 +2299,8 @@ class MCAMainWindow(QMainWindow):
             editor.setTabStopDistance(
                 editor.fontMetrics().horizontalAdvance(" ") * tab_size
             )
+            # Push the color scheme so highlighters pick up any changes.
+            editor.set_color_scheme(scheme)
 
         # Apply word wrap to the output window.
         output_wrap = s.get("output_word_wrap")
@@ -2854,6 +2919,7 @@ class MCAMainWindow(QMainWindow):
         # Persist splitter positions and panel visibility.
         self._settings.set("splitter_sizes", self._main_splitter.sizes())
         self._settings.set("center_splitter_sizes", self._center_splitter.sizes())
+        self._settings.set("sidebar_splitter_sizes", self._sidebar.splitter_sizes())
         self._settings.set("output_visible", self._output.isVisible())
         self._settings.set("sidebar_visible", self._sidebar.isVisible())
         self._settings.set("ai_panel_visible", self._ai_panel.isVisible())

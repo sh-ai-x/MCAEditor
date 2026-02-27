@@ -33,16 +33,24 @@ class PythonHighlighter(QSyntaxHighlighter):
     Highlights keywords, builtins, decorators, numbers, strings,
     function/class definitions, function calls, operators, and comments.
 
+    An optional ``color_scheme`` dict allows external customization of
+    token colors and styles.  Keys are ``("python", token_key)`` tuples;
+    values are ``{"fg": str, "bold": bool, "italic": bool}``.
+
     :param QTextDocument parent: The document to highlight.
+    :param dict color_scheme: Optional color scheme override dict.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, color_scheme=None):
         """
         Initialize the highlighter and build all rules.
 
         :param QTextDocument parent: The document to highlight.
+        :param dict color_scheme: Optional color scheme override dict.
         """
         super().__init__(parent)
+        # Store the color scheme for rule building and multiline strings.
+        self._color_scheme = color_scheme or {}
         self._rules = []
         self._build_rules()
 
@@ -64,10 +72,28 @@ class PythonHighlighter(QSyntaxHighlighter):
             fmt.setFontItalic(True)
         return fmt
 
+    def _token_style(self, token_key, default_fg, default_bold=False, default_italic=False):
+        """
+        Look up a token's style from the color scheme with hardcoded fallback.
+
+        :param str token_key: Token identifier (e.g. ``"keyword"``).
+        :param str default_fg: Default foreground hex color.
+        :param bool default_bold: Default bold flag.
+        :param bool default_italic: Default italic flag.
+        :return: Tuple of (fg, bold, italic).
+        :rtype: tuple
+        """
+        style = self._color_scheme.get(("python", token_key), {})
+        fg = style.get("fg", default_fg)
+        bold = style.get("bold", default_bold)
+        italic = style.get("italic", default_italic)
+        return fg, bold, italic
+
     def _build_rules(self):
         """Build all syntax highlighting rules as (regex, format) pairs."""
         # --- Keywords ---
-        keyword_fmt = self._make_format("#569cd6", bold=True)
+        fg, bold, italic = self._token_style("keyword", "#569cd6", True)
+        keyword_fmt = self._make_format(fg, bold, italic)
         keywords = [
             "and", "as", "assert", "async", "await", "break", "class",
             "continue", "def", "del", "elif", "else", "except", "finally",
@@ -79,7 +105,8 @@ class PythonHighlighter(QSyntaxHighlighter):
             self._rules.append((re.compile(r"\b{}\b".format(kw)), keyword_fmt))
 
         # --- Builtins ---
-        builtin_fmt = self._make_format("#4ec9b0")
+        fg, bold, italic = self._token_style("builtin", "#4ec9b0")
+        builtin_fmt = self._make_format(fg, bold, italic)
         builtins = [
             "True", "False", "None", "self", "cls",
             "print", "range", "len", "type", "int", "float", "str",
@@ -93,37 +120,45 @@ class PythonHighlighter(QSyntaxHighlighter):
             self._rules.append((re.compile(r"\b{}\b".format(b)), builtin_fmt))
 
         # --- Decorators ---
-        decorator_fmt = self._make_format("#d7ba7d")
+        fg, bold, italic = self._token_style("decorator", "#d7ba7d")
+        decorator_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"@\w+"), decorator_fmt))
 
         # --- Numbers (decimal and hex) ---
-        number_fmt = self._make_format("#b5cea8")
+        fg, bold, italic = self._token_style("number", "#b5cea8")
+        number_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\b\d+\.?\d*([eE][+-]?\d+)?\b"), number_fmt))
         self._rules.append((re.compile(r"\b0[xX][0-9a-fA-F]+\b"), number_fmt))
 
         # --- Function definitions (highlight the name after 'def') ---
-        func_fmt = self._make_format("#dcdcaa")
+        fg, bold, italic = self._token_style("funcdef", "#dcdcaa")
+        func_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\bdef\s+(\w+)"), func_fmt))
 
         # --- Class definitions (highlight the name after 'class') ---
-        class_fmt = self._make_format("#4ec9b0", bold=True)
+        fg, bold, italic = self._token_style("classdef", "#4ec9b0", True)
+        class_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\bclass\s+(\w+)"), class_fmt))
 
         # --- Function calls (word followed by opening paren) ---
-        call_fmt = self._make_format("#dcdcaa")
+        fg, bold, italic = self._token_style("funccall", "#dcdcaa")
+        call_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\b(\w+)\s*\("), call_fmt))
 
         # --- Operators ---
-        operator_fmt = self._make_format("#d4d4d4")
+        fg, bold, italic = self._token_style("operator", "#d4d4d4")
+        operator_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"[+\-*/%=<>!&|^~]"), operator_fmt))
 
         # --- Single-line strings (double and single quoted, with f-string support) ---
-        string_fmt = self._make_format("#ce9178")
+        fg, bold, italic = self._token_style("string", "#ce9178")
+        string_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r'f?"[^"\\]*(\\.[^"\\]*)*"'), string_fmt))
         self._rules.append((re.compile(r"f?'[^'\\]*(\\.[^'\\]*)*'"), string_fmt))
 
         # --- Comments (must be last to override other rules) ---
-        comment_fmt = self._make_format("#6a9955", italic=True)
+        fg, bold, italic = self._token_style("comment", "#6a9955", False, True)
+        comment_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"#[^\n]*"), comment_fmt))
 
     def highlightBlock(self, text):
@@ -156,7 +191,9 @@ class PythonHighlighter(QSyntaxHighlighter):
 
         :param str text: The text content of the current block.
         """
-        string_fmt = self._make_format("#ce9178")
+        # Use the color scheme for multi-line string color.
+        fg, bold, italic = self._token_style("multiline_string", "#ce9178")
+        string_fmt = self._make_format(fg, bold, italic)
 
         # State: 0 = normal, 1 = in triple double-quote, 2 = in triple single-quote
         state = self.previousBlockState()
@@ -209,16 +246,24 @@ class MELHighlighter(QSyntaxHighlighter):
     Highlights keywords, variables, numbers, strings, proc definitions,
     and comments.
 
+    An optional ``color_scheme`` dict allows external customization of
+    token colors and styles.  Keys are ``("mel", token_key)`` tuples;
+    values are ``{"fg": str, "bold": bool, "italic": bool}``.
+
     :param QTextDocument parent: The document to highlight.
+    :param dict color_scheme: Optional color scheme override dict.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, color_scheme=None):
         """
         Initialize the MEL highlighter.
 
         :param QTextDocument parent: The document to highlight.
+        :param dict color_scheme: Optional color scheme override dict.
         """
         super().__init__(parent)
+        # Store the color scheme for rule building.
+        self._color_scheme = color_scheme or {}
         self._rules = []
         self._build_rules()
 
@@ -240,10 +285,28 @@ class MELHighlighter(QSyntaxHighlighter):
             fmt.setFontItalic(True)
         return fmt
 
+    def _token_style(self, token_key, default_fg, default_bold=False, default_italic=False):
+        """
+        Look up a token's style from the color scheme with hardcoded fallback.
+
+        :param str token_key: Token identifier (e.g. ``"keyword"``).
+        :param str default_fg: Default foreground hex color.
+        :param bool default_bold: Default bold flag.
+        :param bool default_italic: Default italic flag.
+        :return: Tuple of (fg, bold, italic).
+        :rtype: tuple
+        """
+        style = self._color_scheme.get(("mel", token_key), {})
+        fg = style.get("fg", default_fg)
+        bold = style.get("bold", default_bold)
+        italic = style.get("italic", default_italic)
+        return fg, bold, italic
+
     def _build_rules(self):
         """Build MEL-specific syntax highlighting rules."""
         # --- Keywords ---
-        keyword_fmt = self._make_format("#569cd6", bold=True)
+        fg, bold, italic = self._token_style("keyword", "#569cd6", True)
+        keyword_fmt = self._make_format(fg, bold, italic)
         keywords = [
             "if", "else", "for", "while", "do", "in", "break", "continue",
             "return", "switch", "case", "default", "proc", "global", "local",
@@ -254,23 +317,28 @@ class MELHighlighter(QSyntaxHighlighter):
             self._rules.append((re.compile(r"\b{}\b".format(kw)), keyword_fmt))
 
         # --- MEL variables ($ prefix) ---
-        var_fmt = self._make_format("#9cdcfe")
+        fg, bold, italic = self._token_style("variable", "#9cdcfe")
+        var_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\$\w+"), var_fmt))
 
         # --- Numbers ---
-        number_fmt = self._make_format("#b5cea8")
+        fg, bold, italic = self._token_style("number", "#b5cea8")
+        number_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\b\d+\.?\d*\b"), number_fmt))
 
         # --- Strings ---
-        string_fmt = self._make_format("#ce9178")
+        fg, bold, italic = self._token_style("string", "#ce9178")
+        string_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), string_fmt))
 
         # --- Proc definitions (highlight the procedure name) ---
-        proc_fmt = self._make_format("#dcdcaa")
+        fg, bold, italic = self._token_style("procdef", "#dcdcaa")
+        proc_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"\bproc\s+\w*\s*(\w+)"), proc_fmt))
 
         # --- Comments (// style) ---
-        comment_fmt = self._make_format("#6a9955", italic=True)
+        fg, bold, italic = self._token_style("comment", "#6a9955", False, True)
+        comment_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"//[^\n]*"), comment_fmt))
 
     def highlightBlock(self, text):
@@ -378,6 +446,7 @@ class MCACodeEditor(QPlainTextEdit):
 
         # --- Configuration ---
         self._language = "python"
+        self._color_scheme = None
         self._file_path = None
         self._is_temporary = True
         self._tab_size = 4
@@ -464,14 +533,36 @@ class MCACodeEditor(QPlainTextEdit):
             self._highlighter.setDocument(None)
 
         if self._language == "python":
-            self._highlighter = PythonHighlighter(self.document())
+            self._highlighter = PythonHighlighter(
+                self.document(), color_scheme=self._color_scheme
+            )
         elif self._language == "mel":
-            self._highlighter = MELHighlighter(self.document())
+            self._highlighter = MELHighlighter(
+                self.document(), color_scheme=self._color_scheme
+            )
         elif self._language == "text":
             # Plain text mode — no syntax highlighting.
             self._highlighter = None
         else:
             self._highlighter = None
+
+    def set_color_scheme(self, scheme_dict):
+        """
+        Set the color scheme and rebuild the syntax highlighter.
+
+        :param dict scheme_dict: Color scheme keyed by ``(lang, token)``
+            with ``{fg, bold, italic}`` values.
+        """
+        self._color_scheme = scheme_dict
+        self.rebuild_highlighter()
+
+    def rebuild_highlighter(self):
+        """
+        Detach the current highlighter and create a new one with the
+        current language and color scheme.  Used after color scheme changes.
+        """
+        # Re-use set_language which already handles detach + create.
+        self.set_language(self._language)
 
     @property
     def language(self):
@@ -1160,10 +1251,22 @@ class MCACodeEditor(QPlainTextEdit):
                     QTextCursor.MoveOperation.Right,
                     QTextCursor.MoveMode.KeepAnchor
                 )
-                if next_cursor.selectedText() == event.text():
+                next_char = next_cursor.selectedText()
+                if next_char == event.text():
                     cursor.movePosition(QTextCursor.MoveOperation.Right)
                     self.setTextCursor(cursor)
                     return
+
+                # Only auto-pair when the next character is "safe" — whitespace,
+                # closing bracket, comma, semicolon, colon, or end of line.
+                # If an alphanumeric character or underscore follows, the user
+                # is likely adding quotes around existing text, so just insert
+                # the single quote without a closing pair (matches VS Code /
+                # PyCharm behavior).
+                if next_char and next_char not in " \t\r\n)]},:;>":
+                    super().keyPressEvent(event)
+                    return
+
             # Insert the quote and its closing pair.
             super().keyPressEvent(event)
             self.insertPlainText(event.text())

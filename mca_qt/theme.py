@@ -109,18 +109,23 @@ GLOBAL_STYLESHEET = """
     }
     QSplitter::handle:horizontal { width: 2px; }
     QSplitter::handle:vertical { height: 2px; }
-    QTreeView {
+    QTreeView, QTreeWidget, QListView, QListWidget {
         background-color: #252526;
         border: none;
         outline: none;
     }
-    QTreeView::item {
+    QTreeView::item, QTreeWidget::item,
+    QListView::item, QListWidget::item {
         padding: 3px 0px;
+        outline: none;
+        border: none;
     }
-    QTreeView::item:selected {
+    QTreeView::item:selected, QTreeWidget::item:selected,
+    QListView::item:selected, QListWidget::item:selected {
         background-color: #094771;
     }
-    QTreeView::item:hover:!selected {
+    QTreeView::item:hover:!selected, QTreeWidget::item:hover:!selected,
+    QListView::item:hover:!selected, QListWidget::item:hover:!selected {
         background-color: #2a2d2e;
     }
     QScrollBar:vertical {

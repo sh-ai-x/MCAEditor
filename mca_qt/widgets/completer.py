@@ -19,7 +19,7 @@ import logging
 
 from mca_qt.qt_compat import (
     QFrame, QListWidget, QListWidgetItem, QVBoxLayout,
-    QTimer, Qt, QPoint, QWidget,
+    QTimer, Qt, QPoint, QWidget, QApplication, QEvent, QObject,
 )
 
 # Module-level logger.
@@ -309,6 +309,16 @@ class CodeCompleter(QFrame):
         self._delay_timer.setSingleShot(True)
         self._delay_timer.timeout.connect(self._fetch_and_show)
 
+        # --- Dismiss on click-away ---
+        # In Maya's embedded Qt, focusOutEvent and focusChanged don't
+        # always fire when the user clicks a different panel.  An
+        # application-level event filter catches ALL mouse presses and
+        # dismisses the popup if the click lands outside the completer
+        # and the editor.
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
     # --- Properties -----------------------------------------------------------
 
     @property
@@ -351,6 +361,38 @@ class CodeCompleter(QFrame):
         self._items = []
         self._list.clear()
         self.hide()
+
+    def eventFilter(self, obj, event):
+        """
+        Application-level event filter to dismiss on click-away.
+
+        Catches mouse presses anywhere in the application.  If the
+        click is outside the completer popup and the editor, dismiss.
+
+        :param QObject obj: The object that received the event.
+        :param QEvent event: The event.
+        :return: False (never consume the event).
+        :rtype: bool
+        """
+        if not self._active:
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonPress:
+            # Check if the click target is inside the completer or editor.
+            if obj is self or obj is self._list or obj is self._editor:
+                return False
+            # Also check if obj is a child of the completer (scrollbar, etc.).
+            widget = obj if isinstance(obj, QWidget) else None
+            if widget:
+                parent = widget.parent()
+                while parent:
+                    if parent is self or parent is self._editor:
+                        return False
+                    parent = parent.parent()
+            # Click landed elsewhere — dismiss the popup.
+            self.dismiss()
+
+        return False
 
     def accept_completion(self):
         """

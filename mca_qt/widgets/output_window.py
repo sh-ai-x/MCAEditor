@@ -16,7 +16,7 @@ from datetime import datetime
 
 from mca_qt.qt_compat import (
     QPlainTextEdit, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    Qt, Signal, QEvent, QComboBox, QFileDialog, QMessageBox,
+    Qt, Signal, QEvent, QComboBox, QFileDialog, QMessageBox, QMenu,
     QColor, QTextCharFormat, QFont, QTextCursor, QLineEdit, QTimer, QTextEdit,
 )
 
@@ -453,6 +453,9 @@ class _OutputTextEdit(QPlainTextEdit):
     # Emitted when the user Ctrl+scrolls to zoom. +1 = zoom in, -1 = zoom out.
     zoom_requested = Signal(int)
 
+    # Emitted when the user selects "Clear" from the right-click context menu.
+    clear_requested = Signal()
+
     def __init__(self, parent=None):
         """
         Initialize with read-only mode and text selection flags.
@@ -469,6 +472,37 @@ class _OutputTextEdit(QPlainTextEdit):
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
+
+        # Use a custom context menu so we can add Copy, Select All, Clear.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, pos):
+        """
+        Show a right-click context menu with Copy, Select All, and Clear.
+
+        :param QPoint pos: The widget-local position of the right-click.
+        """
+        menu = QMenu(self)
+
+        # Copy — only enabled when text is selected.
+        copy_action = menu.addAction("Copy")
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.setEnabled(self.textCursor().hasSelection())
+        copy_action.triggered.connect(self.copy)
+
+        # Select All.
+        select_all_action = menu.addAction("Select All")
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.triggered.connect(self.selectAll)
+
+        menu.addSeparator()
+
+        # Clear — delegates to parent OutputWindow via signal.
+        clear_action = menu.addAction("Clear")
+        clear_action.triggered.connect(self.clear_requested.emit)
+
+        menu.exec(self.mapToGlobal(pos))
 
     def wheelEvent(self, event):
         """
@@ -690,6 +724,8 @@ class OutputWindow(QWidget):
         # to prevent Maya's hotkey system from intercepting these operations.
         self._output = _OutputTextEdit()
         self._output.setMaximumBlockCount(10000)  # Prevent unbounded memory growth
+        # Wire the context menu "Clear" action to our clear() method.
+        self._output.clear_requested.connect(self.clear)
 
         # Monospace font for consistent output formatting.
         font = QFont("JetBrains Mono, Consolas, Courier New", 11)

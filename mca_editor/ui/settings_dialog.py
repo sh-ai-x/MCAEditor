@@ -22,10 +22,11 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QListWidget,
     QStackedWidget, QGroupBox, QCheckBox, QSpinBox, QComboBox,
     QLabel, QLineEdit, QPushButton, QListWidgetItem, QFileDialog,
-    QAbstractItemView, QFontComboBox, QTextEdit
+    QAbstractItemView, QFontComboBox, QTextEdit, QPlainTextEdit,
+    QTreeWidget, QTreeWidgetItem, QColorDialog,
 )
 from PySide6.QtCore import Qt, QSize, Signal, QKeyCombination
-from PySide6.QtGui import QFont, QFontDatabase, QKeySequence
+from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QColor
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -574,24 +575,23 @@ class SettingsDialog(QDialog):
     # --- Fonts and Colors Page ----------------------------------------
 
     def _build_fonts_colors_page(self):
-        """Build the Fonts and Colors page (font picker, display items, color pickers)."""
+        """
+        Build the Appearance page — PyCharm-style color scheme editor.
+
+        Layout: font picker at top, then a token tree + style controls
+        side-by-side, then a live preview with language selector,
+        and a Restore Defaults button at the bottom.
+        """
+        from mca_core.config.color_scheme import (
+            TOKEN_DEFAULTS, get_tokens_for_language, build_scheme_dict,
+        )
+
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
-        # "Show settings for" dropdown.
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Show settings for:"))
-        self._fc_target_combo = QComboBox()
-        self._fc_target_combo.addItems(["Code Editor", "Output"])
-        top_row.addWidget(self._fc_target_combo, 1)
-        self._fc_defaults_btn = QPushButton("Use Defaults")
-        self._fc_defaults_btn.setFixedWidth(100)
-        top_row.addWidget(self._fc_defaults_btn)
-        layout.addLayout(top_row)
-
-        # Font row.
+        # --- Font picker row ---
         font_row = QHBoxLayout()
         font_row.addWidget(QLabel("Font:"))
         self._fc_font_combo = QFontComboBox()
@@ -608,80 +608,101 @@ class SettingsDialog(QDialog):
         layout.addLayout(font_row)
 
         # Show only fixed width checkbox.
-        self._chk_fixed_width = QCheckBox("Show only fixed width")
+        self._chk_fixed_width = QCheckBox("Monospaced fonts only")
         self._chk_fixed_width.stateChanged.connect(self._on_fixed_width_changed)
         layout.addWidget(self._chk_fixed_width)
 
-        # Display items list + color pickers side-by-side.
-        items_row = QHBoxLayout()
-        items_row.setSpacing(12)
+        # --- Token tree + style controls side-by-side ---
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(12)
 
-        # Display items list.
-        self._display_items_list = QListWidget()
-        self._display_items_list.setFixedWidth(220)
-        self._display_items_list.setStyleSheet(
-            "QListWidget { background-color: #2d2d30; border: 1px solid #3f3f46; }"
-            "QListWidget::item { padding: 3px 6px; color: #d0d0d0; }"
-            "QListWidget::item:selected { background-color: #094771; color: #ffffff; }"
+        # Token tree (left side).
+        self._token_tree = QTreeWidget()
+        self._token_tree.setHeaderHidden(True)
+        self._token_tree.setFixedWidth(220)
+        self._token_tree.setStyleSheet(
+            "QTreeWidget { background-color: #2d2d30; border: 1px solid #3f3f46; color: #d0d0d0; }"
+            "QTreeWidget::item { padding: 3px 6px; }"
+            "QTreeWidget::item:selected { background-color: #094771; color: #ffffff; }"
         )
-        # All the display item categories matching CE2.
-        display_items = [
-            "Plain Text", "Selected Text", "Matching Selection",
-            "Find/Replace Selected", "Find/Replace Matching",
-            "Find/Replace Selection", "Current Line", "Matching Braces",
-            "Whitespaces", "Indentation Guides", "Line Numbers", "Gutter",
-            "MEL Keywords", "MEL Commands", "MEL Strings",
-            "Python Keywords", "Python Built-ins", "Python Strings",
-            "Python Decorators", "Python Numbers", "Comments",
-        ]
-        for item_name in display_items:
-            self._display_items_list.addItem(item_name)
-        items_row.addWidget(self._display_items_list)
 
-        # Right side: Foreground, Background, Bold/Italic/Underline, Sample.
+        # Build the tree: one top-level node per language, children are tokens.
+        for lang, lang_label in [("python", "Python"), ("mel", "MEL")]:
+            parent_item = QTreeWidgetItem(self._token_tree, [lang_label])
+            parent_item.setExpanded(True)
+            for token_key, display_name in get_tokens_for_language(lang):
+                child = QTreeWidgetItem(parent_item, [display_name])
+                child.setData(0, Qt.ItemDataRole.UserRole, (lang, token_key))
+
+        self._token_tree.currentItemChanged.connect(self._on_token_selected)
+        mid_row.addWidget(self._token_tree)
+
+        # Style controls (right side).
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
 
-        # Foreground color.
+        # Foreground color button.
         right_col.addWidget(QLabel("Foreground:"))
         self._fg_color_btn = QPushButton()
         self._fg_color_btn.setFixedSize(80, 24)
         self._fg_color_btn.setStyleSheet("background-color: #d0d0d0; border: 1px solid #555;")
+        self._fg_color_btn.clicked.connect(self._on_fg_color_clicked)
         right_col.addWidget(self._fg_color_btn)
 
-        # Background color.
-        right_col.addWidget(QLabel("Background:"))
-        self._bg_color_btn = QPushButton()
-        self._bg_color_btn.setFixedSize(80, 24)
-        self._bg_color_btn.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555;")
-        right_col.addWidget(self._bg_color_btn)
-
-        # Bold / Italic / Underline checkboxes.
-        style_row = QHBoxLayout()
+        # Bold and Italic checkboxes.
         self._chk_bold = QCheckBox("Bold")
-        self._chk_italic = QCheckBox("Italic")
-        self._chk_underline = QCheckBox("Underline")
-        style_row.addWidget(self._chk_bold)
-        style_row.addWidget(self._chk_italic)
-        style_row.addWidget(self._chk_underline)
-        right_col.addLayout(style_row)
+        self._chk_bold.stateChanged.connect(self._on_token_style_changed)
+        right_col.addWidget(self._chk_bold)
 
-        # Sample preview.
-        right_col.addWidget(QLabel("Sample:"))
-        self._sample_preview = QLabel("ij = I:oO(0xB8l1);")
-        self._sample_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sample_preview.setFixedHeight(40)
-        self._sample_preview.setStyleSheet(
-            "background-color: #1e1e1e; color: #d0d0d0; border: 1px solid #3f3f46;"
-            "font-family: Consolas; font-size: 12px; padding: 8px;"
-        )
-        right_col.addWidget(self._sample_preview)
+        self._chk_italic = QCheckBox("Italic")
+        self._chk_italic.stateChanged.connect(self._on_token_style_changed)
+        right_col.addWidget(self._chk_italic)
 
         right_col.addStretch()
-        items_row.addLayout(right_col)
+        mid_row.addLayout(right_col)
 
-        layout.addLayout(items_row, 1)
+        layout.addLayout(mid_row, 1)
+
+        # --- Live preview section ---
+        preview_header = QHBoxLayout()
+        preview_header.addWidget(QLabel("Preview:"))
+        self._preview_lang_combo = QComboBox()
+        self._preview_lang_combo.addItems(["Python", "MEL"])
+        self._preview_lang_combo.currentIndexChanged.connect(self._on_preview_lang_changed)
+        preview_header.addWidget(self._preview_lang_combo)
+        preview_header.addStretch()
+        layout.addLayout(preview_header)
+
+        # Read-only code preview.
+        self._color_preview = QPlainTextEdit()
+        self._color_preview.setReadOnly(True)
+        self._color_preview.setMinimumHeight(120)
+        self._color_preview.setStyleSheet(
+            "QPlainTextEdit {"
+            "  background-color: #1e1e1e; color: #d4d4d4;"
+            "  border: 1px solid #3f3f46;"
+            "  font-family: Consolas, 'Courier New', monospace; font-size: 11px;"
+            "  selection-background-color: #264f78;"
+            "}"
+        )
+        layout.addWidget(self._color_preview)
+
+        # --- Restore Defaults button ---
+        restore_row = QHBoxLayout()
+        restore_row.addStretch()
+        self._restore_colors_btn = QPushButton("Restore Defaults")
+        self._restore_colors_btn.setFixedWidth(120)
+        self._restore_colors_btn.clicked.connect(self._on_restore_color_defaults)
+        restore_row.addWidget(self._restore_colors_btn)
+        layout.addLayout(restore_row)
+
+        # --- Internal state ---
+        self._working_scheme = {}
+        self._scheme_updating = False
+
         self._pages.addWidget(page)
+
+    # --- Appearance Page Handlers ---
 
     def _on_fixed_width_changed(self, state):
         """
@@ -693,6 +714,153 @@ class SettingsDialog(QDialog):
             self._fc_font_combo.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts)
         else:
             self._fc_font_combo.setFontFilters(QFontComboBox.FontFilter.AllFonts)
+
+    def _on_token_selected(self, current, previous):
+        """
+        Update the foreground button and style checkboxes when a token is selected.
+
+        :param QTreeWidgetItem current: The newly selected tree item.
+        :param QTreeWidgetItem previous: The previously selected tree item.
+        """
+        if current is None:
+            return
+
+        key = current.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+
+        self._scheme_updating = True
+        fg = style.get("fg", "#d4d4d4")
+        self._fg_color_btn.setStyleSheet(
+            "background-color: {}; border: 1px solid #555;".format(fg)
+        )
+        self._chk_bold.setChecked(style.get("bold", False))
+        self._chk_italic.setChecked(style.get("italic", False))
+        self._scheme_updating = False
+
+    def _on_fg_color_clicked(self):
+        """Open a QColorDialog for the selected token's foreground color."""
+        item = self._token_tree.currentItem()
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+        current_color = QColor(style.get("fg", "#d4d4d4"))
+
+        color = QColorDialog.getColor(current_color, self, "Select Foreground Color")
+        if color.isValid():
+            style["fg"] = color.name()
+            self._working_scheme[(lang, token_key)] = style
+            self._fg_color_btn.setStyleSheet(
+                "background-color: {}; border: 1px solid #555;".format(color.name())
+            )
+            self._refresh_color_preview()
+
+    def _on_token_style_changed(self, state):
+        """
+        Handle bold/italic checkbox changes for the current token.
+
+        :param int state: The checkbox state value.
+        """
+        if self._scheme_updating:
+            return
+
+        item = self._token_tree.currentItem()
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+        style["bold"] = self._chk_bold.isChecked()
+        style["italic"] = self._chk_italic.isChecked()
+        self._working_scheme[(lang, token_key)] = style
+        self._refresh_color_preview()
+
+    def _on_preview_lang_changed(self, index):
+        """
+        Switch the preview sample code when the language combo changes.
+
+        :param int index: The new combo box index.
+        """
+        self._refresh_color_preview()
+
+    def _on_restore_color_defaults(self):
+        """Reset the working color scheme to TOKEN_DEFAULTS and refresh."""
+        from mca_core.config.color_scheme import TOKEN_DEFAULTS
+
+        self._working_scheme = {}
+        for (lang, token_key), info in TOKEN_DEFAULTS.items():
+            self._working_scheme[(lang, token_key)] = {
+                "fg": info["fg"],
+                "bold": info["bold"],
+                "italic": info["italic"],
+            }
+
+        item = self._token_tree.currentItem()
+        if item is not None:
+            self._on_token_selected(item, None)
+        self._refresh_color_preview()
+        logger.info("Color scheme reset to defaults in settings dialog")
+
+    def _refresh_color_preview(self):
+        """Rebuild the syntax highlighter on the preview with current scheme."""
+        from mca_editor.ui.code_editor import PythonHighlighter, MELHighlighter
+
+        lang_index = self._preview_lang_combo.currentIndex()
+
+        if hasattr(self, "_preview_highlighter") and self._preview_highlighter:
+            self._preview_highlighter.setDocument(None)
+
+        if lang_index == 0:
+            sample = (
+                "import os\n"
+                "\n"
+                "class FileCounter:\n"
+                '    """Count files and their sizes."""\n'
+                "\n"
+                "    @staticmethod\n"
+                "    def count_files(path, threshold=1024):\n"
+                "        total = 0\n"
+                "        for name in os.listdir(path):\n"
+                "            size = os.path.getsize(name)\n"
+                "            if size >= threshold:\n"
+                "                total += size\n"
+                '        print(f"Total: {total}")\n'
+                "        return total\n"
+            )
+            self._color_preview.setPlainText(sample)
+            self._preview_highlighter = PythonHighlighter(
+                self._color_preview.document(), color_scheme=self._working_scheme
+            )
+        else:
+            sample = (
+                "// Scatter objects on a surface\n"
+                "global proc scatterObjects(string $surface, int $count) {\n"
+                "    float $offset = 0.5;\n"
+                "    for ($i = 0; $i < $count; $i++) {\n"
+                '        string $obj = `polySphere -r $offset`;\n'
+                "        float $u = rand(1.0);\n"
+                "        float $v = rand(1.0);\n"
+                "        // Attach to surface point\n"
+                "        if ($u > 0.5)\n"
+                '            print("placed");\n'
+                "    }\n"
+                "}\n"
+            )
+            self._color_preview.setPlainText(sample)
+            self._preview_highlighter = MELHighlighter(
+                self._color_preview.document(), color_scheme=self._working_scheme
+            )
 
     # --- Code Editor Page ---------------------------------------------
 
@@ -1082,6 +1250,15 @@ class SettingsDialog(QDialog):
         self._fc_font_size.setCurrentText(str(s.get("font_size")))
         self._chk_fixed_width.setChecked(s.get("show_fixed_width_only"))
 
+        # --- Color scheme ---
+        from mca_core.config.color_scheme import build_scheme_dict
+        self._working_scheme = build_scheme_dict(s)
+        self._preview_highlighter = None
+        self._refresh_color_preview()
+        first_lang = self._token_tree.topLevelItem(0)
+        if first_lang and first_lang.childCount() > 0:
+            self._token_tree.setCurrentItem(first_lang.child(0))
+
         # --- Code Editor ---
         self._chk_backspace_tab.setChecked(s.get("backspace_to_tab_stop"))
         self._chk_indent_guides.setChecked(s.get("show_indent_guides"))
@@ -1180,6 +1357,16 @@ class SettingsDialog(QDialog):
             font_size = s.get("font_size")
         s.set("font_size", font_size)
         s.set("show_fixed_width_only", self._chk_fixed_width.isChecked())
+
+        # --- Color scheme ---
+        from mca_core.config.color_scheme import set_token_style
+        for (lang, token_key), style in self._working_scheme.items():
+            set_token_style(
+                s, lang, token_key,
+                style.get("fg", "#d4d4d4"),
+                style.get("bold", False),
+                style.get("italic", False),
+            )
 
         # --- Code Editor ---
         s.set("backspace_to_tab_stop", self._chk_backspace_tab.isChecked())

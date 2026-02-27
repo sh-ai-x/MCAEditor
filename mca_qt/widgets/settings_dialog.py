@@ -6,7 +6,7 @@ and stacked content pages on the right.
 
 Pages:
     General, Keyboard, Indentation, Appearance,
-    Editor Behavior, Output, MEL, Python, Code Analysis
+    Editor Behavior, Output, MEL, Python
 
 Dependencies:
     - PySide6 (QDialog, QListWidget, QStackedWidget, etc.)
@@ -21,9 +21,10 @@ from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QListWidget,
     QStackedWidget, QGroupBox, QCheckBox, QSpinBox, QComboBox,
     QLabel, QLineEdit, QPushButton, QListWidgetItem, QFileDialog,
-    QAbstractItemView, QFontComboBox, QTextEdit,
+    QAbstractItemView, QFontComboBox, QTextEdit, QPlainTextEdit,
+    QTreeWidget, QTreeWidgetItem, QColorDialog,
     Qt, QSize, Signal, QKeyCombination,
-    QFont, QFontDatabase, QKeySequence,
+    QFont, QFontDatabase, QKeySequence, QColor,
 )
 
 # Module-level logger.
@@ -33,6 +34,23 @@ logger = logging.getLogger(__name__)
 
 DIALOG_MIN_WIDTH = 720
 DIALOG_MIN_HEIGHT = 520
+
+
+def _to_bool(value):
+    """
+    Coerce a value to a Python bool.
+
+    QSettings may persist booleans as the strings ``"true"`` / ``"false"``.
+    PySide6's ``setChecked()`` rejects string arguments, so this helper
+    ensures a real ``bool`` is always returned.
+
+    :param value: A bool, string, int, or None.
+    :return: The boolean interpretation.
+    :rtype: bool
+    """
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return bool(value)
 
 
 # =============================================================================
@@ -139,7 +157,6 @@ class SettingsDialog(QDialog):
     CATEGORIES = [
         "General",
         "Appearance",
-        "Code Analysis",
         "Editor Behavior",
         "Indentation",
         "Keyboard",
@@ -221,7 +238,6 @@ class SettingsDialog(QDialog):
         # Order must match CATEGORIES so list index maps to page index.
         self._build_general_page()
         self._build_fonts_colors_page()
-        self._build_pylint_page()
         self._build_code_editor_page()
         self._build_tabs_spacing_page()
         self._build_keyboard_page()
@@ -573,24 +589,23 @@ class SettingsDialog(QDialog):
     # --- Fonts and Colors Page ----------------------------------------
 
     def _build_fonts_colors_page(self):
-        """Build the Appearance page (font picker, display items, color pickers)."""
+        """
+        Build the Appearance page — PyCharm-style color scheme editor.
+
+        Layout: font picker at top, then a token tree + style controls
+        side-by-side, then a live preview with language selector,
+        and a Restore Defaults button at the bottom.
+        """
+        from mca_core.config.color_scheme import (
+            TOKEN_DEFAULTS, get_tokens_for_language, build_scheme_dict,
+        )
+
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
-        # Target selector dropdown.
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Apply to:"))
-        self._fc_target_combo = QComboBox()
-        self._fc_target_combo.addItems(["Editor", "Output Panel"])
-        top_row.addWidget(self._fc_target_combo, 1)
-        self._fc_defaults_btn = QPushButton("Defaults")
-        self._fc_defaults_btn.setFixedWidth(100)
-        top_row.addWidget(self._fc_defaults_btn)
-        layout.addLayout(top_row)
-
-        # Font row.
+        # --- Font picker row ---
         font_row = QHBoxLayout()
         font_row.addWidget(QLabel("Font:"))
         self._fc_font_combo = QFontComboBox()
@@ -611,76 +626,104 @@ class SettingsDialog(QDialog):
         self._chk_fixed_width.stateChanged.connect(self._on_fixed_width_changed)
         layout.addWidget(self._chk_fixed_width)
 
-        # Display items list + color pickers side-by-side.
-        items_row = QHBoxLayout()
-        items_row.setSpacing(12)
+        # --- Token tree + style controls side-by-side ---
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(12)
 
-        # Display items list.
-        self._display_items_list = QListWidget()
-        self._display_items_list.setFixedWidth(220)
-        self._display_items_list.setStyleSheet(
-            "QListWidget { background-color: #2d2d30; border: 1px solid #3f3f46; }"
-            "QListWidget::item { padding: 3px 6px; color: #d0d0d0; }"
-            "QListWidget::item:selected { background-color: #094771; color: #ffffff; }"
+        # Token tree (left side).
+        self._token_tree = QTreeWidget()
+        self._token_tree.setHeaderHidden(True)
+        self._token_tree.setFixedWidth(220)
+        self._token_tree.setStyleSheet(
+            "QTreeWidget { background-color: #2d2d30; border: 1px solid #3f3f46; color: #d0d0d0; }"
+            "QTreeWidget::item { padding: 3px 6px; }"
+            "QTreeWidget::item:selected { background-color: #094771; color: #ffffff; }"
         )
-        # Display item categories for syntax theme customization.
-        display_items = [
-            "Plain Text", "Selected Text", "Matching Selection",
-            "Find/Replace Selected", "Find/Replace Matching",
-            "Find/Replace Selection", "Current Line", "Matching Braces",
-            "Whitespaces", "Indentation Guides", "Line Numbers", "Gutter",
-            "MEL Keywords", "MEL Commands", "MEL Strings",
-            "Python Keywords", "Python Built-ins", "Python Strings",
-            "Python Decorators", "Python Numbers", "Comments",
-        ]
-        for item_name in display_items:
-            self._display_items_list.addItem(item_name)
-        items_row.addWidget(self._display_items_list)
 
-        # Right side: Foreground, Background, Bold/Italic/Underline, Sample.
+        # Build the tree: one top-level node per language, children are tokens.
+        # Store (lang, token_key) in each child item's data for lookup.
+        for lang, lang_label in [("python", "Python"), ("mel", "MEL")]:
+            parent_item = QTreeWidgetItem(self._token_tree, [lang_label])
+            parent_item.setExpanded(True)
+            for token_key, display_name in get_tokens_for_language(lang):
+                child = QTreeWidgetItem(parent_item, [display_name])
+                # Store the lookup key as custom data (role=UserRole).
+                child.setData(0, Qt.ItemDataRole.UserRole, (lang, token_key))
+
+        self._token_tree.currentItemChanged.connect(self._on_token_selected)
+        mid_row.addWidget(self._token_tree)
+
+        # Style controls (right side).
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
 
-        # Foreground color.
+        # Foreground color button.
         right_col.addWidget(QLabel("Foreground:"))
         self._fg_color_btn = QPushButton()
         self._fg_color_btn.setFixedSize(80, 24)
         self._fg_color_btn.setStyleSheet("background-color: #d0d0d0; border: 1px solid #555;")
+        self._fg_color_btn.clicked.connect(self._on_fg_color_clicked)
         right_col.addWidget(self._fg_color_btn)
 
-        # Background color.
-        right_col.addWidget(QLabel("Background:"))
-        self._bg_color_btn = QPushButton()
-        self._bg_color_btn.setFixedSize(80, 24)
-        self._bg_color_btn.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555;")
-        right_col.addWidget(self._bg_color_btn)
-
-        # Bold / Italic / Underline checkboxes.
-        style_row = QHBoxLayout()
+        # Bold and Italic checkboxes.
         self._chk_bold = QCheckBox("Bold")
-        self._chk_italic = QCheckBox("Italic")
-        self._chk_underline = QCheckBox("Underline")
-        style_row.addWidget(self._chk_bold)
-        style_row.addWidget(self._chk_italic)
-        style_row.addWidget(self._chk_underline)
-        right_col.addLayout(style_row)
+        self._chk_bold.stateChanged.connect(self._on_token_style_changed)
+        right_col.addWidget(self._chk_bold)
 
-        # Sample preview.
-        right_col.addWidget(QLabel("Sample:"))
-        self._sample_preview = QLabel("ij = I:oO(0xB8l1);")
-        self._sample_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sample_preview.setFixedHeight(40)
-        self._sample_preview.setStyleSheet(
-            "background-color: #1e1e1e; color: #d0d0d0; border: 1px solid #3f3f46;"
-            "font-family: Consolas; font-size: 12px; padding: 8px;"
-        )
-        right_col.addWidget(self._sample_preview)
+        self._chk_italic = QCheckBox("Italic")
+        self._chk_italic.stateChanged.connect(self._on_token_style_changed)
+        right_col.addWidget(self._chk_italic)
 
         right_col.addStretch()
-        items_row.addLayout(right_col)
+        mid_row.addLayout(right_col)
 
-        layout.addLayout(items_row, 1)
+        layout.addLayout(mid_row, 1)
+
+        # --- Live preview section ---
+        preview_header = QHBoxLayout()
+        preview_header.addWidget(QLabel("Preview:"))
+        self._preview_lang_combo = QComboBox()
+        self._preview_lang_combo.addItems(["Python", "MEL"])
+        self._preview_lang_combo.currentIndexChanged.connect(self._on_preview_lang_changed)
+        preview_header.addWidget(self._preview_lang_combo)
+        preview_header.addStretch()
+        layout.addLayout(preview_header)
+
+        # Read-only code preview using QPlainTextEdit for syntax highlighting.
+        self._color_preview = QPlainTextEdit()
+        self._color_preview.setReadOnly(True)
+        self._color_preview.setMinimumHeight(120)
+        self._color_preview.setStyleSheet(
+            "QPlainTextEdit {"
+            "  background-color: #1e1e1e; color: #d4d4d4;"
+            "  border: 1px solid #3f3f46;"
+            "  font-family: Consolas, 'Courier New', monospace; font-size: 11px;"
+            "  selection-background-color: #264f78;"
+            "}"
+        )
+        layout.addWidget(self._color_preview)
+
+        # --- Restore Defaults button ---
+        restore_row = QHBoxLayout()
+        restore_row.addStretch()
+        self._restore_colors_btn = QPushButton("Restore Defaults")
+        self._restore_colors_btn.setFixedWidth(120)
+        self._restore_colors_btn.clicked.connect(self._on_restore_color_defaults)
+        restore_row.addWidget(self._restore_colors_btn)
+        layout.addLayout(restore_row)
+
+        # --- Internal state ---
+        # Working copy of the scheme dict, modified in-place as the user edits.
+        # Populated by _load_settings(); keyed by (lang, token_key).
+        self._working_scheme = {}
+
+        # Track whether we're programmatically updating controls to avoid
+        # recursive change events.
+        self._scheme_updating = False
+
         self._pages.addWidget(page)
+
+    # --- Appearance Page Handlers ---
 
     def _on_fixed_width_changed(self, state):
         """
@@ -692,6 +735,191 @@ class SettingsDialog(QDialog):
             self._fc_font_combo.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts)
         else:
             self._fc_font_combo.setFontFilters(QFontComboBox.FontFilter.AllFonts)
+
+    def _on_token_selected(self, current, previous):
+        """
+        Update the foreground button and style checkboxes when a token is selected.
+
+        Only leaf items (actual tokens, not language group headers) have valid data.
+
+        :param QTreeWidgetItem current: The newly selected tree item.
+        :param QTreeWidgetItem previous: The previously selected tree item.
+        """
+        if current is None:
+            return
+
+        # Read the stored (lang, token_key) from the item.
+        key = current.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            # This is a group header — clear the controls.
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+
+        # Suppress change events while we update controls.
+        self._scheme_updating = True
+
+        # Update foreground swatch color.
+        fg = style.get("fg", "#d4d4d4")
+        self._fg_color_btn.setStyleSheet(
+            "background-color: {}; border: 1px solid #555;".format(fg)
+        )
+
+        # Update checkboxes (coerce to bool — QSettings may store as string).
+        self._chk_bold.setChecked(_to_bool(style.get("bold", False)))
+        self._chk_italic.setChecked(_to_bool(style.get("italic", False)))
+
+        self._scheme_updating = False
+
+    def _on_fg_color_clicked(self):
+        """
+        Open a QColorDialog for the currently selected token's foreground color.
+
+        Updates the working scheme and refreshes the preview on change.
+        """
+        # Get the currently selected token.
+        item = self._token_tree.currentItem()
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+        current_color = QColor(style.get("fg", "#d4d4d4"))
+
+        # Open the color picker starting from the current color.
+        color = QColorDialog.getColor(current_color, self, "Select Foreground Color")
+        if color.isValid():
+            style["fg"] = color.name()
+            self._working_scheme[(lang, token_key)] = style
+
+            # Update the swatch button.
+            self._fg_color_btn.setStyleSheet(
+                "background-color: {}; border: 1px solid #555;".format(color.name())
+            )
+
+            # Refresh the preview.
+            self._refresh_color_preview()
+
+    def _on_token_style_changed(self, state):
+        """
+        Handle bold/italic checkbox changes for the current token.
+
+        :param int state: The checkbox state value.
+        """
+        # Ignore programmatic updates during _on_token_selected.
+        if self._scheme_updating:
+            return
+
+        item = self._token_tree.currentItem()
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if key is None:
+            return
+
+        lang, token_key = key
+        style = self._working_scheme.get((lang, token_key), {})
+
+        # Write the new bold/italic values.
+        style["bold"] = self._chk_bold.isChecked()
+        style["italic"] = self._chk_italic.isChecked()
+        self._working_scheme[(lang, token_key)] = style
+
+        # Refresh the live preview.
+        self._refresh_color_preview()
+
+    def _on_preview_lang_changed(self, index):
+        """
+        Switch the preview sample code when the language combo changes.
+
+        :param int index: The new combo box index (0=Python, 1=MEL).
+        """
+        self._refresh_color_preview()
+
+    def _on_restore_color_defaults(self):
+        """
+        Reset the working color scheme to TOKEN_DEFAULTS and refresh everything.
+        """
+        from mca_core.config.color_scheme import TOKEN_DEFAULTS
+
+        # Rebuild the working scheme from canonical defaults.
+        self._working_scheme = {}
+        for (lang, token_key), info in TOKEN_DEFAULTS.items():
+            self._working_scheme[(lang, token_key)] = {
+                "fg": info["fg"],
+                "bold": info["bold"],
+                "italic": info["italic"],
+            }
+
+        # Re-select the current token to refresh controls.
+        item = self._token_tree.currentItem()
+        if item is not None:
+            self._on_token_selected(item, None)
+
+        # Refresh the preview.
+        self._refresh_color_preview()
+        logger.info("Color scheme reset to defaults in settings dialog")
+
+    def _refresh_color_preview(self):
+        """
+        Rebuild the syntax highlighter on the preview widget using the
+        current working scheme, and set the appropriate sample code.
+        """
+        from mca_qt.widgets.code_editor import PythonHighlighter, MELHighlighter
+
+        # Determine which language preview to show.
+        lang_index = self._preview_lang_combo.currentIndex()
+
+        # Detach any existing highlighter.
+        if hasattr(self, "_preview_highlighter") and self._preview_highlighter:
+            self._preview_highlighter.setDocument(None)
+
+        if lang_index == 0:
+            # Python preview.
+            sample = (
+                "import os\n"
+                "\n"
+                "class FileCounter:\n"
+                '    """Count files and their sizes."""\n'
+                "\n"
+                "    @staticmethod\n"
+                "    def count_files(path, threshold=1024):\n"
+                "        total = 0\n"
+                "        for name in os.listdir(path):\n"
+                "            size = os.path.getsize(name)\n"
+                "            if size >= threshold:\n"
+                "                total += size\n"
+                '        print(f"Total: {total}")\n'
+                "        return total\n"
+            )
+            self._color_preview.setPlainText(sample)
+            self._preview_highlighter = PythonHighlighter(
+                self._color_preview.document(), color_scheme=self._working_scheme
+            )
+        else:
+            # MEL preview.
+            sample = (
+                "// Scatter objects on a surface\n"
+                "global proc scatterObjects(string $surface, int $count) {\n"
+                "    float $offset = 0.5;\n"
+                "    for ($i = 0; $i < $count; $i++) {\n"
+                '        string $obj = `polySphere -r $offset`;\n'
+                "        float $u = rand(1.0);\n"
+                "        float $v = rand(1.0);\n"
+                "        // Attach to surface point\n"
+                "        if ($u > 0.5)\n"
+                '            print("placed");\n'
+                "    }\n"
+                "}\n"
+            )
+            self._color_preview.setPlainText(sample)
+            self._preview_highlighter = MELHighlighter(
+                self._color_preview.document(), color_scheme=self._working_scheme
+            )
 
     # --- Code Editor Page ---------------------------------------------
 
@@ -963,90 +1191,6 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         self._pages.addWidget(page)
 
-    # --- Pylint Page --------------------------------------------------
-
-    def _build_pylint_page(self):
-        """Build the Code Analysis settings page."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(12)
-
-        # Pylint Integration group.
-        analysis_group = QGroupBox("Pylint Integration")
-        analysis_layout = QVBoxLayout(analysis_group)
-        self._chk_pylint_enabled = QCheckBox("Enable pylint analysis")
-        analysis_layout.addWidget(self._chk_pylint_enabled)
-        layout.addWidget(analysis_group)
-
-        # Executable Path group.
-        exe_group = QGroupBox("Pylint Executable")
-        exe_layout = QHBoxLayout(exe_group)
-        self._pylint_exe_input = QLineEdit()
-        self._pylint_exe_input.setPlaceholderText("Path to pylint binary...")
-        exe_layout.addWidget(self._pylint_exe_input, 1)
-        self._pylint_exe_browse = QPushButton("...")
-        self._pylint_exe_browse.setFixedWidth(30)
-        self._pylint_exe_browse.clicked.connect(self._browse_pylint_exe)
-        exe_layout.addWidget(self._pylint_exe_browse)
-        layout.addWidget(exe_group)
-
-        # Configuration Path group.
-        cfg_group = QGroupBox("Pylint Configuration")
-        cfg_layout = QHBoxLayout(cfg_group)
-        self._pylint_cfg_input = QLineEdit()
-        self._pylint_cfg_input.setPlaceholderText("Path to .pylintrc or setup.cfg...")
-        cfg_layout.addWidget(self._pylint_cfg_input, 1)
-        self._pylint_cfg_browse = QPushButton("...")
-        self._pylint_cfg_browse.setFixedWidth(30)
-        self._pylint_cfg_browse.clicked.connect(self._browse_pylint_cfg)
-        cfg_layout.addWidget(self._pylint_cfg_browse)
-        self._pylint_cfg_default = QPushButton("Reset")
-        self._pylint_cfg_default.setFixedWidth(60)
-        self._pylint_cfg_default.clicked.connect(lambda: self._pylint_cfg_input.clear())
-        cfg_layout.addWidget(self._pylint_cfg_default)
-        layout.addWidget(cfg_group)
-
-        # Additional Python Paths group.
-        paths_group = QGroupBox("Extra Import Paths")
-        paths_layout = QVBoxLayout(paths_group)
-        self._pylint_paths_input = QLineEdit()
-        self._pylint_paths_input.setPlaceholderText("Semicolon-separated paths for pylint to search...")
-        paths_layout.addWidget(self._pylint_paths_input)
-        layout.addWidget(paths_group)
-
-        # Options group.
-        opts_group = QGroupBox("Analysis Options")
-        opts_layout = QVBoxLayout(opts_group)
-        opts_layout.setSpacing(6)
-
-        self._chk_pylint_minimal = QCheckBox("Minimal checker set (faster, overrides config)")
-        opts_layout.addWidget(self._chk_pylint_minimal)
-
-        self._chk_pylint_log = QCheckBox("Log analysis errors to output (debug)")
-        opts_layout.addWidget(self._chk_pylint_log)
-
-        layout.addWidget(opts_group)
-        layout.addStretch()
-        self._pages.addWidget(page)
-
-    def _browse_pylint_exe(self):
-        """Open a file dialog to pick the Pylint executable path."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Pylint Executable", "", "All Files (*)"
-        )
-        if path:
-            self._pylint_exe_input.setText(path)
-
-    def _browse_pylint_cfg(self):
-        """Open a file dialog to pick the Pylint configuration file."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Pylint Configuration", "",
-            "Config Files (*.cfg *.ini *.pylintrc);;All Files (*)"
-        )
-        if path:
-            self._pylint_cfg_input.setText(path)
-
     # =================================================================
     # Load / Save Settings
     # =================================================================
@@ -1081,6 +1225,17 @@ class SettingsDialog(QDialog):
         self._fc_font_combo.setCurrentFont(QFont(font_family))
         self._fc_font_size.setCurrentText(str(s.get("font_size")))
         self._chk_fixed_width.setChecked(s.get("show_fixed_width_only"))
+
+        # --- Color scheme ---
+        from mca_core.config.color_scheme import build_scheme_dict
+        self._working_scheme = build_scheme_dict(s)
+        # Initialize the preview with the first language (Python).
+        self._preview_highlighter = None
+        self._refresh_color_preview()
+        # Select the first token in the tree so controls are populated.
+        first_lang = self._token_tree.topLevelItem(0)
+        if first_lang and first_lang.childCount() > 0:
+            self._token_tree.setCurrentItem(first_lang.child(0))
 
         # --- Code Editor ---
         self._chk_backspace_tab.setChecked(s.get("backspace_to_tab_stop"))
@@ -1138,14 +1293,6 @@ class SettingsDialog(QDialog):
         self._chk_py_forced_imports = self._py_forced_imports  # alias for clarity
         self._py_forced_imports.setText(s.get("py_forced_imports"))
 
-        # --- Pylint ---
-        self._chk_pylint_enabled.setChecked(s.get("pylint_enabled"))
-        self._pylint_exe_input.setText(s.get("pylint_executable"))
-        self._pylint_cfg_input.setText(s.get("pylint_config"))
-        self._pylint_paths_input.setText(s.get("pylint_additional_paths"))
-        self._chk_pylint_minimal.setChecked(s.get("pylint_minimal_checkers"))
-        self._chk_pylint_log.setChecked(s.get("pylint_log_errors"))
-
     def _save_settings(self):
         """Write all widget values back to MCASettings."""
         s = self._settings
@@ -1180,6 +1327,16 @@ class SettingsDialog(QDialog):
             font_size = s.get("font_size")
         s.set("font_size", font_size)
         s.set("show_fixed_width_only", self._chk_fixed_width.isChecked())
+
+        # --- Color scheme ---
+        from mca_core.config.color_scheme import set_token_style
+        for (lang, token_key), style in self._working_scheme.items():
+            set_token_style(
+                s, lang, token_key,
+                style.get("fg", "#d4d4d4"),
+                style.get("bold", False),
+                style.get("italic", False),
+            )
 
         # --- Code Editor ---
         s.set("backspace_to_tab_stop", self._chk_backspace_tab.isChecked())
@@ -1234,14 +1391,6 @@ class SettingsDialog(QDialog):
         s.set("py_autocomplete_builtins", self._chk_py_ac_builtins.isChecked())
         s.set("py_native_maya_fallback", self._chk_py_native_maya.isChecked())
         s.set("py_forced_imports", self._py_forced_imports.text())
-
-        # --- Pylint ---
-        s.set("pylint_enabled", self._chk_pylint_enabled.isChecked())
-        s.set("pylint_executable", self._pylint_exe_input.text())
-        s.set("pylint_config", self._pylint_cfg_input.text())
-        s.set("pylint_additional_paths", self._pylint_paths_input.text())
-        s.set("pylint_minimal_checkers", self._chk_pylint_minimal.isChecked())
-        s.set("pylint_log_errors", self._chk_pylint_log.isChecked())
 
         # Flush to persistent storage.
         s.sync()
