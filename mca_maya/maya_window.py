@@ -558,6 +558,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not message or not message.strip():
             return
 
+        # Skip messages echoed by the internal adapter to Maya's script
+        # editor.  The adapter sets this flag while calling displayInfo()
+        # so we don't duplicate the output in MCA Editor's panel.
+        from mca_core.adapters.internal_maya_adapter import _suppress_output_hook
+        if _suppress_output_hook:
+            return
+
         # Suppress the harmless "Nothing is selected" error from Maya's
         # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
         # during focus transitions and nothing is selected in the viewport.

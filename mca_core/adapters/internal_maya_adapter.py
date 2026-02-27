@@ -23,6 +23,12 @@ from .base_adapter import DCCAdapter, DCCType, ConnectionState
 # Module-level logger for internal Maya operations.
 logger = logging.getLogger(__name__)
 
+# Flag to suppress the MCA output hook while echoing to Maya's script editor.
+# The internal adapter sets this True before calling MGlobal.displayInfo() and
+# clears it after, so _on_maya_output() in maya_window.py can skip the echo
+# and avoid duplicate output in MCA Editor's panel.
+_suppress_output_hook = False
+
 
 # --- Internal Maya Adapter --------------------------------------------------
 
@@ -244,39 +250,44 @@ class InternalMayaAdapter(DCCAdapter):
         """
         Echo executed code and results to Maya's script editor.
 
-        Writes to ``sys.__stdout__`` (Maya's original stdout) so the
-        text appears in the script editor history.  Unlike
-        ``MGlobal.displayInfo()``, raw stdout writes are NOT captured
-        by ``MCommandMessage`` hooks, avoiding duplicate output in
-        MCA Editor's panel.
+        Uses ``maya.OpenMaya.MGlobal.displayInfo()`` so the text appears
+        in Maya's script editor history (just like Charcoal Editor 2).
+
+        Sets the module-level ``_suppress_output_hook`` flag while
+        echoing so MCA Editor's ``_on_maya_output()`` hook skips
+        these messages and doesn't create duplicates.
 
         :param str code: The executed source code.
         :param str output: Captured stdout from execution (may be empty).
         :param Exception error: Exception raised during execution, or None.
         """
+        global _suppress_output_hook
         try:
-            maya_stdout = sys.__stdout__
-            if maya_stdout is None:
-                return
+            import maya.OpenMaya as om
 
-            # Echo the code that was executed.
-            maya_stdout.write(code.rstrip() + "\n")
+            # Suppress our own output hook to prevent duplicates.
+            _suppress_output_hook = True
+
+            # Echo the executed code.
+            om.MGlobal.displayInfo(code.rstrip())
 
             # Echo any captured output.
             if output and output.strip():
-                maya_stdout.write(output.rstrip() + "\n")
+                for line in output.rstrip().split("\n"):
+                    om.MGlobal.displayInfo(line)
 
             # Echo errors.
             if error:
                 tb_text = traceback.format_exception(
                     type(error), error, error.__traceback__
                 )
-                maya_stdout.write("".join(tb_text).rstrip() + "\n")
+                om.MGlobal.displayError("".join(tb_text).rstrip())
 
-            maya_stdout.flush()
         except Exception:
             # If something goes wrong, silently skip — never break execution.
             pass
+        finally:
+            _suppress_output_hook = False
 
     def _execute_mel(self, code):
         """
