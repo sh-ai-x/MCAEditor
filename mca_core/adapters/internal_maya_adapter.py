@@ -181,8 +181,8 @@ class InternalMayaAdapter(DCCAdapter):
 
         Stdout is redirected to a StringIO buffer so print() output is
         captured and returned to the MCA Editor output panel.  After
-        execution, the code and any output/errors are also echoed to
-        Maya's script editor so the history is visible there too.
+        execution, the code and output are echoed to Maya's script
+        editor via ``sys.__stdout__`` so history is visible there too.
 
         :param str code: Python source code to execute.
         :return: Captured output.
@@ -214,6 +214,12 @@ class InternalMayaAdapter(DCCAdapter):
         # Collect captured output.
         output = buf.getvalue()
 
+        # Echo the executed code and output to Maya's script editor.
+        # sys.__stdout__ is Maya's original stdout — writing here shows
+        # in the script editor history without triggering our
+        # MCommandMessage output hook (which only captures MGlobal calls).
+        self._echo_to_script_editor(code, output, error)
+
         # If there was an error, format the traceback.
         if error:
             tb_text = traceback.format_exception(type(error), error, error.__traceback__)
@@ -233,6 +239,44 @@ class InternalMayaAdapter(DCCAdapter):
             return output
 
         return ""
+
+    def _echo_to_script_editor(self, code, output, error):
+        """
+        Echo executed code and results to Maya's script editor.
+
+        Writes to ``sys.__stdout__`` (Maya's original stdout) so the
+        text appears in the script editor history.  Unlike
+        ``MGlobal.displayInfo()``, raw stdout writes are NOT captured
+        by ``MCommandMessage`` hooks, avoiding duplicate output in
+        MCA Editor's panel.
+
+        :param str code: The executed source code.
+        :param str output: Captured stdout from execution (may be empty).
+        :param Exception error: Exception raised during execution, or None.
+        """
+        try:
+            maya_stdout = sys.__stdout__
+            if maya_stdout is None:
+                return
+
+            # Echo the code that was executed.
+            maya_stdout.write(code.rstrip() + "\n")
+
+            # Echo any captured output.
+            if output and output.strip():
+                maya_stdout.write(output.rstrip() + "\n")
+
+            # Echo errors.
+            if error:
+                tb_text = traceback.format_exception(
+                    type(error), error, error.__traceback__
+                )
+                maya_stdout.write("".join(tb_text).rstrip() + "\n")
+
+            maya_stdout.flush()
+        except Exception:
+            # If something goes wrong, silently skip — never break execution.
+            pass
 
     def _execute_mel(self, code):
         """
