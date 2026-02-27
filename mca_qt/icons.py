@@ -344,6 +344,55 @@ def _paint_sidebar_icon():
     return QIcon(pix)
 
 
+def settings_icon():
+    """
+    Settings / gear icon for the tool stripe.
+
+    :return: Gear icon.
+    :rtype: QIcon
+    """
+    return _cached("settings_icon", _paint_settings_icon)
+
+
+def _paint_settings_icon():
+    """Paint a simple gear icon using lines radiating from a circle."""
+    import math
+
+    pix = QPixmap(ICON_SIZE, ICON_SIZE)
+    pix.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    cx, cy = 8.0, 8.0
+    color = QColor("#969696")
+
+    # Draw 6 gear teeth as short radial lines around the center.
+    pen = QPen(color, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    for i in range(6):
+        angle = math.radians(i * 60)
+        x1 = cx + 4.0 * math.cos(angle)
+        y1 = cy + 4.0 * math.sin(angle)
+        x2 = cx + 6.0 * math.cos(angle)
+        y2 = cy + 6.0 * math.sin(angle)
+        p.drawLine(int(x1 * 10) / 10, int(y1 * 10) / 10,
+                   int(x2 * 10) / 10, int(y2 * 10) / 10)
+
+    # Outer ring.
+    p.setPen(QPen(color, 1.4))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(3, 3, 10, 10)
+
+    # Inner circle (hollow center).
+    p.setPen(QPen(color, 1.2))
+    p.drawEllipse(5, 5, 6, 6)
+
+    p.end()
+    return QIcon(pix)
+
+
 def _paint_text_icon():
     """Paint a simple text/document icon."""
     pix = QPixmap(ICON_SIZE, ICON_SIZE)

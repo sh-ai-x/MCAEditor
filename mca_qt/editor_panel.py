@@ -53,7 +53,7 @@ from mca_qt.widgets.find_in_files import FindInFilesDialog
 from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup, GoToDeclarationPopup
 from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
-from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon
+from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon, settings_icon
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -259,6 +259,7 @@ class MCAEditorPanel(QWidget):
         self._left_stripe = ToolStripe()
         self._left_stripe.add_button("sidebar", sidebar_icon(), "Toggle Sidebar")
         self._left_stripe.add_button("terminal", terminal_icon(), "Terminal (Bottom)", bottom=True)
+        self._left_stripe.add_button("settings", settings_icon(), "Settings", bottom=True)
         self._left_stripe.button_clicked.connect(self._on_left_stripe_clicked)
         main_layout.addWidget(self._left_stripe)
 
@@ -410,25 +411,6 @@ class MCAEditorPanel(QWidget):
         self._dcc_indicator.clicked.connect(self._show_connect_dialog)
         self._dcc_indicator.setVisible(not self._embedded_in_dcc)
         self._toolbar.addWidget(self._dcc_indicator)
-
-        # --- Settings gear button ---
-        settings_btn = QPushButton("\u2699")
-        settings_btn.setToolTip("Settings")
-        settings_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #969696;
-                border: none;
-                padding: 4px 8px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                color: #ffffff;
-                background-color: #3e3e42;
-            }
-        """)
-        settings_btn.clicked.connect(self._show_settings)
-        self._toolbar.addWidget(settings_btn)
 
         # Spacer to push mode toggle to the right.
         spacer = QWidget()
@@ -1196,6 +1178,8 @@ class MCAEditorPanel(QWidget):
             self._toggle_sidebar()
         elif name == "terminal":
             self._open_terminal_bottom()
+        elif name == "settings":
+            self._show_settings()
 
     def _on_right_stripe_clicked(self, name):
         """
