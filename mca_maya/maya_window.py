@@ -76,6 +76,13 @@ WORKSPACE_CONTROL_NAME = WINDOW_OBJECT_NAME + "WorkspaceControl"
 # Module-level reference to keep the window alive (prevent GC).
 _mca_editor_window = None
 
+# Module-level Maya output callback ID.  Stored here (not on the window
+# instance) so it survives window recreation.  When Maya calls the
+# uiScript repeatedly during layout restore, the old window is
+# overwritten — if the callback ID were on the instance, we'd lose the
+# handle and could never remove the stale callback.
+_output_callback_id = None
+
 
 # --- Hotkey Suppression Filter ----------------------------------------------
 
@@ -420,14 +427,19 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Hook into Maya's output system so ALL Maya messages (startup logs,
         # warnings, errors, command results) appear in our output window —
         # just like Maya's Script Editor and Charcoal Editor 2.
-        self._output_callback_id = None
         self._install_output_hook()
 
-        # Defer history loading so the window appears immediately. The
-        # history can be large (hundreds of lines) and inserting it
-        # synchronously in __init__ blocks the UI for several seconds.
-        # QTimer.singleShot(0) queues it after the event loop processes
-        # the pending show/paint events, so the window is visible first.
+        # Load Maya's session history (startup logs, plugin loads, etc.)
+        # into our output panel.  This captures everything Maya printed
+        # BEFORE the output hook was installed.
+        #
+        # IMPORTANT: _restore_output() (which loads saved output.log
+        # from previous sessions) is SKIPPED in Maya mode to prevent
+        # duplication.  Maya's session buffer IS the authoritative
+        # history — loading an old output.log on top of it caused the
+        # output to grow exponentially with each editor open.
+        #
+        # Deferred via QTimer.singleShot(0) so the window paints first.
         from mca_qt.qt_compat import QTimer
         QTimer.singleShot(0, self._load_maya_history)
 
@@ -471,9 +483,26 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
         This includes startup logs, plugin load messages, warnings, errors,
         and command results — everything Maya routes to its output window.
+
+        Uses the module-level ``_output_callback_id`` so the handle survives
+        window recreation.  Any previous callback is removed first to prevent
+        stale callbacks pointing at dead widget instances.
         """
+        global _output_callback_id
+
+        # Remove any stale callback from a previous window instance before
+        # registering a new one.  Without this, Maya keeps calling the old
+        # callback (which references a dead widget) alongside the new one.
+        if _output_callback_id is not None:
+            try:
+                om2.MMessage.removeCallback(_output_callback_id)
+                logger.info("Removed stale Maya output callback before re-install")
+            except Exception:
+                pass
+            _output_callback_id = None
+
         try:
-            self._output_callback_id = om2.MCommandMessage.addCommandOutputCallback(
+            _output_callback_id = om2.MCommandMessage.addCommandOutputCallback(
                 self._on_maya_output
             )
             logger.info("Maya output hook installed")
@@ -561,8 +590,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Skip messages echoed by the internal adapter to Maya's script
         # editor.  The adapter sets this flag while calling displayInfo()
         # so we don't duplicate the output in MCA Editor's panel.
-        from mca_core.adapters.internal_maya_adapter import _suppress_output_hook
-        if _suppress_output_hook:
+        #
+        # IMPORTANT: We must import the MODULE and read the attribute,
+        # NOT use ``from module import var``.  The latter copies the bool
+        # value at import time — since bools are immutable, subsequent
+        # changes to the module-level flag would not be seen here.
+        import mca_core.adapters.internal_maya_adapter as _ima
+        if _ima._suppress_output_hook:
             return
 
         # Suppress the harmless "Nothing is selected" error from Maya's
@@ -766,14 +800,16 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
         Removes the output hook, hotkey filter, saves state, and cleans up.
         """
+        global _output_callback_id
+
         # Remove the Maya output hook so we stop receiving messages.
-        if self._output_callback_id is not None:
+        if _output_callback_id is not None:
             try:
-                om2.MMessage.removeCallback(self._output_callback_id)
+                om2.MMessage.removeCallback(_output_callback_id)
                 logger.info("Maya output hook removed")
             except Exception:
                 pass
-            self._output_callback_id = None
+            _output_callback_id = None
 
         # Remove the hotkey filter so Maya's shortcuts work normally again.
         app = QApplication.instance()
@@ -821,6 +857,7 @@ def show_mca_editor():
         - Direct Python calls from Maya's script editor
     """
     global _mca_editor_window
+    global _output_callback_id
 
     # If the workspace control already exists from a previous session,
     # delete it so we can create a fresh one. Maya keeps the control
@@ -846,6 +883,16 @@ def show_mca_editor():
             except Exception as exc:
                 logger.warning("Pre-reload cleanup failed: %s", exc)
             _mca_editor_window = None
+
+        # Remove the stale output callback so the new window gets a
+        # clean hook.  _install_output_hook() also does this, but
+        # being explicit here avoids any gap.
+        if _output_callback_id is not None:
+            try:
+                om2.MMessage.removeCallback(_output_callback_id)
+            except Exception:
+                pass
+            _output_callback_id = None
 
         # Control exists but is not visible — delete it so we can
         # recreate cleanly with a new widget instance.
@@ -891,10 +938,29 @@ def _restore_mca_editor():
     Restore the MCA Editor panel inside an existing workspace control.
 
     Called by Maya's workspace control ``uiScript`` when restoring a
-    saved layout. Creates a new MCAMayaWindow and parents it into the
-    existing workspace control.
+    saved layout.  Maya may call this multiple times during a single
+    layout restore cycle, so we guard against redundant recreation.
+
+    If a live window already exists (valid C++ object, not deleted),
+    we skip re-creation entirely.  Otherwise we clean up the old
+    window's resources and create a fresh one.
     """
     global _mca_editor_window
+
+    # Guard: if a valid window already exists, skip recreation.
+    # Maya's uiScript can fire many times during a single layout
+    # restore (10-20 calls is common).  Without this guard, each
+    # call creates a new MCAMayaWindow, loads Maya history, and
+    # the previous instance leaks callbacks and resources.
+    if _mca_editor_window is not None:
+        try:
+            # Test if the C++ object is still alive.
+            _mca_editor_window.objectName()
+            logger.info("MCA Editor already exists — skipping uiScript re-creation")
+            return
+        except RuntimeError:
+            # C++ object deleted — fall through to recreate.
+            _mca_editor_window = None
 
     # Create a fresh window widget.
     _mca_editor_window = MCAMayaWindow()

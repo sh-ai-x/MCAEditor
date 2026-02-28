@@ -9,6 +9,8 @@ hand-editing the ``.mca-project`` JSON file. Editable fields:
     - Excluded folders (add/remove folder names)
     - Startup script file (relative path to a .py file)
     - Startup inline code (Python code typed directly into the dialog)
+    - Shutdown script file (relative path to a .py file run on close)
+    - Shutdown inline code (Python code run before teardown on close)
     - Environment variables (key=value pairs set in os.environ)
 
 Dependencies:
@@ -377,15 +379,44 @@ class ProjectSettingsDialog(QDialog):
         excl_layout.addLayout(excl_btn_row)
         layout.addWidget(excl_group)
 
-        # --- Startup Script ---
-        script_group = QGroupBox("Startup Script")
-        script_group.setStyleSheet(_GROUP_STYLE)
-        script_layout = QVBoxLayout(script_group)
+        # --- Scripts (Startup / Shutdown tabs) ---
+        scripts_group = QGroupBox("Scripts")
+        scripts_group.setStyleSheet(_GROUP_STYLE)
+        scripts_group_layout = QVBoxLayout(scripts_group)
+
+        # Tab widget to separate Startup and Shutdown into distinct pages.
+        self._scripts_tabs = QTabWidget()
+        self._scripts_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3f3f46;
+                background-color: #2d2d30;
+            }
+            QTabBar::tab {
+                background-color: #2d2d30;
+                color: #969696;
+                border: 1px solid #3f3f46;
+                padding: 4px 14px;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border-bottom-color: #1e1e1e;
+            }
+            QTabBar::tab:hover {
+                color: #d4d4d4;
+            }
+        """)
+
+        # --- Startup tab ---
+        startup_tab = QWidget()
+        startup_layout = QVBoxLayout(startup_tab)
+        startup_layout.setContentsMargins(8, 8, 8, 8)
 
         # File path row — point to an external .py file.
         file_label = QLabel("Script file (relative to project root):")
         file_label.setStyleSheet(_LABEL_STYLE)
-        script_layout.addWidget(file_label)
+        startup_layout.addWidget(file_label)
 
         file_row = QHBoxLayout()
         self._script_edit = QLineEdit()
@@ -398,23 +429,65 @@ class ProjectSettingsDialog(QDialog):
         browse_btn.setStyleSheet(_BTN_STYLE)
         browse_btn.clicked.connect(self._browse_startup_script)
         file_row.addWidget(browse_btn)
-        script_layout.addLayout(file_row)
+        startup_layout.addLayout(file_row)
 
         # Inline code editor — small script typed directly.
         code_label = QLabel("Inline code (runs after the script file, if any):")
         code_label.setStyleSheet(_LABEL_STYLE)
-        script_layout.addWidget(code_label)
+        startup_layout.addWidget(code_label)
 
         self._code_edit = QPlainTextEdit()
         self._code_edit.setPlainText(self._project.startup_code)
         self._code_edit.setPlaceholderText("# Python code to run on project open...")
         self._code_edit.setStyleSheet(_CODE_EDIT_STYLE)
-        self._code_edit.setMinimumHeight(90)
-        self._code_edit.setMaximumHeight(160)
+        self._code_edit.setMinimumHeight(120)
         self._code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
-        script_layout.addWidget(self._code_edit)
+        startup_layout.addWidget(self._code_edit)
 
-        layout.addWidget(script_group)
+        startup_layout.addStretch()
+        self._scripts_tabs.addTab(startup_tab, "Startup")
+
+        # --- Shutdown tab ---
+        shutdown_tab = QWidget()
+        shutdown_layout = QVBoxLayout(shutdown_tab)
+        shutdown_layout.setContentsMargins(8, 8, 8, 8)
+
+        # File path row — point to an external .py file.
+        shutdown_file_label = QLabel("Script file (relative to project root):")
+        shutdown_file_label.setStyleSheet(_LABEL_STYLE)
+        shutdown_layout.addWidget(shutdown_file_label)
+
+        shutdown_file_row = QHBoxLayout()
+        self._shutdown_script_edit = QLineEdit()
+        self._shutdown_script_edit.setText(self._project.shutdown_script)
+        self._shutdown_script_edit.setPlaceholderText("e.g. scripts/shutdown.py")
+        self._shutdown_script_edit.setStyleSheet(_INPUT_STYLE)
+        shutdown_file_row.addWidget(self._shutdown_script_edit)
+
+        shutdown_browse_btn = QPushButton("Browse...")
+        shutdown_browse_btn.setStyleSheet(_BTN_STYLE)
+        shutdown_browse_btn.clicked.connect(self._browse_shutdown_script)
+        shutdown_file_row.addWidget(shutdown_browse_btn)
+        shutdown_layout.addLayout(shutdown_file_row)
+
+        # Inline code editor — small script typed directly.
+        shutdown_code_label = QLabel("Inline code (runs after the script file, if any):")
+        shutdown_code_label.setStyleSheet(_LABEL_STYLE)
+        shutdown_layout.addWidget(shutdown_code_label)
+
+        self._shutdown_code_edit = QPlainTextEdit()
+        self._shutdown_code_edit.setPlainText(self._project.shutdown_code)
+        self._shutdown_code_edit.setPlaceholderText("# Python code to run on project close...")
+        self._shutdown_code_edit.setStyleSheet(_CODE_EDIT_STYLE)
+        self._shutdown_code_edit.setMinimumHeight(120)
+        self._shutdown_code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
+        shutdown_layout.addWidget(self._shutdown_code_edit)
+
+        shutdown_layout.addStretch()
+        self._scripts_tabs.addTab(shutdown_tab, "Shutdown")
+
+        scripts_group_layout.addWidget(self._scripts_tabs)
+        layout.addWidget(scripts_group)
 
         # --- Environment Variables ---
         env_group = QGroupBox("Environment Variables (set in os.environ on open)")
@@ -561,6 +634,26 @@ class ProjectSettingsDialog(QDialog):
         rel = rel.replace("\\", "/")
         self._script_edit.setText(rel)
 
+    # --- Shutdown Script ------------------------------------------------------
+
+    def _browse_shutdown_script(self):
+        """Open a file picker for the shutdown script."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Shutdown Script",
+            self._project.project_root,
+            "Python Files (*.py);;All Files (*)"
+        )
+        if not filepath:
+            return
+
+        # Convert to relative path from the project root.
+        try:
+            rel = os.path.relpath(filepath, self._project.project_root)
+        except ValueError:
+            rel = filepath
+        rel = rel.replace("\\", "/")
+        self._shutdown_script_edit.setText(rel)
+
     # --- Environment Variables Actions ----------------------------------------
 
     def _add_env_var(self):
@@ -638,6 +731,8 @@ class ProjectSettingsDialog(QDialog):
             "excluded_folders": excluded,
             "startup_script": self._script_edit.text().strip(),
             "startup_code": self._code_edit.toPlainText(),
+            "shutdown_script": self._shutdown_script_edit.text().strip(),
+            "shutdown_code": self._shutdown_code_edit.toPlainText(),
             "env_vars": env_vars,
         }
         self.accept()
@@ -647,7 +742,8 @@ class ProjectSettingsDialog(QDialog):
         Return the user's edited values after the dialog is accepted.
 
         :return: Dictionary with keys: name, python_paths, excluded_folders,
-            startup_script, startup_code, env_vars. Or None if cancelled.
+            startup_script, startup_code, shutdown_script, shutdown_code,
+            env_vars. Or None if cancelled.
         :rtype: dict or None
         """
         return self._result

@@ -697,9 +697,10 @@ class EditorGroup(QWidget):
         :rtype: MCACodeEditor or None
         """
         widget = self._tab_widget.currentWidget()
-        # Avoid returning non-editor widgets if something is off.
-        from mca_qt.widgets.code_editor import MCACodeEditor
-        if isinstance(widget, MCACodeEditor):
+        # Use class-name check instead of isinstance() so this survives
+        # plugin reloads.  After a reload the class object is re-created,
+        # causing isinstance() to fail on editors from the prior load.
+        if widget is not None and type(widget).__name__ == "MCACodeEditor":
             return widget
         return None
 

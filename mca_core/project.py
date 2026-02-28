@@ -11,6 +11,8 @@ A project file is a simple JSON document that tracks:
     - Excluded folders (hidden in the workspace tree)
     - Startup script (relative path to a .py file run on project open)
     - Startup inline code (Python code run after the script file)
+    - Shutdown script (relative path to a .py file run on project close)
+    - Shutdown inline code (Python code run before teardown on close)
     - Environment variables (key-value pairs set in os.environ on open)
     - Schema version (for future migration)
 
@@ -31,7 +33,8 @@ logger = logging.getLogger(__name__)
 # --- Constants ---------------------------------------------------------------
 
 PROJECT_FILENAME = ".mca-project"              # Name of the project config file.
-CURRENT_SCHEMA_VERSION = 1                      # Bump when the JSON schema changes.
+SESSION_FILENAME = ".mca-session.json"          # Per-project session manifest file.
+CURRENT_SCHEMA_VERSION = 2                      # Bump when the JSON schema changes.
 
 # Folders excluded from the workspace tree by default.
 DEFAULT_EXCLUDED_FOLDERS = {
@@ -91,6 +94,8 @@ class MCAProject:
         self._excluded_folders = list(DEFAULT_EXCLUDED_FOLDERS)
         self._startup_script = ""        # Relative path to a .py startup script.
         self._startup_code = ""          # Inline Python code run after the script.
+        self._shutdown_script = ""       # Relative path to a .py shutdown script.
+        self._shutdown_code = ""         # Inline Python code run before teardown.
         self._env_vars = {}              # Key-value pairs set in os.environ.
         self._schema_version = CURRENT_SCHEMA_VERSION
 
@@ -135,6 +140,18 @@ class MCAProject:
         :rtype: str
         """
         return os.path.join(self._project_root, PROJECT_FILENAME)
+
+    @property
+    def session_file_path(self):
+        """
+        Absolute path to the per-project session manifest file.
+
+        Used to save/restore the tab layout when switching between
+        the default workspace and this project.
+
+        :rtype: str
+        """
+        return os.path.join(self._project_root, SESSION_FILENAME)
 
     @property
     def python_paths(self):
@@ -242,6 +259,61 @@ class MCAProject:
         )
 
     @property
+    def shutdown_script(self):
+        """
+        Relative path to a Python script that runs when the project closes.
+
+        Empty string means no shutdown script.
+
+        :rtype: str
+        """
+        return self._shutdown_script
+
+    @shutdown_script.setter
+    def shutdown_script(self, path):
+        """
+        Set the shutdown script path (relative to project root).
+
+        :param str path: Relative path to a .py file, or empty string.
+        """
+        self._shutdown_script = path
+
+    @property
+    def shutdown_code(self):
+        """
+        Inline Python code that runs when the project closes.
+
+        Executed after the shutdown script file (if any), but before
+        environment variables and paths are torn down. Empty string
+        means no inline code.
+
+        :rtype: str
+        """
+        return self._shutdown_code
+
+    @shutdown_code.setter
+    def shutdown_code(self, code):
+        """
+        Set the inline shutdown code.
+
+        :param str code: Python code string, or empty string.
+        """
+        self._shutdown_code = code
+
+    @property
+    def resolved_shutdown_script(self):
+        """
+        Absolute path to the shutdown script, or empty string if not set.
+
+        :rtype: str
+        """
+        if not self._shutdown_script:
+            return ""
+        return os.path.normpath(
+            os.path.join(self._project_root, self._shutdown_script)
+        )
+
+    @property
     def env_vars(self):
         """
         Environment variables to set when the project is opened.
@@ -287,6 +359,8 @@ class MCAProject:
                                           list(DEFAULT_EXCLUDED_FOLDERS))
         self._startup_script = data.get("startup_script", "")
         self._startup_code = data.get("startup_code", "")
+        self._shutdown_script = data.get("shutdown_script", "")
+        self._shutdown_code = data.get("shutdown_code", "")
         self._env_vars = data.get("env_vars", {})
         self._schema_version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
 
@@ -325,6 +399,8 @@ class MCAProject:
             "excluded_folders": self._excluded_folders,
             "startup_script": self._startup_script,
             "startup_code": self._startup_code,
+            "shutdown_script": self._shutdown_script,
+            "shutdown_code": self._shutdown_code,
             "env_vars": self._env_vars,
         }
 
@@ -352,6 +428,13 @@ class MCAProject:
             if not os.path.isfile(script_path):
                 warnings.append("Startup script not found: {}".format(
                     self._startup_script))
+
+        # Validate shutdown script exists if specified.
+        if self._shutdown_script:
+            script_path = self.resolved_shutdown_script
+            if not os.path.isfile(script_path):
+                warnings.append("Shutdown script not found: {}".format(
+                    self._shutdown_script))
 
         return warnings
 

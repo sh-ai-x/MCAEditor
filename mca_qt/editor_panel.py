@@ -191,7 +191,11 @@ class MCAEditorPanel(QWidget):
         self._splitter_restore_pending = True
 
         # Restore the output panel content from the previous session.
-        self._restore_output()
+        # Skip when embedded in a DCC (e.g. Maya) — the host window
+        # loads the DCC's own session history instead.  Loading BOTH
+        # caused exponential output duplication across sessions.
+        if not self._embedded_in_dcc:
+            self._restore_output()
 
         # Auto-detect running DCCs after a short delay.
         QTimer.singleShot(1000, self._auto_detect_dccs)
@@ -440,25 +444,27 @@ class MCAEditorPanel(QWidget):
         self._project_button.clicked.connect(self._show_project_menu)
         self._toolbar.addWidget(self._project_button)
 
-        # --- Refresh button (visible only when a project is active) ---
-        self._refresh_button = QPushButton("Refresh")
-        self._refresh_button.setToolTip("Re-read project file and refresh paths")
-        self._refresh_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #cccccc;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 4px 10px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #4e4e52;
-            }
-        """)
-        self._refresh_button.clicked.connect(self._on_refresh_project)
-        self._refresh_button.setVisible(False)
-        self._toolbar.addWidget(self._refresh_button)
+        # --- Project action buttons (visible only when project active) ---
+        # Explicitly construct QAction with parent=self so the C++ lifetime
+        # is tied to the panel, not the toolbar.  toolbar.addAction("text")
+        # returns a weakly-owned wrapper that PySide6 can GC prematurely.
+        self._refresh_action = QAction("Refresh", self)
+        self._refresh_action.setToolTip("Re-read project file and refresh paths")
+        self._refresh_action.triggered.connect(self._on_refresh_project)
+        self._refresh_action.setVisible(False)
+        self._toolbar.addAction(self._refresh_action)
+
+        self._reload_action = QAction("Reload", self)
+        self._reload_action.setToolTip("Close and re-open the current project (runs shutdown then startup)")
+        self._reload_action.triggered.connect(self._on_reload_project)
+        self._reload_action.setVisible(False)
+        self._toolbar.addAction(self._reload_action)
+
+        self._shutdown_action = QAction("Shutdown", self)
+        self._shutdown_action.setToolTip("Close the current project (runs shutdown script then tears down)")
+        self._shutdown_action.triggered.connect(self._close_project)
+        self._shutdown_action.setVisible(False)
+        self._toolbar.addAction(self._shutdown_action)
 
     def _setup_connections(self):
         """Wire up signals between all UI components."""
@@ -972,10 +978,19 @@ class MCAEditorPanel(QWidget):
 
         If a ``.mca-project`` file already exists, loads it. Otherwise
         shows the creation dialog so the user can configure the project.
+        Saves the current context's tabs before switching, then restores
+        the project's saved tabs (or creates default buffers).
 
         :param str folder_path: Absolute path to the project root.
         """
-        # Close any existing project first.
+        # Guard: don't re-initialize the same project that's already open.
+        if self._active_project:
+            if os.path.normpath(self._active_project.project_root) == os.path.normpath(folder_path):
+                self._output.write_info("Project '{}' is already open.".format(
+                    self._active_project.name))
+                return
+
+        # Close any existing project first (saves its tabs, restores default).
         if self._active_project:
             self._close_project()
 
@@ -997,9 +1012,18 @@ class MCAEditorPanel(QWidget):
         for w in warnings:
             self._output.write_warning("Project: {}".format(w))
 
-        # Store and apply.
+        # Save the current (default) context's tabs before switching.
+        self._save_context_session()
+
+        # Store and apply project mode (workspace tree, paths, env vars).
         self._active_project = project
         self._apply_project_mode()
+
+        # Load the project's saved tabs (or create a fresh buffer).
+        manifest = self._session_manager.load_manifest_from(
+            project.session_file_path
+        )
+        self._switch_to_manifest(manifest)
 
         # Persist to settings.
         self._settings.add_recent_project(folder_path)
@@ -1011,19 +1035,28 @@ class MCAEditorPanel(QWidget):
         """
         Close the active project and return to the default workspace.
 
-        Removes project paths from sys.path, re-locks the workspace tree
-        to the scripts/ directory, hides the refresh button, and resets
-        the project button text.
+        Runs the shutdown script/code, removes project paths from
+        sys.path, re-locks the workspace tree to the scripts/ directory,
+        hides the project action buttons, and resets the project button.
         """
         if not self._active_project:
             return
 
         project_name = self._active_project.name
 
+        # Save the project's tabs before tearing down.
+        self._save_context_session()
+
+        # Run shutdown script/code while paths and env vars are still active.
+        self._run_shutdown_script()
+
         # Remove project env vars and paths.
         self._remove_env_vars()
         self._remove_project_paths()
 
+        # Clear the project reference BEFORE loading default tabs so
+        # _save_session_manifest (called inside _switch_to_manifest)
+        # routes to the default session.json, not the project file.
         self._active_project = None
 
         # Re-lock workspace to the default scripts directory.
@@ -1034,11 +1067,17 @@ class MCAEditorPanel(QWidget):
 
         # Reset UI elements.
         self._project_button.setText("No Project")
-        self._refresh_button.setVisible(False)
+        self._refresh_action.setVisible(False)
+        self._reload_action.setVisible(False)
+        self._shutdown_action.setVisible(False)
 
         # Reset terminal cwd back to scripts directory.
         self._bottom_terminal_panel._cwd = scripts_dir
         self._right_terminal_panel._cwd = scripts_dir
+
+        # Restore the default workspace tabs.
+        default_manifest = self._session_manager.load_manifest()
+        self._switch_to_manifest(default_manifest)
 
         # Clear last project path so it doesn't auto-reopen.
         self._settings.set_last_project_path("")
@@ -1069,9 +1108,11 @@ class MCAEditorPanel(QWidget):
         # Set excluded folders so the tree hides them.
         self._sidebar.set_excluded_folders(set(project.excluded_folders))
 
-        # Update toolbar button and show refresh.
+        # Update toolbar button and show project action buttons.
         self._project_button.setText(project.name)
-        self._refresh_button.setVisible(True)
+        self._refresh_action.setVisible(True)
+        self._reload_action.setVisible(True)
+        self._shutdown_action.setVisible(True)
 
         # Inject project paths into adapters and local sys.path.
         self._inject_project_paths()
@@ -1247,6 +1288,78 @@ class MCAEditorPanel(QWidget):
             else:
                 self._execute_locally(project.startup_code)
 
+    def _run_shutdown_script(self):
+        """
+        Execute the project's shutdown script and/or inline shutdown code.
+
+        The script file runs first, then the inline code. Both run while
+        paths and env vars are still active so the shutdown code can use
+        project imports and environment. Execution is routed through the
+        active DCC adapter (if connected) or the local Python interpreter.
+        """
+        project = self._active_project
+        if not project:
+            return
+
+        # Nothing to run if neither a script file nor inline code is set.
+        has_script = bool(project.shutdown_script)
+        has_code = bool(project.shutdown_code and project.shutdown_code.strip())
+        if not has_script and not has_code:
+            return
+
+        adapter = self._adapter_manager.get_active_adapter()
+
+        # --- Run the script file first (if configured) ---
+        if has_script:
+            script_path = project.resolved_shutdown_script
+            if not os.path.isfile(script_path):
+                self._output.write_warning(
+                    "Shutdown script not found: {}".format(project.shutdown_script))
+            else:
+                self._output.write_info("Running shutdown script: {}".format(
+                    project.shutdown_script))
+                try:
+                    with open(script_path, "r", encoding="utf-8") as f:
+                        file_code = f.read()
+                except OSError as exc:
+                    self._output.write_error(
+                        "Could not read shutdown script: {}".format(exc))
+                    file_code = None
+
+                if file_code:
+                    if adapter and adapter.is_connected:
+                        adapter.execute(file_code, "python")
+                    else:
+                        self._execute_locally(file_code)
+
+        # --- Run inline shutdown code (if configured) ---
+        if has_code:
+            self._output.write_info("Running inline shutdown code...")
+            if adapter and adapter.is_connected:
+                adapter.execute(project.shutdown_code, "python")
+            else:
+                self._execute_locally(project.shutdown_code)
+
+    def _on_reload_project(self):
+        """
+        Reload the active project by running a full shutdown then startup.
+
+        Remembers the project root, closes the project (which runs shutdown
+        scripts and tears down paths/env), then re-opens it (which runs
+        startup scripts and rebuilds everything).
+        """
+        if not self._active_project:
+            return
+
+        # Remember the project root before _close_project clears it.
+        project_root = self._active_project.project_root
+
+        # Full shutdown sequence.
+        self._close_project()
+
+        # Full startup sequence.
+        self._open_project(project_root)
+
     def _show_project_settings(self):
         """
         Open the Project Settings dialog for the active project.
@@ -1276,6 +1389,8 @@ class MCAEditorPanel(QWidget):
         self._active_project.excluded_folders = result["excluded_folders"]
         self._active_project.startup_script = result["startup_script"]
         self._active_project.startup_code = result["startup_code"]
+        self._active_project.shutdown_script = result["shutdown_script"]
+        self._active_project.shutdown_code = result["shutdown_code"]
         self._active_project.env_vars = result["env_vars"]
 
         # Save the updated .mca-project file.
@@ -1580,7 +1695,11 @@ class MCAEditorPanel(QWidget):
 
     def _new_buffer(self):
         """
-        Create a new buffer file in the workspace scripts directory.
+        Create a new buffer file in the active workspace directory.
+
+        When a project is active, the buffer is placed in the project
+        root so it's visible in the project tree. Otherwise it goes
+        into the default ``scripts/`` directory.
 
         The file is written to disk immediately so it appears in the
         workspace tree and is searchable by Find in Files / Go to
@@ -1597,10 +1716,29 @@ class MCAEditorPanel(QWidget):
             editor._buffer_id, "", editor.language
         )
 
+        # Place the buffer in the project root when a project is open,
+        # otherwise in the default scripts/ directory.
+        if self._active_project:
+            target_dir = self._active_project.project_root
+        else:
+            target_dir = self._session_manager.scripts_dir
+
         # Build the full on-disk path so this is a file-backed tab.
-        filepath = os.path.join(
-            self._session_manager.scripts_dir, editor._buffer_filename
-        )
+        filepath = os.path.join(target_dir, editor._buffer_filename)
+
+        # If the target is the project root, copy the empty file there
+        # (save_buffer always writes to scripts/).
+        if self._active_project:
+            try:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write("")
+            except OSError as exc:
+                logger.warning("Could not create project buffer: %s", exc)
+                # Fall back to scripts/ directory.
+                filepath = os.path.join(
+                    self._session_manager.scripts_dir, editor._buffer_filename
+                )
+
         editor.file_path = filepath
 
         editor.execute_requested.connect(self._execute_all)
@@ -2067,7 +2205,15 @@ class MCAEditorPanel(QWidget):
         group_iter = iter(groups)
         self._fill_layout_tabs(layout_tree, group_iter)
 
-        self._session_manager.save_manifest_v3(layout_tree, active_group_idx)
+        # Route the save to the correct file: project session file if a
+        # project is active, otherwise the default session.json.
+        if self._active_project:
+            self._session_manager.save_manifest_to(
+                self._active_project.session_file_path,
+                layout_tree, active_group_idx,
+            )
+        else:
+            self._session_manager.save_manifest_v3(layout_tree, active_group_idx)
 
     def _fill_layout_tabs(self, node, group_iter):
         """
@@ -2112,9 +2258,93 @@ class MCAEditorPanel(QWidget):
             for child in node.get("children", []):
                 self._fill_layout_tabs(child, group_iter)
 
-    def _restore_session(self):
+    def _save_context_session(self):
         """
-        Restore tabs from the session manifest saved on last exit.
+        Flush all editor content to disk and save the session manifest.
+
+        Called during context switches (open/close project) to ensure
+        the outgoing context's tabs are fully persisted before the
+        incoming context replaces them.
+        """
+        # Flush every temp buffer to disk so nothing is lost.
+        all_editors = self._group_container.all_editors()
+        for editor, name, path in all_editors:
+            if not path:
+                self._save_buffer_content(editor)
+
+        # Write the manifest to the correct file (project or default).
+        self._save_session_manifest()
+
+    def _switch_to_manifest(self, manifest):
+        """
+        Tear down all existing tabs and rebuild from a manifest.
+
+        If *manifest* is a valid session dict, the layout is rebuilt
+        and tabs are populated from it. If *manifest* is None (e.g.
+        first time opening a project with no saved session), all
+        existing tabs are removed and a single fresh buffer is created.
+
+        This is the single entry-point for context switches (open/close
+        project). It always goes through ``restore_layout_state`` so the
+        old group widgets are destroyed and new ones are created.
+
+        :param dict manifest: A v3 session manifest dict, or None.
+        """
+        if manifest:
+            # Delegate to _restore_session which calls restore_layout_state
+            # internally — this tears down old groups and rebuilds new ones.
+            restored = self._restore_session(manifest)
+        else:
+            restored = False
+
+        if not restored:
+            # No manifest or it had no tabs — build a blank single-group
+            # layout so the old tabs are removed, then add one fresh buffer.
+            blank_layout = {
+                "layout": {
+                    "type": "splitter",
+                    "orientation": "horizontal",
+                    "sizes": [],
+                    "children": [
+                        {"type": "group", "tabs": [], "active_tab": 0},
+                    ],
+                },
+                "active_group": 0,
+            }
+            self._group_container.restore_layout_state(blank_layout)
+            self._new_buffer()
+
+        # After rebuilding the layout, force the active group to re-sync
+        # its current tab index.  During _restore_session, tabs are added
+        # while QTabWidget signals are blocked, so currentWidget() can
+        # return None even though tabs exist.  Re-setting the index with
+        # signals live fixes the internal QTabWidget state.
+        # After rebuilding the layout, force the active group to re-sync
+        # its current tab index and give keyboard focus to the editor.
+        active_group = self._group_container.active_group()
+        if active_group and active_group.count() > 0:
+            idx = active_group.current_index()
+            if idx < 0 or idx >= active_group.count():
+                idx = 0
+            active_group.set_current_index(idx)
+
+        # Grab the editor directly from the QTabWidget to avoid the
+        # isinstance() check in current_editor(), which can fail after
+        # plugin reloads due to class identity mismatch.
+        if active_group:
+            editor = active_group._tab_widget.currentWidget()
+        else:
+            editor = None
+        if editor:
+            editor.setFocus()
+
+    def _restore_session(self, manifest=None):
+        """
+        Restore tabs from a session manifest.
+
+        If *manifest* is provided, uses it directly (e.g. from a
+        per-project session file). Otherwise loads the default
+        ``session.json`` manifest.
 
         Supports v1, v2, and v3 manifest formats (auto-upgrades to v3).
         For file-backed tabs, re-opens the file from disk. For buffer
@@ -2123,10 +2353,13 @@ class MCAEditorPanel(QWidget):
         V3 manifests use a recursive layout tree that supports nested
         horizontal/vertical splits.
 
+        :param dict manifest: Pre-loaded manifest dict, or None to load
+            from the default session.json.
         :return: True if at least one tab was restored.
         :rtype: bool
         """
-        manifest = self._session_manager.load_manifest()
+        if manifest is None:
+            manifest = self._session_manager.load_manifest()
         if not manifest:
             return False
 

@@ -252,23 +252,14 @@ class InternalMayaAdapter(DCCAdapter):
         # Collect captured output.
         output = buf.getvalue()
 
-        # Echo the executed code and output to Maya's script editor.
-        # MGlobal.displayInfo() can trigger Maya UI updates that steal
-        # keyboard focus from the code editor, so save and restore focus.
-        try:
-            from mca_qt.qt_compat import QApplication, Qt as _Qt
-            _app = QApplication.instance()
-            _saved = _app.focusWidget() if _app else None
-        except Exception:
-            _app, _saved = None, None
-
-        self._echo_to_script_editor(code, output, error)
-
-        # Restore focus if displayInfo() stole it.
-        if _saved and _app:
-            _current = _app.focusWidget()
-            if _current is not _saved:
-                _saved.setFocus(_Qt.FocusReason.OtherFocusReason)
+        # NOTE: We intentionally do NOT echo code/output to Maya's
+        # script editor here.  The adapter's _on_output callback writes
+        # to our output panel, and MCAMayaWindow's output hook captures
+        # Maya-originated messages (plugin warnings, etc.).  Echoing
+        # via displayInfo() was causing every execution result to appear
+        # TWICE in our panel — once from the callback and once from the
+        # hook catching the echo — because Maya defers the hook callback
+        # past the _suppress_output_hook flag reset.
 
         # If there was an error, format the traceback.
         if error:

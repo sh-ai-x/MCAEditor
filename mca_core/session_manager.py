@@ -489,6 +489,75 @@ class SessionManager:
         except Exception as exc:
             logger.error("Failed to save session manifest: %s", exc)
 
+    def save_manifest_to(self, filepath, layout_tree, active_group_index):
+        """
+        Write a v3 session manifest to an arbitrary file path.
+
+        Used for per-project session files (``.mca-session.json``)
+        stored in the project root. The format is identical to
+        ``save_manifest_v3`` but writes to the caller-specified path
+        instead of the default ``session.json``.
+
+        :param str filepath: Absolute path to write the manifest file.
+        :param dict layout_tree: Recursive layout dict (same as save_manifest_v3).
+        :param int active_group_index: Index of the active group (DFS order).
+        """
+        manifest = {
+            "version": self.MANIFEST_VERSION,
+            "next_buffer_id": self._next_buffer_id,
+            "layout": layout_tree,
+            "active_group": active_group_index,
+        }
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=4)
+
+            # Count total tabs for the debug log.
+            total = self._count_tabs_in_tree(layout_tree)
+            logger.debug("Saved session manifest to %s: %d tabs", filepath, total)
+        except Exception as exc:
+            logger.error("Failed to save session manifest to %s: %s", filepath, exc)
+
+    def load_manifest_from(self, filepath):
+        """
+        Read and parse a session manifest from an arbitrary file path.
+
+        Used for per-project session files (``.mca-session.json``).
+        Updates ``_next_buffer_id`` using ``max(current, loaded)`` to
+        prevent buffer ID collisions when switching between contexts.
+
+        :param str filepath: Absolute path to the manifest file.
+        :return: Parsed manifest dict, or None if missing/corrupt.
+        :rtype: dict or None
+        """
+        if not os.path.isfile(filepath):
+            logger.debug("No session manifest found at %s", filepath)
+            return None
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+
+            # Use max() so IDs never collide across contexts.
+            if "next_buffer_id" in manifest:
+                self._next_buffer_id = max(
+                    self._next_buffer_id, manifest["next_buffer_id"]
+                )
+
+            logger.debug("Loaded session manifest from %s, next_buffer_id=%d",
+                         filepath, self._next_buffer_id)
+            return manifest
+
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.warning("Corrupt session manifest at %s, ignoring: %s",
+                           filepath, exc)
+            return None
+        except Exception as exc:
+            logger.error("Failed to load session manifest from %s: %s",
+                         filepath, exc)
+            return None
+
     def _count_tabs_in_tree(self, node):
         """
         Recursively count the total number of tabs in a layout tree.
