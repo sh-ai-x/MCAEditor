@@ -10,6 +10,7 @@ A project file is a simple JSON document that tracks:
     - Python source paths (relative to project root, added to sys.path)
     - Excluded folders (hidden in the workspace tree)
     - Startup script (relative path to a .py file run on project open)
+    - Startup inline code (Python code run after the script file)
     - Environment variables (key-value pairs set in os.environ on open)
     - Schema version (for future migration)
 
@@ -89,6 +90,7 @@ class MCAProject:
         self._python_paths = []          # Relative paths (e.g. ["src", "lib"]).
         self._excluded_folders = list(DEFAULT_EXCLUDED_FOLDERS)
         self._startup_script = ""        # Relative path to a .py startup script.
+        self._startup_code = ""          # Inline Python code run after the script.
         self._env_vars = {}              # Key-value pairs set in os.environ.
         self._schema_version = CURRENT_SCHEMA_VERSION
 
@@ -206,6 +208,27 @@ class MCAProject:
         self._startup_script = path
 
     @property
+    def startup_code(self):
+        """
+        Inline Python code that runs when the project opens.
+
+        Executed after the startup script file (if any). Empty string
+        means no inline code.
+
+        :rtype: str
+        """
+        return self._startup_code
+
+    @startup_code.setter
+    def startup_code(self, code):
+        """
+        Set the inline startup code.
+
+        :param str code: Python code string, or empty string.
+        """
+        self._startup_code = code
+
+    @property
     def resolved_startup_script(self):
         """
         Absolute path to the startup script, or empty string if not set.
@@ -263,6 +286,7 @@ class MCAProject:
         self._excluded_folders = data.get("excluded_folders",
                                           list(DEFAULT_EXCLUDED_FOLDERS))
         self._startup_script = data.get("startup_script", "")
+        self._startup_code = data.get("startup_code", "")
         self._env_vars = data.get("env_vars", {})
         self._schema_version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
 
@@ -300,6 +324,7 @@ class MCAProject:
             "python_paths": self._python_paths,
             "excluded_folders": self._excluded_folders,
             "startup_script": self._startup_script,
+            "startup_code": self._startup_code,
             "env_vars": self._env_vars,
         }
 

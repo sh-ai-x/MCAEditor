@@ -7,7 +7,8 @@ hand-editing the ``.mca-project`` JSON file. Editable fields:
     - Project name
     - Python source paths (add/remove relative directories)
     - Excluded folders (add/remove folder names)
-    - Startup script (relative path to a .py file)
+    - Startup script file (relative path to a .py file)
+    - Startup inline code (Python code typed directly into the dialog)
     - Environment variables (key=value pairs set in os.environ)
 
 Dependencies:
@@ -22,6 +23,7 @@ from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QTabWidget, QWidget, QGroupBox, QFormLayout,
+    QPlainTextEdit,
     Qt,
 )
 
@@ -83,6 +85,18 @@ _PRIMARY_BTN_STYLE = """
 """
 
 _LABEL_STYLE = "color: #bbbbbb; font-size: 11px;"
+
+_CODE_EDIT_STYLE = """
+    QPlainTextEdit {
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+        border: 1px solid #555;
+        border-radius: 3px;
+        padding: 4px;
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 12px;
+    }
+"""
 
 _GROUP_STYLE = """
     QGroupBox {
@@ -272,7 +286,7 @@ class ProjectSettingsDialog(QDialog):
         self._result = None
 
         self.setWindowTitle("Project Settings -- {}".format(project.name))
-        self.setMinimumSize(500, 450)
+        self.setMinimumSize(500, 600)
         self.setModal(True)
         self._setup_ui()
 
@@ -366,18 +380,39 @@ class ProjectSettingsDialog(QDialog):
         # --- Startup Script ---
         script_group = QGroupBox("Startup Script")
         script_group.setStyleSheet(_GROUP_STYLE)
-        script_layout = QHBoxLayout(script_group)
+        script_layout = QVBoxLayout(script_group)
 
+        # File path row — point to an external .py file.
+        file_label = QLabel("Script file (relative to project root):")
+        file_label.setStyleSheet(_LABEL_STYLE)
+        script_layout.addWidget(file_label)
+
+        file_row = QHBoxLayout()
         self._script_edit = QLineEdit()
         self._script_edit.setText(self._project.startup_script)
-        self._script_edit.setPlaceholderText("e.g. scripts/startup.py (relative to project root)")
+        self._script_edit.setPlaceholderText("e.g. scripts/startup.py")
         self._script_edit.setStyleSheet(_INPUT_STYLE)
-        script_layout.addWidget(self._script_edit)
+        file_row.addWidget(self._script_edit)
 
         browse_btn = QPushButton("Browse...")
         browse_btn.setStyleSheet(_BTN_STYLE)
         browse_btn.clicked.connect(self._browse_startup_script)
-        script_layout.addWidget(browse_btn)
+        file_row.addWidget(browse_btn)
+        script_layout.addLayout(file_row)
+
+        # Inline code editor — small script typed directly.
+        code_label = QLabel("Inline code (runs after the script file, if any):")
+        code_label.setStyleSheet(_LABEL_STYLE)
+        script_layout.addWidget(code_label)
+
+        self._code_edit = QPlainTextEdit()
+        self._code_edit.setPlainText(self._project.startup_code)
+        self._code_edit.setPlaceholderText("# Python code to run on project open...")
+        self._code_edit.setStyleSheet(_CODE_EDIT_STYLE)
+        self._code_edit.setMinimumHeight(90)
+        self._code_edit.setMaximumHeight(160)
+        self._code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
+        script_layout.addWidget(self._code_edit)
 
         layout.addWidget(script_group)
 
@@ -602,6 +637,7 @@ class ProjectSettingsDialog(QDialog):
             "python_paths": python_paths,
             "excluded_folders": excluded,
             "startup_script": self._script_edit.text().strip(),
+            "startup_code": self._code_edit.toPlainText(),
             "env_vars": env_vars,
         }
         self.accept()
@@ -611,7 +647,7 @@ class ProjectSettingsDialog(QDialog):
         Return the user's edited values after the dialog is accepted.
 
         :return: Dictionary with keys: name, python_paths, excluded_folders,
-            startup_script, env_vars. Or None if cancelled.
+            startup_script, startup_code, env_vars. Or None if cancelled.
         :rtype: dict or None
         """
         return self._result

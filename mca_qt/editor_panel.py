@@ -1196,40 +1196,56 @@ class MCAEditorPanel(QWidget):
 
     def _run_startup_script(self):
         """
-        Execute the project's startup script if one is configured.
+        Execute the project's startup script and/or inline startup code.
 
-        The script runs after paths are injected so imports from
-        the project's python_paths are available. Execution is routed
-        through the active DCC adapter (if connected) or the local
-        Python interpreter, matching the normal "Execute" behavior.
+        The script file runs first, then the inline code. Both run after
+        paths are injected so imports from the project's python_paths are
+        available. Execution is routed through the active DCC adapter
+        (if connected) or the local Python interpreter, matching the
+        normal "Execute" behavior.
         """
         project = self._active_project
-        if not project or not project.startup_script:
+        if not project:
             return
 
-        script_path = project.resolved_startup_script
-        if not os.path.isfile(script_path):
-            self._output.write_warning(
-                "Startup script not found: {}".format(project.startup_script))
+        # Nothing to run if neither a script file nor inline code is set.
+        has_script = bool(project.startup_script)
+        has_code = bool(project.startup_code and project.startup_code.strip())
+        if not has_script and not has_code:
             return
 
-        self._output.write_info("Running startup script: {}".format(
-            project.startup_script))
-
-        try:
-            with open(script_path, "r", encoding="utf-8") as f:
-                code = f.read()
-        except OSError as exc:
-            self._output.write_error(
-                "Could not read startup script: {}".format(exc))
-            return
-
-        # Route through the active adapter if connected, otherwise run locally.
         adapter = self._adapter_manager.get_active_adapter()
-        if adapter and adapter.is_connected:
-            adapter.execute(code, "python")
-        else:
-            self._execute_locally(code)
+
+        # --- Run the script file first (if configured) ---
+        if has_script:
+            script_path = project.resolved_startup_script
+            if not os.path.isfile(script_path):
+                self._output.write_warning(
+                    "Startup script not found: {}".format(project.startup_script))
+            else:
+                self._output.write_info("Running startup script: {}".format(
+                    project.startup_script))
+                try:
+                    with open(script_path, "r", encoding="utf-8") as f:
+                        file_code = f.read()
+                except OSError as exc:
+                    self._output.write_error(
+                        "Could not read startup script: {}".format(exc))
+                    file_code = None
+
+                if file_code:
+                    if adapter and adapter.is_connected:
+                        adapter.execute(file_code, "python")
+                    else:
+                        self._execute_locally(file_code)
+
+        # --- Run inline startup code (if configured) ---
+        if has_code:
+            self._output.write_info("Running inline startup code...")
+            if adapter and adapter.is_connected:
+                adapter.execute(project.startup_code, "python")
+            else:
+                self._execute_locally(project.startup_code)
 
     def _show_project_settings(self):
         """
@@ -1259,6 +1275,7 @@ class MCAEditorPanel(QWidget):
         self._active_project.python_paths = result["python_paths"]
         self._active_project.excluded_folders = result["excluded_folders"]
         self._active_project.startup_script = result["startup_script"]
+        self._active_project.startup_code = result["startup_code"]
         self._active_project.env_vars = result["env_vars"]
 
         # Save the updated .mca-project file.
