@@ -548,28 +548,33 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not history or not history.strip():
             return
 
-        # Filter out blank lines and internal MCA log messages.  The raw
-        # reporter text has empty lines between entries, and MCA's Python
-        # loggers may have emitted INFO messages before setLevel(WARNING)
-        # took effect (e.g., during initializePlugin).
-        lines = []
-        for line in history.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Skip internal MCA logger lines — they follow the pattern
-            # "mca_core.module : ..." or "mca_qt.module : ..." etc.
-            if stripped.startswith(("mca_core.", "mca_qt.", "mca_maya.", "mca_editor.")):
-                continue
-            lines.append(line)
+        # The cmdScrollFieldReporter stores entries separated by blank
+        # lines internally, but Maya's Script Editor renders them packed
+        # tightly (no gaps).  Strip blank lines to match the display,
+        # but keep ALL content lines — no content filtering.
+        lines = [line for line in history.splitlines() if line.strip()]
         if not lines:
             return
 
-        # Batch-insert the entire history in a single cursor operation.
-        # This avoids hundreds of individual write_output() calls, each
-        # of which triggers cursor movement + ensureCursorVisible + repaint.
-        cleaned = "\n".join(lines) + "\n"
-        self._panel._output.write_bulk(cleaned)
+        # Route each history line through the appropriate colored write
+        # method so errors show red, warnings show orange, etc. — matching
+        # Charcoal and the Script Editor's color coding.  The batch buffer
+        # accumulates all lines and flushes them in one paint cycle.
+        output = self._panel._output
+        for line in lines:
+            stripped = line.strip()
+
+            # Detect message type from the prefix that Maya's output
+            # system embedded in the reporter text.
+            if "Error:" in stripped and stripped.startswith("//"):
+                output.write_error(line)
+            elif "Warning:" in stripped and stripped.startswith("//"):
+                output.write_warning(line)
+            elif stripped.startswith("// Result:"):
+                output.write_result(line)
+            else:
+                output.write_output(line)
+
         logger.info("Loaded %d lines of Maya session history", len(lines))
 
     def _on_maya_output(self, message, message_type, client_data):
@@ -577,7 +582,18 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         Callback fired by Maya for every line of output.
 
         Routes messages to the appropriate output window method based
-        on the message type (display, error, warning, result, info).
+        on the message type, with color coding for errors, warnings,
+        results, and info.
+
+        This callback is the SOLE source of output for the MCA Editor
+        panel when running inside Maya.  The internal adapter does not
+        capture stdout — all output flows through Maya's native output
+        system and arrives here.
+
+        NO content filtering is applied — every message that appears
+        in Maya's Script Editor should also appear here.  The only
+        exception is the ``cutCopyPaste.mel`` artifact which is caused
+        by MCA Editor's hotkey handling, not by user code.
 
         :param str message: The output text from Maya.
         :param int message_type: MCommandMessage message type constant.
@@ -587,60 +603,37 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not message or not message.strip():
             return
 
-        # Skip messages echoed by the internal adapter to Maya's script
-        # editor.  The adapter sets this flag while calling displayInfo()
-        # so we don't duplicate the output in MCA Editor's panel.
-        #
-        # IMPORTANT: We must import the MODULE and read the attribute,
-        # NOT use ``from module import var``.  The latter copies the bool
-        # value at import time — since bools are immutable, subsequent
-        # changes to the module-level flag would not be seen here.
-        import mca_core.adapters.internal_maya_adapter as _ima
-        if _ima._suppress_output_hook:
-            return
-
         # Suppress the harmless "Nothing is selected" error from Maya's
         # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
         # during focus transitions and nothing is selected in the viewport.
+        # This is an MCA Editor artifact, not real Maya output.
         if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
-            return
-
-        # Suppress internal MCA log messages that leak through Maya's output
-        # system.  Even though we set parent loggers to WARNING, Maya's root
-        # logging handler or sys.stdout/stderr capture can still forward
-        # messages from before the level was set, or from direct print calls.
-        stripped = message.strip()
-        if stripped.startswith(("mca_core.", "mca_qt.", "mca_maya.", "mca_editor.")):
             return
 
         text = message.rstrip()
         output = self._panel._output
 
-        # Preserve keyboard focus during output writes.  Writing to the
-        # output QPlainTextEdit can trigger cursor/scroll changes that
-        # inadvertently move Qt focus away from the code editor, causing
-        # the user's typing to suddenly go to Maya instead.
-        app = QApplication.instance()
-        saved_focus = app.focusWidget() if app else None
-
         # Route to the appropriate output method based on message type.
+        # Color coding: red for errors, orange for warnings, yellow for
+        # results, blue for info, white for display (print output).
+        # No focus save/restore needed — OutputWindow uses a document
+        # cursor for batch writes, which never affects widget focus.
         if message_type == om2.MCommandMessage.kError:
             output.write_error(text)
+
         elif message_type == om2.MCommandMessage.kWarning:
             output.write_warning(text)
+
         elif message_type == om2.MCommandMessage.kResult:
             output.write_result(text)
+
         elif message_type == om2.MCommandMessage.kInfo:
             output.write_info(text)
+
         else:
             # kDisplay and any other types — standard output.
+            # This is the path for print() output and MEL echo.
             output.write_output(text)
-
-        # Restore focus if it moved away during the write.
-        if saved_focus and app:
-            current_focus = app.focusWidget()
-            if current_focus is not saved_focus:
-                saved_focus.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # --- Status Bar ----------------------------------------------------------
 

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Hex color codes for each message type, matching the dark theme.
 COLOR_NORMAL = "#cccccc"       # Default output text
 COLOR_ERROR = "#f44747"        # Error messages (red)
-COLOR_WARNING = "#cca700"      # Warning messages (orange)
+COLOR_WARNING = "#e5e510"      # Warning messages (yellow)
 COLOR_SUCCESS = "#4ec9b0"      # Success messages (green)
 COLOR_INFO = "#569cd6"         # Informational messages (blue)
 COLOR_RESULT = "#dcdcaa"       # Return values / results (yellow)
@@ -465,6 +465,18 @@ class _OutputTextEdit(QPlainTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
 
+        # Hide the blinking text cursor — output is read-only, so a
+        # visible insertion caret is misleading (Maya's Script Editor
+        # also has no blinking cursor in its output pane).
+        self.setCursorWidth(0)
+
+        # Prevent accidental drag-and-drop of text into the output area.
+        self.setAcceptDrops(False)
+
+        # Disable word wrap — long lines scroll horizontally, matching
+        # Maya's Script Editor and Charcoal behavior.
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+
         # Explicit interaction flags ensure that clicking to select text
         # also gives this widget keyboard focus, which is critical for
         # the Maya hotkey filter to recognize focus is inside our editor.
@@ -618,7 +630,21 @@ class OutputWindow(QWidget):
         # Current output font size (overridden by restore_font_size).
         self._font_size = 11
 
+        # --- Batch buffering for output messages ---
+        # Instead of inserting each message immediately (which triggers
+        # setTextCursor + ensureCursorVisible = two repaints per message),
+        # we buffer messages and flush them all in one pass on a 16ms timer.
+        # This coalesces rapid output into a single paint cycle (~60 fps).
+        self._pending_messages = []
+
         self._setup_ui()
+
+        # Single-shot timer to flush buffered messages.  Created after
+        # _setup_ui so the output widget already exists.
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(16)  # ~60 fps refresh rate.
+        self._flush_timer.timeout.connect(self._flush_pending)
 
     def _setup_ui(self):
         """Build the output window layout: header bar + search bar + text area."""
@@ -784,25 +810,62 @@ class OutputWindow(QWidget):
 
     def _append_formatted(self, text, fmt):
         """
-        Append text with specific formatting to the output area.
+        Buffer a formatted message for batch insertion.
 
-        Automatically scrolls to the bottom so the latest output
-        is always visible.
+        Messages are queued in ``_pending_messages`` and flushed by
+        ``_flush_pending()`` on the next 16ms timer tick.  This avoids
+        per-message ``setTextCursor()`` + ``ensureCursorVisible()`` calls
+        that cause chunky output and focus theft during rapid streaming.
 
         :param str text: The text to append.
         :param QTextCharFormat fmt: The format to apply.
         """
-        cursor = self._output.textCursor()
+        self._pending_messages.append((text, fmt))
+
+        # Start the flush timer if it isn't already running.
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending(self):
+        """
+        Flush all buffered messages into the output in a single pass.
+
+        Uses a cursor created from the document (NOT ``textCursor()``)
+        so the write is purely data-level — no widget focus changes, no
+        ``setTextCursor()`` calls, no repaints per message.
+
+        Smart auto-scroll: only scrolls to the bottom if the user was
+        already at or near the bottom before insertion.  If the user has
+        scrolled up to read earlier output, we leave the viewport alone.
+        """
+        if not self._pending_messages:
+            return
+
+        # Snapshot the scroll position BEFORE inserting.  If the user
+        # was at (or very near) the bottom, we'll auto-scroll after.
+        scrollbar = self._output.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+
+        # Create a cursor from the document — this is a data-only cursor
+        # that never interacts with the widget's visible selection or
+        # focus state.  No setTextCursor() call required.
+        cursor = QTextCursor(self._output.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
-        # Optionally prepend a timestamp.
-        if self._show_timestamps:
-            ts = datetime.now().strftime("[%H:%M:%S] ")
-            cursor.insertText(ts, self._fmt_timestamp)
+        # Insert all buffered messages in one pass.
+        for text, fmt in self._pending_messages:
+            # Optionally prepend a timestamp.
+            if self._show_timestamps:
+                ts = datetime.now().strftime("[%H:%M:%S] ")
+                cursor.insertText(ts, self._fmt_timestamp)
+            cursor.insertText(text + "\n", fmt)
 
-        cursor.insertText(text + "\n", fmt)
-        self._output.setTextCursor(cursor)
-        self._output.ensureCursorVisible()
+        # Clear the buffer.
+        self._pending_messages.clear()
+
+        # Auto-scroll only if the user was already at the bottom.
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
 
     # --- Public Write Methods -----------------------------------------------
 
@@ -900,8 +963,8 @@ class OutputWindow(QWidget):
         ``write_output()`` for each line — hundreds of lines insert in
         one paint cycle instead of hundreds of separate repaints.
 
-        Disables widget updates during the insert, then scrolls to the
-        bottom afterward.
+        Uses a document cursor (no focus side effects) and disables
+        widget updates during the insert, then scrolls to the bottom.
 
         :param str text: The full text block to insert.
         """
@@ -911,14 +974,15 @@ class OutputWindow(QWidget):
         # Suspend repaints while we do the bulk insert.
         self._output.setUpdatesEnabled(False)
 
-        cursor = self._output.textCursor()
+        # Use a document cursor — no focus or selection side effects.
+        cursor = QTextCursor(self._output.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text, self._fmt_normal)
-        self._output.setTextCursor(cursor)
 
         # Re-enable updates and scroll to the bottom.
         self._output.setUpdatesEnabled(True)
-        self._output.ensureCursorVisible()
+        scrollbar = self._output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     # --- Clear & Configuration -----------------------------------------------
 

@@ -6,6 +6,11 @@ Direct-execution adapter for when MCA Editor runs INSIDE Maya's process
 calls ``maya.cmds``, ``maya.mel.eval()``, and ``exec()`` directly in
 Maya's ``__main__`` namespace.
 
+Output from executed code (``print()``, results, errors) flows through
+Maya's native output system — the same pipeline that feeds the Script
+Editor and Charcoal Editor. The ``MCommandMessage`` callback installed
+in ``maya_window.py`` is the sole route into MCA Editor's output panel.
+
 This adapter is always "connected" — we ARE Maya.
 
 Dependencies:
@@ -13,7 +18,6 @@ Dependencies:
     - maya.mel (available only inside Maya's Python interpreter)
 """
 
-import io
 import sys
 import logging
 import traceback
@@ -22,12 +26,6 @@ from .base_adapter import DCCAdapter, DCCType, ConnectionState
 
 # Module-level logger for internal Maya operations.
 logger = logging.getLogger(__name__)
-
-# Flag to suppress the MCA output hook while echoing to Maya's script editor.
-# The internal adapter sets this True before calling MGlobal.displayInfo() and
-# clears it after, so _on_maya_output() in maya_window.py can skip the echo
-# and avoid duplicate output in MCA Editor's panel.
-_suppress_output_hook = False
 
 
 # --- Internal Maya Adapter --------------------------------------------------
@@ -45,7 +43,7 @@ class InternalMayaAdapter(DCCAdapter):
         - Always "connected" (we ARE Maya)
         - Executes in Maya's ``__main__`` namespace via eval/exec
         - Same eval-first-then-exec pattern for expression display
-        - Captures stdout/stderr with StringIO
+        - Output flows through Maya's native output system (no stdout capture)
     """
 
     def __init__(self):
@@ -189,15 +187,14 @@ class InternalMayaAdapter(DCCAdapter):
         """
         Execute code directly in Maya's interpreter.
 
-        For Python, uses the same eval-first-then-exec pattern as the
-        TCP adapter, but without base64 wrapping. Captures stdout/stderr
-        via StringIO redirect.
+        For Python, uses the eval-first-then-exec pattern. Output flows
+        through Maya's native output system (no stdout capture).
 
         For MEL, calls ``maya.mel.eval()`` directly.
 
         :param str code: Source code to execute.
         :param str language: 'python' or 'mel' (defaults to 'python').
-        :return: Output from execution.
+        :return: Empty string (output arrives via MCommandMessage callback).
         :rtype: str
         """
         # Default to Python if no language specified.
@@ -213,141 +210,136 @@ class InternalMayaAdapter(DCCAdapter):
         """
         Execute Python code directly in Maya's ``__main__`` namespace.
 
-        Uses the same eval-first-then-exec pattern as the TCP adapter:
-        1. Try to compile as "eval" — single expressions show their result.
+        Uses the eval-first-then-exec pattern:
+        1. Try to compile as "eval" — single expressions show their result
+           via ``MGlobal.displayResult()`` so it appears in Maya's output
+           system (Script Editor, MCA output panel, Charcoal, etc.).
         2. Fall back to "exec" for statements (imports, assignments, etc.).
 
-        Stdout is redirected to a StringIO buffer so print() output is
-        captured and returned to the MCA Editor output panel.  After
-        execution, the code and output are echoed to Maya's script
-        editor via ``sys.__stdout__`` so history is visible there too.
+        Stdout is NOT redirected.  All ``print()`` output flows through
+        Maya's normal stdout hook, which routes it to the Script Editor
+        and fires the ``MCommandMessage`` callback.  This ensures MCA
+        Editor's output is identical to Maya's Script Editor — the
+        ``MCommandMessage`` callback in ``maya_window.py`` is the sole
+        route into MCA Editor's output panel.
+
+        Errors are routed through ``MGlobal.displayError()`` so they
+        appear in Maya's Script Editor too (matching Charcoal's behavior).
+        Maya commands that raise exceptions (e.g. ``cmds.error()``)
+        already display their error via Maya's output system before the
+        exception propagates — we skip re-display for those to avoid
+        duplicate error messages.
 
         :param str code: Python source code to execute.
-        :return: Captured output.
+        :return: Empty string (output arrives via MCommandMessage callback).
         :rtype: str
         """
         import __main__
-
-        # Redirect stdout to capture print() output.
-        old_stdout = sys.stdout
-        sys.stdout = buf = io.StringIO()
-        error = None
+        import maya.api.OpenMaya as om2
 
         try:
-            # Try eval mode first — expressions like variable names show their value.
+            # Try eval mode first — expressions like variable names,
+            # function calls, etc. show their return value.
             try:
                 compiled = compile(code, "<mca_editor>", "eval")
                 result = eval(compiled, __main__.__dict__)
+
+                # Route the result through Maya's output system so it
+                # appears in BOTH the Script Editor and our panel (via
+                # the MCommandMessage callback with kResult type).
                 if result is not None:
-                    print("# Result: {} #".format(repr(result)))
+                    om2.MGlobal.displayResult(repr(result))
+
             except SyntaxError:
                 # Not a single expression — execute as statements.
+                # print() calls inside the code go to Maya's hooked
+                # stdout, which triggers MCommandMessage callbacks.
                 exec(compile(code, "<mca_editor>", "exec"), __main__.__dict__)
+
         except Exception as exc:
-            error = exc
-        finally:
-            # Always restore stdout, even if code raised.
-            sys.stdout = old_stdout
+            # Determine if this error was already displayed by Maya's
+            # own output system.  Maya commands like cmds.error(),
+            # cmds.warning(), cmds.polySphere(invalidFlag=True), etc.
+            # fire MCommandMessage BEFORE the exception reaches us.
+            # Re-displaying those would create duplicates.
+            #
+            # Heuristic: RuntimeError from Maya C++ commands has already
+            # been displayed.  Pure Python errors (NameError, TypeError,
+            # SyntaxError, etc.) have NOT been displayed and need routing
+            # through displayError().
+            if isinstance(exc, RuntimeError):
+                # Maya already displayed this — log but don't re-display.
+                logger.debug("Maya RuntimeError (already displayed): %s", exc)
+            else:
+                # Pure Python error — route through Maya's output system
+                # so it appears in BOTH the Script Editor and our panel.
+                # Format in Maya's style: "file <source> line N: Error"
+                error_display = self._format_error_for_maya(exc)
+                om2.MGlobal.displayError(error_display)
 
-        # Collect captured output.
-        output = buf.getvalue()
-
-        # NOTE: We intentionally do NOT echo code/output to Maya's
-        # script editor here.  The adapter's _on_output callback writes
-        # to our output panel, and MCAMayaWindow's output hook captures
-        # Maya-originated messages (plugin warnings, etc.).  Echoing
-        # via displayInfo() was causing every execution result to appear
-        # TWICE in our panel — once from the callback and once from the
-        # hook catching the echo — because Maya defers the hook callback
-        # past the _suppress_output_hook flag reset.
-
-        # If there was an error, format the traceback.
-        if error:
-            tb_text = traceback.format_exception(type(error), error, error.__traceback__)
-            error_text = "".join(tb_text)
-            if self._on_error:
-                self._on_error(error_text.rstrip())
-            # Combine any output before the error with the traceback.
-            if output:
-                return output.rstrip() + "\n" + error_text.rstrip()
-            return error_text.rstrip()
-
-        # Report output via callback and return it.
-        if output:
-            output = output.rstrip()
-            if self._on_output:
-                self._on_output(output)
-            return output
-
+        # All output arrives through MCommandMessage — return empty.
         return ""
 
-    def _echo_to_script_editor(self, code, output, error):
+    def _format_error_for_maya(self, exc):
         """
-        Echo executed code and results to Maya's script editor.
+        Format an exception in Maya's Script Editor style.
 
-        Uses ``maya.OpenMaya.MGlobal.displayInfo()`` so the text appears
-        in Maya's script editor history (just like Charcoal Editor 2).
+        Maya's Script Editor shows Python errors as:
+            ``file <source> line N: ErrorType: message``
 
-        Sets the module-level ``_suppress_output_hook`` flag while
-        echoing so MCA Editor's ``_on_maya_output()`` hook skips
-        these messages and doesn't create duplicates.
+        Extracts the source file and line number from the innermost
+        traceback frame that originated in user code (``<mca_editor>``).
 
-        :param str code: The executed source code.
-        :param str output: Captured stdout from execution (may be empty).
-        :param Exception error: Exception raised during execution, or None.
+        :param Exception exc: The caught exception with traceback.
+        :return: Formatted error string for ``MGlobal.displayError()``.
+        :rtype: str
         """
-        global _suppress_output_hook
-        try:
-            import maya.OpenMaya as om
+        # The error type and message (e.g. "NameError: name 'x' is not defined").
+        error_line = "{}: {}".format(type(exc).__name__, exc)
 
-            # Suppress our own output hook to prevent duplicates.
-            _suppress_output_hook = True
+        # Walk the traceback chain to find the innermost user code frame.
+        tb = exc.__traceback__
+        source = "<mca_editor>"
+        line_num = 1
 
-            # Echo the executed code.
-            om.MGlobal.displayInfo(code.rstrip())
+        while tb is not None:
+            frame = tb.tb_frame
+            filename = frame.f_code.co_filename
+            # Prefer the user's code frame over internal frames.
+            if filename == "<mca_editor>" or not filename.startswith("<"):
+                source = filename
+                line_num = tb.tb_lineno
+            tb = tb.tb_next
 
-            # Echo any captured output.
-            if output and output.strip():
-                for line in output.rstrip().split("\n"):
-                    om.MGlobal.displayInfo(line)
-
-            # Echo errors.
-            if error:
-                tb_text = traceback.format_exception(
-                    type(error), error, error.__traceback__
-                )
-                om.MGlobal.displayError("".join(tb_text).rstrip())
-
-        except Exception:
-            # If something goes wrong, silently skip — never break execution.
-            pass
-        finally:
-            _suppress_output_hook = False
+        return "file {} line {}: {}".format(source, line_num, error_line)
 
     def _execute_mel(self, code):
         """
         Execute MEL code via ``maya.mel.eval()``.
 
+        Output, results, and errors all flow through Maya's normal
+        output system, which fires the ``MCommandMessage`` callback.
+        We do NOT call ``_on_output`` or ``_on_error`` manually — Maya
+        already displayed the error via its output system before the
+        exception propagates to Python, so the ``MCommandMessage``
+        callback has already routed it to our output panel.
+
         :param str code: MEL source code to execute.
-        :return: Result string from MEL evaluation.
+        :return: Empty string (output arrives via MCommandMessage callback).
         :rtype: str
         """
         try:
             import maya.mel
-            result = maya.mel.eval(code)
-            # MEL eval returns the result of the last expression.
-            if result is not None:
-                result_str = str(result)
-                if self._on_output:
-                    self._on_output(result_str)
-                return result_str
-            return ""
+            maya.mel.eval(code)
         except Exception as exc:
-            error_msg = "MEL Error: {}".format(str(exc))
-            if self._on_error:
-                self._on_error(error_msg)
+            # Maya already displayed the error through its output system
+            # (MCommandMessage kError fired before the exception reached
+            # us).  Just log for internal debugging — no _on_error call
+            # to avoid duplicate display.
             logger.error("MEL execution error: %s", exc)
-            return error_msg
+
+        # All output arrives through MCommandMessage — return empty.
+        return ""
 
     def execute_file(self, filepath):
         """
