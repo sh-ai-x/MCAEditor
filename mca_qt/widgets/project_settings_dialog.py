@@ -2,16 +2,22 @@
 MCA Qt - Project Settings Dialog.
 
 A dialog for editing an existing project's configuration without
-hand-editing the ``.mca-project`` JSON file. Editable fields:
+hand-editing the ``.mca-project`` JSON file. Uses a left-nav list
+with stacked pages (General, Startup, Shutdown) matching the
+app Settings dialog pattern.
+
+Editable fields:
 
     - Project name
+    - Load immediately (skip startup scripts on open)
+    - Open project on open (auto-open when editor launches)
     - Python source paths (add/remove relative directories)
     - Excluded folders (add/remove folder names)
+    - Environment variables (key=value pairs set in os.environ)
     - Startup script file (relative path to a .py file)
     - Startup inline code (Python code typed directly into the dialog)
     - Shutdown script file (relative path to a .py file run on close)
     - Shutdown inline code (Python code run before teardown on close)
-    - Environment variables (key=value pairs set in os.environ)
 
 Dependencies:
     - PySide6 (QDialog, QVBoxLayout, etc.)
@@ -24,7 +30,8 @@ import logging
 from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
-    QTabWidget, QWidget, QGroupBox, QFormLayout,
+    QWidget, QGroupBox, QFormLayout, QStackedWidget,
+    QAbstractItemView, QCheckBox,
     QPlainTextEdit,
     Qt,
 )
@@ -114,6 +121,37 @@ _GROUP_STYLE = """
         subcontrol-origin: margin;
         left: 8px;
         padding: 0 4px;
+    }
+"""
+
+_CHECKBOX_STYLE = """
+    QCheckBox {
+        color: #d4d4d4;
+        font-size: 11px;
+        spacing: 6px;
+    }
+    QCheckBox::indicator {
+        width: 14px;
+        height: 14px;
+    }
+"""
+
+# Category nav list styling — matches the app Settings dialog.
+_NAV_LIST_STYLE = """
+    QListWidget {
+        background-color: #2d2d30;
+        border: 1px solid #3f3f46;
+    }
+    QListWidget::item {
+        padding: 5px 8px;
+        color: #d0d0d0;
+    }
+    QListWidget::item:selected {
+        background-color: #094771;
+        color: #ffffff;
+    }
+    QListWidget::item:hover:!selected {
+        background-color: #3e3e42;
     }
 """
 
@@ -264,9 +302,16 @@ def _looks_like_path(value):
 
 # --- Project Settings Dialog --------------------------------------------------
 
+# Page categories displayed in the left-nav list.
+CATEGORIES = ["General", "Startup", "Shutdown"]
+
+
 class ProjectSettingsDialog(QDialog):
     """
     Dialog for editing an active project's configuration.
+
+    Uses a left-nav list + stacked pages layout matching the app
+    Settings dialog pattern. Three pages: General, Startup, Shutdown.
 
     Reads the current values from the ``MCAProject`` instance and
     presents them in an editable form. On accept, the caller can
@@ -288,25 +333,96 @@ class ProjectSettingsDialog(QDialog):
         self._result = None
 
         self.setWindowTitle("Project Settings -- {}".format(project.name))
-        self.setMinimumSize(500, 600)
+        self.setMinimumSize(600, 550)
         self.setModal(True)
         self._setup_ui()
 
     def _setup_ui(self):
-        """Build the dialog layout with tabs for different setting groups."""
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        """Build the top-level layout: left-nav list + stacked pages + buttons."""
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(8)
 
-        # --- Project name ---
-        name_group = QGroupBox("General")
-        name_group.setStyleSheet(_GROUP_STYLE)
-        name_layout = QFormLayout(name_group)
-        name_layout.setSpacing(6)
+        # --- Top section: category list + pages side-by-side ---
+        body = QHBoxLayout()
+        body.setSpacing(8)
+
+        # Category list on the left.
+        self._category_list = QListWidget()
+        self._category_list.setFixedWidth(140)
+        self._category_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._category_list.setStyleSheet(_NAV_LIST_STYLE)
+
+        # Populate the category list.
+        for name in CATEGORIES:
+            self._category_list.addItem(name)
+
+        body.addWidget(self._category_list)
+
+        # Stacked widget holds one page per category.
+        self._pages = QStackedWidget()
+        body.addWidget(self._pages, 1)
+
+        root_layout.addLayout(body, 1)
+
+        # --- Build each page and add to the stack ---
+        # Order must match CATEGORIES so list index maps to page index.
+        self._build_general_page()
+        self._build_startup_page()
+        self._build_shutdown_page()
+
+        # Connect list selection to page switching.
+        self._category_list.currentRowChanged.connect(
+            self._pages.setCurrentIndex
+        )
+        # Start on the General page.
+        self._category_list.setCurrentRow(0)
+
+        # --- Bottom buttons: Cancel | Save ---
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(80)
+        cancel_btn.setStyleSheet(_BTN_STYLE)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setFixedWidth(80)
+        save_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
+        save_btn.clicked.connect(self._on_save)
+        btn_layout.addWidget(save_btn)
+
+        root_layout.addLayout(btn_layout)
+
+    # --- Page Builders --------------------------------------------------------
+
+    def _build_general_page(self):
+        """
+        Build the General settings page.
+
+        Contains: project name, project root (read-only), two new
+        checkboxes, python source paths, excluded folders, and
+        environment variables.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+
+        # --- Project Info ---
+        info_group = QGroupBox("Project Info")
+        info_group.setStyleSheet(_GROUP_STYLE)
+        info_layout = QFormLayout(info_group)
+        info_layout.setSpacing(6)
 
         self._name_edit = QLineEdit()
         self._name_edit.setText(self._project.name)
         self._name_edit.setStyleSheet(_INPUT_STYLE)
-        name_layout.addRow(self._make_label("Project Name:"), self._name_edit)
+        info_layout.addRow(self._make_label("Project Name:"), self._name_edit)
 
         # Project root (read-only display).
         root_label = QLineEdit()
@@ -315,18 +431,36 @@ class ProjectSettingsDialog(QDialog):
         root_label.setStyleSheet(
             _INPUT_STYLE.replace("#3c3c3c", "#2d2d30")
         )
-        name_layout.addRow(self._make_label("Project Root:"), root_label)
+        info_layout.addRow(self._make_label("Project Root:"), root_label)
 
-        layout.addWidget(name_group)
+        # --- Checkboxes for new project options ---
+        self._load_immediately_cb = QCheckBox("Load project immediately (skip startup scripts on open)")
+        self._load_immediately_cb.setStyleSheet(_CHECKBOX_STYLE)
+        self._load_immediately_cb.setChecked(self._project.load_immediately)
+        self._load_immediately_cb.setToolTip(
+            "When checked, opening the project skips startup scripts.\n"
+            "Use the Load button in the toolbar to run them manually."
+        )
+        info_layout.addRow(self._load_immediately_cb)
 
-        # --- Python Paths ---
+        self._open_on_editor_open_cb = QCheckBox("Open project on editor open")
+        self._open_on_editor_open_cb.setStyleSheet(_CHECKBOX_STYLE)
+        self._open_on_editor_open_cb.setChecked(self._project.open_on_editor_open)
+        self._open_on_editor_open_cb.setToolTip(
+            "When checked, this project auto-opens when the editor launches."
+        )
+        info_layout.addRow(self._open_on_editor_open_cb)
+
+        layout.addWidget(info_group)
+
+        # --- Python Source Paths ---
         paths_group = QGroupBox("Python Source Paths (added to sys.path)")
         paths_group.setStyleSheet(_GROUP_STYLE)
         paths_layout = QVBoxLayout(paths_group)
 
         self._paths_list = QListWidget()
         self._paths_list.setStyleSheet(_LIST_STYLE)
-        self._paths_list.setMinimumHeight(90)
+        self._paths_list.setMinimumHeight(80)
         # Populate with current paths.
         for rel_path in self._project.python_paths:
             self._paths_list.addItem(rel_path)
@@ -356,7 +490,7 @@ class ProjectSettingsDialog(QDialog):
 
         self._excluded_list = QListWidget()
         self._excluded_list.setStyleSheet(_LIST_STYLE)
-        self._excluded_list.setMinimumHeight(80)
+        self._excluded_list.setMinimumHeight(70)
         # Populate with current excluded folders.
         for folder_name in sorted(self._project.excluded_folders):
             self._excluded_list.addItem(folder_name)
@@ -379,116 +513,6 @@ class ProjectSettingsDialog(QDialog):
         excl_layout.addLayout(excl_btn_row)
         layout.addWidget(excl_group)
 
-        # --- Scripts (Startup / Shutdown tabs) ---
-        scripts_group = QGroupBox("Scripts")
-        scripts_group.setStyleSheet(_GROUP_STYLE)
-        scripts_group_layout = QVBoxLayout(scripts_group)
-
-        # Tab widget to separate Startup and Shutdown into distinct pages.
-        self._scripts_tabs = QTabWidget()
-        self._scripts_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #3f3f46;
-                background-color: #2d2d30;
-            }
-            QTabBar::tab {
-                background-color: #2d2d30;
-                color: #969696;
-                border: 1px solid #3f3f46;
-                padding: 4px 14px;
-                font-size: 11px;
-            }
-            QTabBar::tab:selected {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border-bottom-color: #1e1e1e;
-            }
-            QTabBar::tab:hover {
-                color: #d4d4d4;
-            }
-        """)
-
-        # --- Startup tab ---
-        startup_tab = QWidget()
-        startup_layout = QVBoxLayout(startup_tab)
-        startup_layout.setContentsMargins(8, 8, 8, 8)
-
-        # File path row — point to an external .py file.
-        file_label = QLabel("Script file (relative to project root):")
-        file_label.setStyleSheet(_LABEL_STYLE)
-        startup_layout.addWidget(file_label)
-
-        file_row = QHBoxLayout()
-        self._script_edit = QLineEdit()
-        self._script_edit.setText(self._project.startup_script)
-        self._script_edit.setPlaceholderText("e.g. scripts/startup.py")
-        self._script_edit.setStyleSheet(_INPUT_STYLE)
-        file_row.addWidget(self._script_edit)
-
-        browse_btn = QPushButton("Browse...")
-        browse_btn.setStyleSheet(_BTN_STYLE)
-        browse_btn.clicked.connect(self._browse_startup_script)
-        file_row.addWidget(browse_btn)
-        startup_layout.addLayout(file_row)
-
-        # Inline code editor — small script typed directly.
-        code_label = QLabel("Inline code (runs after the script file, if any):")
-        code_label.setStyleSheet(_LABEL_STYLE)
-        startup_layout.addWidget(code_label)
-
-        self._code_edit = QPlainTextEdit()
-        self._code_edit.setPlainText(self._project.startup_code)
-        self._code_edit.setPlaceholderText("# Python code to run on project open...")
-        self._code_edit.setStyleSheet(_CODE_EDIT_STYLE)
-        self._code_edit.setMinimumHeight(120)
-        self._code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
-        startup_layout.addWidget(self._code_edit)
-
-        startup_layout.addStretch()
-        self._scripts_tabs.addTab(startup_tab, "Startup")
-
-        # --- Shutdown tab ---
-        shutdown_tab = QWidget()
-        shutdown_layout = QVBoxLayout(shutdown_tab)
-        shutdown_layout.setContentsMargins(8, 8, 8, 8)
-
-        # File path row — point to an external .py file.
-        shutdown_file_label = QLabel("Script file (relative to project root):")
-        shutdown_file_label.setStyleSheet(_LABEL_STYLE)
-        shutdown_layout.addWidget(shutdown_file_label)
-
-        shutdown_file_row = QHBoxLayout()
-        self._shutdown_script_edit = QLineEdit()
-        self._shutdown_script_edit.setText(self._project.shutdown_script)
-        self._shutdown_script_edit.setPlaceholderText("e.g. scripts/shutdown.py")
-        self._shutdown_script_edit.setStyleSheet(_INPUT_STYLE)
-        shutdown_file_row.addWidget(self._shutdown_script_edit)
-
-        shutdown_browse_btn = QPushButton("Browse...")
-        shutdown_browse_btn.setStyleSheet(_BTN_STYLE)
-        shutdown_browse_btn.clicked.connect(self._browse_shutdown_script)
-        shutdown_file_row.addWidget(shutdown_browse_btn)
-        shutdown_layout.addLayout(shutdown_file_row)
-
-        # Inline code editor — small script typed directly.
-        shutdown_code_label = QLabel("Inline code (runs after the script file, if any):")
-        shutdown_code_label.setStyleSheet(_LABEL_STYLE)
-        shutdown_layout.addWidget(shutdown_code_label)
-
-        self._shutdown_code_edit = QPlainTextEdit()
-        self._shutdown_code_edit.setPlainText(self._project.shutdown_code)
-        self._shutdown_code_edit.setPlaceholderText("# Python code to run on project close...")
-        self._shutdown_code_edit.setStyleSheet(_CODE_EDIT_STYLE)
-        self._shutdown_code_edit.setMinimumHeight(120)
-        self._shutdown_code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
-        shutdown_layout.addWidget(self._shutdown_code_edit)
-
-        shutdown_layout.addStretch()
-        self._scripts_tabs.addTab(shutdown_tab, "Shutdown")
-
-        scripts_group_layout.addWidget(self._scripts_tabs)
-        layout.addWidget(scripts_group)
-
         # --- Environment Variables ---
         env_group = QGroupBox("Environment Variables (set in os.environ on open)")
         env_group.setStyleSheet(_GROUP_STYLE)
@@ -496,14 +520,14 @@ class ProjectSettingsDialog(QDialog):
 
         self._env_list = QListWidget()
         self._env_list.setStyleSheet(_LIST_STYLE)
-        self._env_list.setMinimumHeight(80)
+        self._env_list.setMinimumHeight(70)
         # Populate with current env vars as "KEY=VALUE" entries.
         for key in sorted(self._project.env_vars):
             value = self._project.env_vars[key]
             self._env_list.addItem("{}={}".format(key, value))
         env_layout.addWidget(self._env_list)
 
-        # Add/Remove buttons for env vars.
+        # Add/Edit/Remove buttons for env vars.
         env_btn_row = QHBoxLayout()
         env_btn_row.addStretch()
 
@@ -525,24 +549,124 @@ class ProjectSettingsDialog(QDialog):
         env_layout.addLayout(env_btn_row)
         layout.addWidget(env_group)
 
-        # --- OK / Cancel ---
         layout.addStretch()
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+        self._pages.addWidget(page)
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedWidth(80)
-        cancel_btn.setStyleSheet(_BTN_STYLE)
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
+    def _build_startup_page(self):
+        """
+        Build the Startup settings page.
 
-        save_btn = QPushButton("Save")
-        save_btn.setFixedWidth(80)
-        save_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
-        save_btn.clicked.connect(self._on_save)
-        btn_layout.addWidget(save_btn)
+        Contains: startup script file path with Browse button, and
+        an inline code editor for startup code.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
 
-        layout.addLayout(btn_layout)
+        # --- Script file ---
+        script_group = QGroupBox("Startup Script File")
+        script_group.setStyleSheet(_GROUP_STYLE)
+        script_layout = QVBoxLayout(script_group)
+
+        file_label = QLabel("Script file (relative to project root):")
+        file_label.setStyleSheet(_LABEL_STYLE)
+        script_layout.addWidget(file_label)
+
+        file_row = QHBoxLayout()
+        self._script_edit = QLineEdit()
+        self._script_edit.setText(self._project.startup_script)
+        self._script_edit.setPlaceholderText("e.g. scripts/startup.py")
+        self._script_edit.setStyleSheet(_INPUT_STYLE)
+        file_row.addWidget(self._script_edit)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.setStyleSheet(_BTN_STYLE)
+        browse_btn.clicked.connect(self._browse_startup_script)
+        file_row.addWidget(browse_btn)
+        script_layout.addLayout(file_row)
+
+        layout.addWidget(script_group)
+
+        # --- Inline code editor ---
+        code_group = QGroupBox("Inline Startup Code")
+        code_group.setStyleSheet(_GROUP_STYLE)
+        code_layout = QVBoxLayout(code_group)
+
+        code_label = QLabel("Runs after the script file (if any):")
+        code_label.setStyleSheet(_LABEL_STYLE)
+        code_layout.addWidget(code_label)
+
+        self._code_edit = QPlainTextEdit()
+        self._code_edit.setPlainText(self._project.startup_code)
+        self._code_edit.setPlaceholderText("# Python code to run on project open...")
+        self._code_edit.setStyleSheet(_CODE_EDIT_STYLE)
+        self._code_edit.setMinimumHeight(200)
+        self._code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
+        code_layout.addWidget(self._code_edit)
+
+        layout.addWidget(code_group)
+
+        layout.addStretch()
+        self._pages.addWidget(page)
+
+    def _build_shutdown_page(self):
+        """
+        Build the Shutdown settings page.
+
+        Contains: shutdown script file path with Browse button, and
+        an inline code editor for shutdown code.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+
+        # --- Script file ---
+        script_group = QGroupBox("Shutdown Script File")
+        script_group.setStyleSheet(_GROUP_STYLE)
+        script_layout = QVBoxLayout(script_group)
+
+        file_label = QLabel("Script file (relative to project root):")
+        file_label.setStyleSheet(_LABEL_STYLE)
+        script_layout.addWidget(file_label)
+
+        file_row = QHBoxLayout()
+        self._shutdown_script_edit = QLineEdit()
+        self._shutdown_script_edit.setText(self._project.shutdown_script)
+        self._shutdown_script_edit.setPlaceholderText("e.g. scripts/shutdown.py")
+        self._shutdown_script_edit.setStyleSheet(_INPUT_STYLE)
+        file_row.addWidget(self._shutdown_script_edit)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.setStyleSheet(_BTN_STYLE)
+        browse_btn.clicked.connect(self._browse_shutdown_script)
+        file_row.addWidget(browse_btn)
+        script_layout.addLayout(file_row)
+
+        layout.addWidget(script_group)
+
+        # --- Inline code editor ---
+        code_group = QGroupBox("Inline Shutdown Code")
+        code_group.setStyleSheet(_GROUP_STYLE)
+        code_layout = QVBoxLayout(code_group)
+
+        code_label = QLabel("Runs after the script file (if any):")
+        code_label.setStyleSheet(_LABEL_STYLE)
+        code_layout.addWidget(code_label)
+
+        self._shutdown_code_edit = QPlainTextEdit()
+        self._shutdown_code_edit.setPlainText(self._project.shutdown_code)
+        self._shutdown_code_edit.setPlaceholderText("# Python code to run on project close...")
+        self._shutdown_code_edit.setStyleSheet(_CODE_EDIT_STYLE)
+        self._shutdown_code_edit.setMinimumHeight(200)
+        self._shutdown_code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
+        code_layout.addWidget(self._shutdown_code_edit)
+
+        layout.addWidget(code_group)
+
+        layout.addStretch()
+        self._pages.addWidget(page)
 
     # --- Helpers --------------------------------------------------------------
 
@@ -734,6 +858,8 @@ class ProjectSettingsDialog(QDialog):
             "shutdown_script": self._shutdown_script_edit.text().strip(),
             "shutdown_code": self._shutdown_code_edit.toPlainText(),
             "env_vars": env_vars,
+            "load_immediately": self._load_immediately_cb.isChecked(),
+            "open_on_editor_open": self._open_on_editor_open_cb.isChecked(),
         }
         self.accept()
 
@@ -743,7 +869,8 @@ class ProjectSettingsDialog(QDialog):
 
         :return: Dictionary with keys: name, python_paths, excluded_folders,
             startup_script, startup_code, shutdown_script, shutdown_code,
-            env_vars. Or None if cancelled.
+            env_vars, load_immediately, open_on_editor_open. Or None if
+            cancelled.
         :rtype: dict or None
         """
         return self._result

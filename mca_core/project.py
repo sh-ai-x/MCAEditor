@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_FILENAME = ".mca-project"              # Name of the project config file.
 SESSION_FILENAME = ".mca-session.json"          # Per-project session manifest file.
-CURRENT_SCHEMA_VERSION = 2                      # Bump when the JSON schema changes.
+CURRENT_SCHEMA_VERSION = 3                      # Bump when the JSON schema changes.
 
 # Folders excluded from the workspace tree by default.
 DEFAULT_EXCLUDED_FOLDERS = {
@@ -97,6 +97,8 @@ class MCAProject:
         self._shutdown_script = ""       # Relative path to a .py shutdown script.
         self._shutdown_code = ""         # Inline Python code run before teardown.
         self._env_vars = {}              # Key-value pairs set in os.environ.
+        self._load_immediately = False   # Skip startup scripts on project open.
+        self._open_on_editor_open = False  # Auto-open this project when editor launches.
         self._schema_version = CURRENT_SCHEMA_VERSION
 
         # Auto-load if the project file already exists.
@@ -333,6 +335,46 @@ class MCAProject:
         """
         self._env_vars = dict(variables)
 
+    @property
+    def load_immediately(self):
+        """
+        Whether to skip startup scripts when the project is opened.
+
+        When True, opening the project only sets up paths, env vars,
+        and UI — startup scripts are deferred until the user clicks
+        the Load button.
+
+        :rtype: bool
+        """
+        return self._load_immediately
+
+    @load_immediately.setter
+    def load_immediately(self, value):
+        """
+        Set the load_immediately flag.
+
+        :param bool value: True to skip startup on open.
+        """
+        self._load_immediately = bool(value)
+
+    @property
+    def open_on_editor_open(self):
+        """
+        Whether this project should auto-open when the editor launches.
+
+        :rtype: bool
+        """
+        return self._open_on_editor_open
+
+    @open_on_editor_open.setter
+    def open_on_editor_open(self, value):
+        """
+        Set the open_on_editor_open flag.
+
+        :param bool value: True to auto-open on editor launch.
+        """
+        self._open_on_editor_open = bool(value)
+
     # --- Load / Save ----------------------------------------------------------
 
     def load(self):
@@ -362,6 +404,8 @@ class MCAProject:
         self._shutdown_script = data.get("shutdown_script", "")
         self._shutdown_code = data.get("shutdown_code", "")
         self._env_vars = data.get("env_vars", {})
+        self._load_immediately = data.get("load_immediately", False)
+        self._open_on_editor_open = data.get("open_on_editor_open", False)
         self._schema_version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
 
         logger.info("Loaded project '%s' from %s", self._name, self.project_file_path)
@@ -402,6 +446,8 @@ class MCAProject:
             "shutdown_script": self._shutdown_script,
             "shutdown_code": self._shutdown_code,
             "env_vars": self._env_vars,
+            "load_immediately": self._load_immediately,
+            "open_on_editor_open": self._open_on_editor_open,
         }
 
     def validate(self):

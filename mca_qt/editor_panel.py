@@ -200,6 +200,12 @@ class MCAEditorPanel(QWidget):
         # Auto-detect running DCCs after a short delay.
         QTimer.singleShot(1000, self._auto_detect_dccs)
 
+        # Auto-open the last project if it has open_on_editor_open enabled.
+        # Delay must be > 0 so it fires AFTER showEvent's deferred
+        # _restore_splitter_sizes (also singleShot(0)), otherwise the
+        # layout rebuild races with the splitter restore on first open.
+        QTimer.singleShot(200, self._auto_open_last_project)
+
     # --- Default Workspace Initialization ------------------------------------
 
     def _init_default_workspace(self):
@@ -233,6 +239,48 @@ class MCAEditorPanel(QWidget):
             maya_adapter.set_workspace_paths(
                 scripts_dir, self._session_manager.site_packages_dir
             )
+
+    # --- Auto-Open Last Project -----------------------------------------------
+
+    def _auto_open_last_project(self):
+        """
+        Auto-open the last project if it has ``open_on_editor_open`` enabled.
+
+        Called via QTimer.singleShot(200) at the end of __init__ so the
+        UI renders and splitter sizes are restored before project loading
+        runs. Only opens if:
+            1. A last_project_path is stored in settings
+            2. The path and its .mca-project file exist on disk
+            3. The project's open_on_editor_open flag is True
+
+        After opening, re-applies saved splitter sizes and panel
+        visibility because the layout rebuild inside _switch_to_manifest
+        can trigger Qt re-layout that collapses panels to zero height.
+        """
+        last_path = self._settings.get("last_project_path", "")
+        if not last_path or not os.path.isdir(last_path):
+            return
+
+        # Check that the .mca-project file exists before loading.
+        if not has_project_file(last_path):
+            return
+
+        # Load the project to inspect its open_on_editor_open flag.
+        project = MCAProject(last_path)
+        if not project.open_on_editor_open:
+            return
+
+        logger.info("Auto-opening last project: %s", last_path)
+        self._open_project(last_path)
+
+        # The layout rebuild inside _open_project can cause Qt to
+        # re-distribute splitter sizes, collapsing sidebar or output.
+        # Re-apply the user's saved UI state so everything stays visible.
+        self._restore_ui_state()
+
+        # Defer one more splitter re-apply so the sizes survive Qt's
+        # post-rebuild layout pass (same pattern as showEvent).
+        QTimer.singleShot(0, self._restore_splitter_sizes)
 
     # --- Status Message Helper -----------------------------------------------
 
@@ -448,6 +496,12 @@ class MCAEditorPanel(QWidget):
         # Explicitly construct QAction with parent=self so the C++ lifetime
         # is tied to the panel, not the toolbar.  toolbar.addAction("text")
         # returns a weakly-owned wrapper that PySide6 can GC prematurely.
+        self._load_action = QAction("Load", self)
+        self._load_action.setToolTip("Force-run startup scripts (ignores 'load immediately' flag)")
+        self._load_action.triggered.connect(self._on_load_project)
+        self._load_action.setVisible(False)
+        self._toolbar.addAction(self._load_action)
+
         self._refresh_action = QAction("Refresh", self)
         self._refresh_action.setToolTip("Re-read project file and refresh paths")
         self._refresh_action.triggered.connect(self._on_refresh_project)
@@ -1067,6 +1121,7 @@ class MCAEditorPanel(QWidget):
 
         # Reset UI elements.
         self._project_button.setText("No Project")
+        self._load_action.setVisible(False)
         self._refresh_action.setVisible(False)
         self._reload_action.setVisible(False)
         self._shutdown_action.setVisible(False)
@@ -1110,6 +1165,7 @@ class MCAEditorPanel(QWidget):
 
         # Update toolbar button and show project action buttons.
         self._project_button.setText(project.name)
+        self._load_action.setVisible(True)
         self._refresh_action.setVisible(True)
         self._reload_action.setVisible(True)
         self._shutdown_action.setVisible(True)
@@ -1127,8 +1183,21 @@ class MCAEditorPanel(QWidget):
         # Emit signal for host windows (project name for title bar).
         self.mode_changed.emit(project.name)
 
-        # Run the startup script if one is configured.
-        self._run_startup_script()
+        # Decide whether to run startup scripts. Skip if the user
+        # explicitly wants immediate loading, or if the project's
+        # environment is already active (avoids double-loading in Maya).
+        skip_startup = (
+            project.load_immediately
+            or self._is_project_already_active(project)
+        )
+        if skip_startup:
+            reason = ("load_immediately" if project.load_immediately
+                      else "environment already active")
+            self._output.write_info(
+                "Project '{}' -- skipping startup ({}).".format(
+                    project.name, reason))
+        else:
+            self._run_startup_script()
 
     def _inject_project_paths(self):
         """
@@ -1212,6 +1281,44 @@ class MCAEditorPanel(QWidget):
                 os.environ[key] = original_value
                 logger.info("Restored env var: %s=%s", key, original_value)
         self._saved_env_originals = {}
+
+    def _is_project_already_active(self, project):
+        """
+        Check whether the project's environment is already set up.
+
+        Returns True if every env var is present with the correct value
+        AND every resolved Python path is already in sys.path. This
+        prevents double-loading when Maya (or another host) has already
+        set up the project's environment before MCA Editor opens.
+
+        :param MCAProject project: The project to check.
+        :return: True if the environment is already fully active.
+        :rtype: bool
+        """
+        # Check that every project env var is already set correctly.
+        for key, value in project.env_vars.items():
+            if os.environ.get(key) != value:
+                return False
+
+        # Check that every resolved Python path is already on sys.path.
+        for p in project.resolved_python_paths:
+            if p not in sys.path:
+                return False
+
+        # Both checks passed — environment is already active.
+        return True
+
+    def _on_load_project(self):
+        """
+        Force-run the startup script regardless of the load_immediately
+        flag or environment state.
+
+        Called when the user clicks the Load button in the toolbar.
+        """
+        if not self._active_project:
+            return
+        self._output.write_info("Running project startup...")
+        self._run_startup_script()
 
     def _on_refresh_project(self):
         """
@@ -1392,6 +1499,8 @@ class MCAEditorPanel(QWidget):
         self._active_project.shutdown_script = result["shutdown_script"]
         self._active_project.shutdown_code = result["shutdown_code"]
         self._active_project.env_vars = result["env_vars"]
+        self._active_project.load_immediately = result.get("load_immediately", False)
+        self._active_project.open_on_editor_open = result.get("open_on_editor_open", False)
 
         # Save the updated .mca-project file.
         self._active_project.save()
