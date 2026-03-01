@@ -253,9 +253,12 @@ class MCAEditorPanel(QWidget):
             2. The path and its .mca-project file exist on disk
             3. The project's open_on_editor_open flag is True
 
-        After opening, re-applies saved splitter sizes and panel
-        visibility because the layout rebuild inside _switch_to_manifest
-        can trigger Qt re-layout that collapses panels to zero height.
+        Captures the current UI state (splitter sizes, panel visibility)
+        BEFORE opening, then restores it after, because the layout rebuild
+        inside _switch_to_manifest can trigger Qt re-layout that collapses
+        panels to zero height. We capture live values rather than re-reading
+        from settings, because settings may already contain bad state from
+        a previous session that closed while panels were collapsed.
         """
         last_path = self._settings.get("last_project_path", "")
         if not last_path or not os.path.isdir(last_path):
@@ -270,17 +273,32 @@ class MCAEditorPanel(QWidget):
         if not project.open_on_editor_open:
             return
 
+        # Snapshot the current UI state BEFORE the project open disrupts
+        # it. At this point _restore_ui_state() has already run in __init__
+        # and showEvent's _restore_splitter_sizes has already fired, so
+        # these values reflect the user's last-saved layout.
+        saved_main_sizes = self._main_splitter.sizes()
+        saved_center_sizes = self._center_splitter.sizes()
+        saved_sidebar_vis = self._sidebar.isVisible()
+        saved_output_vis = self._output.isVisible()
+
         logger.info("Auto-opening last project: %s", last_path)
         self._open_project(last_path)
 
-        # The layout rebuild inside _open_project can cause Qt to
-        # re-distribute splitter sizes, collapsing sidebar or output.
-        # Re-apply the user's saved UI state so everything stays visible.
-        self._restore_ui_state()
+        # Restore the UI state that was active before the project open.
+        # The layout rebuild inside _switch_to_manifest can redistribute
+        # splitter sizes, collapsing sidebar or output to zero.
+        self._sidebar.setVisible(saved_sidebar_vis)
+        self._output.setVisible(saved_output_vis)
+        self._main_splitter.setSizes(saved_main_sizes)
+        self._center_splitter.setSizes(saved_center_sizes)
 
-        # Defer one more splitter re-apply so the sizes survive Qt's
-        # post-rebuild layout pass (same pattern as showEvent).
-        QTimer.singleShot(0, self._restore_splitter_sizes)
+        # Defer one more re-apply so the sizes survive Qt's post-rebuild
+        # layout pass (same pattern as showEvent).
+        def _deferred_restore():
+            self._main_splitter.setSizes(saved_main_sizes)
+            self._center_splitter.setSizes(saved_center_sizes)
+        QTimer.singleShot(0, _deferred_restore)
 
     # --- Status Message Helper -----------------------------------------------
 
