@@ -867,6 +867,22 @@ class OutputWindow(QWidget):
         if was_at_bottom:
             scrollbar.setValue(scrollbar.maximum())
 
+    def flush(self):
+        """
+        Force-flush pending messages and repaint immediately.
+
+        Called by ``_on_maya_output()`` after each message so output
+        appears in real-time during code execution — even when the Qt
+        event loop is blocked by ``exec()``.  ``repaint()`` calls
+        ``paintEvent()`` directly, bypassing the event loop.
+
+        Safe to call at any time; no-ops if the buffer is empty.
+        """
+        self._flush_pending()
+        # repaint() paints the viewport directly without waiting for
+        # the event loop, so output is visible immediately.
+        self._output.viewport().repaint()
+
     # --- Public Write Methods -----------------------------------------------
 
     def write_output(self, text):

@@ -635,6 +635,14 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
             # This is the path for print() output and MEL echo.
             output.write_output(text)
 
+        # Force-flush and repaint immediately so output appears in
+        # real-time during code execution.  Without this, the 16ms
+        # QTimer can't fire while exec() blocks the event loop, and
+        # all output would dump at once when execution finishes.
+        # repaint() calls paintEvent() directly, bypassing the event
+        # loop — safe even during a blocking exec().
+        output.flush()
+
     # --- Status Bar ----------------------------------------------------------
 
     def _build_status_bar(self):

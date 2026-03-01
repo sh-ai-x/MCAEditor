@@ -79,11 +79,33 @@ Based on user testing with side-by-side comparison:
   (`#e5e510`) per user preference.
 - **Word wrap disabled**: Horizontal scroll instead.
 
+## Real-Time Output During Execution
+
+### Problem
+Output accumulated silently during `exec()` and dumped all at once
+when execution finished.  Maya's Script Editor shows output line by
+line in real-time, even during long-running code.
+
+### Root Cause
+The 16ms `QTimer` that flushes `_pending_messages` can't fire while
+`exec()` blocks the Qt event loop.  Messages buffer up and only
+appear when execution returns and the event loop resumes.
+
+### Fix
+- Added `OutputWindow.flush()` — calls `_flush_pending()` then
+  `self._output.viewport().repaint()`.  `repaint()` calls
+  `paintEvent()` directly, bypassing the event loop entirely.
+- `_on_maya_output()` now calls `output.flush()` after each message,
+  so every line paints immediately — even during a blocking `exec()`.
+- No reentrancy risk: `repaint()` only processes the paint event for
+  that one widget, not input events or timer events.
+- The batch timer still works as a fallback for non-Maya output paths.
+
 ## Files Changed
 
 | Action | File | Changes |
 |--------|------|---------|
-| MODIFY | `mca_qt/widgets/output_window.py` | Batch buffer, document cursor, `setCursorWidth(0)`, `setAcceptDrops(False)`, `setLineWrapMode(NoWrap)`, yellow warnings |
-| MODIFY | `mca_maya/maya_window.py` | Sole-source `_on_maya_output()`, color-coded history, removed focus save/restore, removed content filters |
+| MODIFY | `mca_qt/widgets/output_window.py` | Batch buffer, document cursor, `setCursorWidth(0)`, `setAcceptDrops(False)`, `setLineWrapMode(NoWrap)`, yellow warnings, `flush()` for real-time output |
+| MODIFY | `mca_maya/maya_window.py` | Sole-source `_on_maya_output()`, color-coded history, removed focus save/restore, removed content filters, `flush()` after each message |
 | MODIFY | `mca_core/adapters/internal_maya_adapter.py` | Removed StringIO capture, `MGlobal.displayResult/displayError`, RuntimeError heuristic, cleaned MEL error handling |
 | CREATE | `Docs/SessionNotes/2026-02-28_output_panel_overhaul.md` | This file |
