@@ -20,6 +20,7 @@ Dependencies:
     - mca_core (adapters, settings)
 """
 
+import importlib
 import io
 import os
 import sys
@@ -134,6 +135,12 @@ class MCAEditorPanel(QWidget):
         # Status callback — set by the host window.
         self._status_callback = None
 
+        # Track panel visibility with instance vars so save_window_state()
+        # doesn't rely on isVisible(), which returns False when the parent
+        # window is already hidden during close.
+        self._sidebar_visible = True
+        self._output_visible = True
+
         # Session manager for buffer persistence across restarts.
         self._session_manager = SessionManager()
 
@@ -201,10 +208,9 @@ class MCAEditorPanel(QWidget):
         QTimer.singleShot(1000, self._auto_detect_dccs)
 
         # Auto-open the last project if it has open_on_editor_open enabled.
-        # Delay must be > 0 so it fires AFTER showEvent's deferred
-        # _restore_splitter_sizes (also singleShot(0)), otherwise the
-        # layout rebuild races with the splitter restore on first open.
-        QTimer.singleShot(200, self._auto_open_last_project)
+        # Called synchronously during __init__ (before show()) so the
+        # layout rebuild doesn't trigger Qt reflows that collapse splitters.
+        self._auto_open_last_project()
 
     # --- Default Workspace Initialization ------------------------------------
 
@@ -246,17 +252,16 @@ class MCAEditorPanel(QWidget):
         """
         Auto-open the last project if it has ``open_on_editor_open`` enabled.
 
-        Called via QTimer.singleShot(200) at the end of __init__ so the
-        UI renders and splitter sizes are restored before project loading
-        runs. Only opens if:
+        Called synchronously during ``__init__`` (before the widget is
+        shown) so that ``restore_layout_state()`` inside
+        ``_switch_to_manifest()`` runs while Qt is not yet performing
+        visible layout recalculations. This avoids the splitter-collapse
+        race that occurred when auto-open ran via a deferred timer.
+
+        Only opens if:
             1. A last_project_path is stored in settings
             2. The path and its .mca-project file exist on disk
             3. The project's open_on_editor_open flag is True
-
-        After opening, forces the full UI state restore because the
-        layout rebuild inside _switch_to_manifest collapses splitter
-        panels to zero. Reads saved sizes from settings with sane
-        fallback defaults so collapsed-to-zero values are overridden.
         """
         last_path = self._settings.get("last_project_path", "")
         if not last_path or not os.path.isdir(last_path):
@@ -274,9 +279,11 @@ class MCAEditorPanel(QWidget):
         logger.info("Auto-opening last project: %s", last_path)
         self._open_project(last_path)
 
-        # The layout rebuild inside _switch_to_manifest collapses the
-        # splitter panels to zero. Force-restore visibility and sizes.
-        self._force_restore_ui_state()
+        # _open_project → _switch_to_manifest → restore_layout_state tears
+        # down and rebuilds editor groups inside the splitters, which resets
+        # all splitter sizes to 0.  Re-apply saved sizes so sidebar, output,
+        # and other panels keep their user-configured dimensions.
+        self._restore_splitter_sizes()
 
     # --- Status Message Helper -----------------------------------------------
 
@@ -1445,23 +1452,35 @@ class MCAEditorPanel(QWidget):
 
     def _on_reload_project(self):
         """
-        Reload the active project by running a full shutdown then startup.
+        Reload the active project's environment without switching tabs.
 
-        Remembers the project root, closes the project (which runs shutdown
-        scripts and tears down paths/env), then re-opens it (which runs
-        startup scripts and rebuilds everything).
+        Runs the shutdown sequence (script + env teardown + path removal),
+        re-reads the .mca-project file from disk, then re-applies paths,
+        env vars, and runs the startup sequence.  Unlike close+open, this
+        keeps the current editor tabs untouched and always forces startup
+        scripts to run (bypasses the ``_is_project_already_active`` check).
         """
         if not self._active_project:
             return
 
-        # Remember the project root before _close_project clears it.
         project_root = self._active_project.project_root
 
-        # Full shutdown sequence.
-        self._close_project()
+        # --- Shutdown ---
+        self._run_shutdown_script()
+        self._remove_env_vars()
+        self._remove_project_paths()
 
-        # Full startup sequence.
-        self._open_project(project_root)
+        # Re-read the project file from disk so any manual edits are
+        # picked up (same as what _on_refresh_project does).
+        self._active_project = MCAProject(project_root)
+
+        # --- Startup ---
+        self._inject_project_paths()
+        self._apply_env_vars()
+        self._run_startup_script()
+
+        self._output.write_info("Reloaded project: {}".format(
+            self._active_project.name))
 
     def _show_project_settings(self):
         """
@@ -1497,6 +1516,7 @@ class MCAEditorPanel(QWidget):
         self._active_project.env_vars = result["env_vars"]
         self._active_project.load_immediately = result.get("load_immediately", False)
         self._active_project.open_on_editor_open = result.get("open_on_editor_open", False)
+        self._active_project.auto_reload_modules = result.get("auto_reload_modules", True)
 
         # Save the updated .mca-project file.
         self._active_project.save()
@@ -1527,8 +1547,12 @@ class MCAEditorPanel(QWidget):
         recent = self._settings.get_recent_projects()
         if recent:
             for project_path in recent:
-                # Show just the folder name with the full path as tooltip.
-                display_name = os.path.basename(project_path)
+                # Read the project name from the .mca-project file so
+                # entries are distinguishable even when folder names match.
+                if has_project_file(project_path):
+                    display_name = MCAProject(project_path).name
+                else:
+                    display_name = os.path.basename(project_path)
                 act = menu.addAction(display_name)
                 act.setToolTip(project_path)
                 act.triggered.connect(
@@ -1623,10 +1647,12 @@ class MCAEditorPanel(QWidget):
         # --- Panel visibility ---
         sidebar_vis = s.get("sidebar_visible", True)
         self._sidebar.setVisible(sidebar_vis)
+        self._sidebar_visible = sidebar_vis
         self._left_stripe.set_button_active("sidebar", sidebar_vis)
 
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
+        self._output_visible = output_vis
 
         # Migrate legacy "terminal_visible" key to "bottom_terminal_visible".
         legacy_term = s.get("terminal_visible", None)
@@ -1677,70 +1703,6 @@ class MCAEditorPanel(QWidget):
         if self._default_font_size != 12:
             self._apply_font_size(notify=False)
 
-    def _force_restore_ui_state(self):
-        """
-        Restore splitter sizes and panel visibility after an operation
-        that disrupts the layout (e.g. auto-open project on startup).
-
-        Reads saved sizes from settings with sane fallback defaults.
-        If any saved size has a visible panel collapsed to 0, the
-        fallback defaults are used instead. Applies synchronously and
-        also defers a re-apply to survive Qt's post-rebuild layout pass.
-
-        Default splitter sizes (matching _setup_ui):
-            main_splitter:   [240, 800, 0]   (sidebar, center, right)
-            center_splitter: [250, 600, 0]   (output, editor, terminal)
-        """
-        s = self._settings
-
-        # Sane defaults matching _setup_ui.
-        default_main = [240, 800, 0]
-        default_center = [250, 600, 0]
-
-        # --- Main splitter (sidebar | center | right terminal) ---
-        main_sizes = None
-        saved_main = s.get("splitter_sizes")
-        if saved_main:
-            try:
-                main_sizes = [int(v) for v in saved_main]
-            except (TypeError, ValueError):
-                pass
-
-        # If the sidebar should be visible but has 0 width, use defaults.
-        sidebar_vis = s.get("sidebar_visible", True)
-        if not main_sizes or (sidebar_vis and len(main_sizes) >= 1 and main_sizes[0] == 0):
-            main_sizes = default_main
-
-        # --- Center splitter (output | editor | terminal) ---
-        center_sizes = None
-        saved_center = s.get("center_splitter_sizes")
-        if saved_center:
-            try:
-                center_sizes = [int(v) for v in saved_center]
-            except (TypeError, ValueError):
-                pass
-
-        # If the output should be visible but has 0 height, use defaults.
-        output_vis = s.get("output_visible", True)
-        if not center_sizes or (output_vis and len(center_sizes) >= 1 and center_sizes[0] == 0):
-            center_sizes = default_center
-
-        # Apply visibility.
-        self._sidebar.setVisible(sidebar_vis)
-        self._left_stripe.set_button_active("sidebar", sidebar_vis)
-        self._output.setVisible(output_vis)
-
-        # Apply sizes synchronously.
-        self._main_splitter.setSizes(main_sizes)
-        self._center_splitter.setSizes(center_sizes)
-
-        # Defer one more re-apply so the sizes survive Qt's post-rebuild
-        # layout pass (same pattern as showEvent).
-        def _deferred():
-            self._main_splitter.setSizes(main_sizes)
-            self._center_splitter.setSizes(center_sizes)
-        QTimer.singleShot(0, _deferred)
-
     def _restore_output(self):
         """
         Restore the output panel content from the previous session.
@@ -1755,15 +1717,17 @@ class MCAEditorPanel(QWidget):
 
     def _toggle_sidebar(self):
         """Toggle sidebar visibility and persist the choice."""
-        visible = not self._sidebar.isVisible()
+        visible = not self._sidebar_visible
         self._sidebar.setVisible(visible)
+        self._sidebar_visible = visible
         self._left_stripe.set_button_active("sidebar", visible)
         self._settings.set("sidebar_visible", visible)
 
     def _toggle_output(self):
         """Toggle output window visibility and persist the choice."""
-        visible = not self._output.isVisible()
+        visible = not self._output_visible
         self._output.setVisible(visible)
+        self._output_visible = visible
         self._settings.set("output_visible", visible)
 
     def _open_terminal_bottom(self):
@@ -2061,6 +2025,9 @@ class MCAEditorPanel(QWidget):
             return
         if editor.file_path:
             self._write_file(editor, editor.file_path)
+            # Auto-reload the module in both local and DCC environments
+            # so the project runs with the updated code immediately.
+            self._auto_reload_module(editor.file_path)
         else:
             # Temp buffer — persist to the buffers directory.
             self._save_buffer_content(editor)
@@ -2716,15 +2683,88 @@ class MCAEditorPanel(QWidget):
 
         File-backed tabs are written to disk; temp buffers are persisted
         to the session buffers directory. The modified flag is cleared
-        so the tab title drops the '*' indicator.
+        so the tab title drops the '*' indicator. For .py files, the
+        module is auto-reloaded locally and in the connected DCC.
 
         :param MCACodeEditor editor: The editor to save.
         """
         if editor.file_path:
             self._write_file(editor, editor.file_path)
+            # Auto-reload so the DCC and local env have the latest code.
+            self._auto_reload_module(editor.file_path)
         else:
             self._save_buffer_content(editor)
         editor.document().setModified(False)
+
+    def _auto_reload_module(self, filepath):
+        """
+        Reload the Python module corresponding to *filepath* if it has
+        already been imported, both locally and in the connected DCC.
+
+        Converts the file path to a module name by checking which
+        sys.path entry is a parent, then looks up that module name in
+        ``sys.modules``.  If found, calls ``importlib.reload()`` locally
+        and sends the equivalent reload command to the DCC adapter.
+
+        Skips silently for non-.py files, temp buffers, modules that
+        haven't been imported yet, or when the active project has
+        auto_reload_modules disabled.
+
+        :param str filepath: Absolute path to the saved .py file.
+        """
+        if not filepath or not filepath.endswith(".py"):
+            return
+
+        # Respect the project-level toggle (defaults to True / on).
+        if self._active_project and not self._active_project.auto_reload_modules:
+            return
+
+        norm = os.path.normpath(filepath)
+
+        # Figure out the dotted module name by finding the longest
+        # sys.path prefix that contains this file.
+        module_name = None
+        for sp in sys.path:
+            sp_norm = os.path.normpath(sp)
+            if not norm.startswith(sp_norm + os.sep):
+                continue
+            # Build dotted name from the relative path (strip .py).
+            rel = os.path.relpath(norm, sp_norm)
+            parts = rel.replace(os.sep, "/").split("/")
+            parts[-1] = parts[-1][:-3]  # strip .py
+            # __init__ means the package itself, drop it.
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            if parts:
+                candidate = ".".join(parts)
+                # Prefer the longest (most specific) match.
+                if module_name is None or len(candidate) > len(module_name):
+                    module_name = candidate
+
+        if not module_name or module_name not in sys.modules:
+            return
+
+        # --- Reload locally ---
+        try:
+            importlib.reload(sys.modules[module_name])
+            logger.info("Auto-reloaded local module: %s", module_name)
+        except Exception as exc:
+            logger.warning("Failed to auto-reload %s locally: %s", module_name, exc)
+
+        # --- Reload in the connected DCC ---
+        adapter = self._adapter_manager.get_active_adapter()
+        if adapter and adapter.is_connected:
+            reload_code = (
+                "import importlib, sys\n"
+                "if '{mod}' in sys.modules:\n"
+                "    importlib.reload(sys.modules['{mod}'])\n"
+                "    print('Auto-reloaded: {mod}')\n"
+            ).format(mod=module_name)
+            try:
+                adapter.execute(reload_code, "python")
+                logger.info("Sent auto-reload to DCC for module: %s", module_name)
+            except Exception as exc:
+                logger.warning("Failed to auto-reload %s in DCC: %s", module_name, exc)
 
     def _execute_all(self):
         """Execute the entire script."""
@@ -4058,12 +4098,14 @@ class MCAEditorPanel(QWidget):
         settings.set("center_splitter_sizes", self._center_splitter.sizes())
         settings.set("sidebar_splitter_sizes", self._sidebar.splitter_sizes())
 
-        # Panel visibility.
-        settings.set("output_visible", self._output.isVisible())
+        # Panel visibility — use tracked instance vars instead of isVisible()
+        # because the parent window may already be hidden during close,
+        # which causes isVisible() to return False for all children.
+        settings.set("output_visible", self._output_visible)
         settings.set("bottom_terminal_visible", self._bottom_terminal_panel.isVisible())
         settings.set("right_terminal_visible",
                       self._right_stripe.is_button_active("terminal"))
-        settings.set("sidebar_visible", self._sidebar.isVisible())
+        settings.set("sidebar_visible", self._sidebar_visible)
 
         # Persist workspace folders (scripts/ or project root when active).
         folders = self._sidebar.workspace_panel.get_workspace_folders()

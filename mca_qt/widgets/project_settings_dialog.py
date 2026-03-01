@@ -451,6 +451,16 @@ class ProjectSettingsDialog(QDialog):
         )
         info_layout.addRow(self._open_on_editor_open_cb)
 
+        self._auto_reload_cb = QCheckBox("Auto-reload modules on save/execute")
+        self._auto_reload_cb.setStyleSheet(_CHECKBOX_STYLE)
+        self._auto_reload_cb.setChecked(self._project.auto_reload_modules)
+        self._auto_reload_cb.setToolTip(
+            "When checked, saving or executing a .py file will\n"
+            "automatically importlib.reload() the module both\n"
+            "locally and in the connected DCC (e.g. Maya)."
+        )
+        info_layout.addRow(self._auto_reload_cb)
+
         layout.addWidget(info_group)
 
         # --- Python Source Paths ---
@@ -860,6 +870,7 @@ class ProjectSettingsDialog(QDialog):
             "env_vars": env_vars,
             "load_immediately": self._load_immediately_cb.isChecked(),
             "open_on_editor_open": self._open_on_editor_open_cb.isChecked(),
+            "auto_reload_modules": self._auto_reload_cb.isChecked(),
         }
         self.accept()
 

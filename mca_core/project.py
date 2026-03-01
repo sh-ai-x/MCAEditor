@@ -99,6 +99,7 @@ class MCAProject:
         self._env_vars = {}              # Key-value pairs set in os.environ.
         self._load_immediately = False   # Skip startup scripts on project open.
         self._open_on_editor_open = False  # Auto-open this project when editor launches.
+        self._auto_reload_modules = True   # Auto-reload modules on save/execute.
         self._schema_version = CURRENT_SCHEMA_VERSION
 
         # Auto-load if the project file already exists.
@@ -375,6 +376,28 @@ class MCAProject:
         """
         self._open_on_editor_open = bool(value)
 
+    @property
+    def auto_reload_modules(self):
+        """
+        Whether modules should auto-reload on save/execute.
+
+        When True, saving or executing a ``.py`` file that has already
+        been imported will trigger ``importlib.reload()`` both locally
+        and in the connected DCC.
+
+        :rtype: bool
+        """
+        return self._auto_reload_modules
+
+    @auto_reload_modules.setter
+    def auto_reload_modules(self, value):
+        """
+        Set the auto_reload_modules flag.
+
+        :param bool value: True to auto-reload on save/execute.
+        """
+        self._auto_reload_modules = bool(value)
+
     # --- Load / Save ----------------------------------------------------------
 
     def load(self):
@@ -406,6 +429,7 @@ class MCAProject:
         self._env_vars = data.get("env_vars", {})
         self._load_immediately = data.get("load_immediately", False)
         self._open_on_editor_open = data.get("open_on_editor_open", False)
+        self._auto_reload_modules = data.get("auto_reload_modules", True)
         self._schema_version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
 
         logger.info("Loaded project '%s' from %s", self._name, self.project_file_path)
@@ -448,6 +472,7 @@ class MCAProject:
             "env_vars": self._env_vars,
             "load_immediately": self._load_immediately,
             "open_on_editor_open": self._open_on_editor_open,
+            "auto_reload_modules": self._auto_reload_modules,
         }
 
     def validate(self):
