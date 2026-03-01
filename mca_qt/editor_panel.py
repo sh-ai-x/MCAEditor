@@ -253,12 +253,10 @@ class MCAEditorPanel(QWidget):
             2. The path and its .mca-project file exist on disk
             3. The project's open_on_editor_open flag is True
 
-        Captures the current UI state (splitter sizes, panel visibility)
-        BEFORE opening, then restores it after, because the layout rebuild
-        inside _switch_to_manifest can trigger Qt re-layout that collapses
-        panels to zero height. We capture live values rather than re-reading
-        from settings, because settings may already contain bad state from
-        a previous session that closed while panels were collapsed.
+        After opening, forces the full UI state restore because the
+        layout rebuild inside _switch_to_manifest collapses splitter
+        panels to zero. Reads saved sizes from settings with sane
+        fallback defaults so collapsed-to-zero values are overridden.
         """
         last_path = self._settings.get("last_project_path", "")
         if not last_path or not os.path.isdir(last_path):
@@ -273,32 +271,12 @@ class MCAEditorPanel(QWidget):
         if not project.open_on_editor_open:
             return
 
-        # Snapshot the current UI state BEFORE the project open disrupts
-        # it. At this point _restore_ui_state() has already run in __init__
-        # and showEvent's _restore_splitter_sizes has already fired, so
-        # these values reflect the user's last-saved layout.
-        saved_main_sizes = self._main_splitter.sizes()
-        saved_center_sizes = self._center_splitter.sizes()
-        saved_sidebar_vis = self._sidebar.isVisible()
-        saved_output_vis = self._output.isVisible()
-
         logger.info("Auto-opening last project: %s", last_path)
         self._open_project(last_path)
 
-        # Restore the UI state that was active before the project open.
-        # The layout rebuild inside _switch_to_manifest can redistribute
-        # splitter sizes, collapsing sidebar or output to zero.
-        self._sidebar.setVisible(saved_sidebar_vis)
-        self._output.setVisible(saved_output_vis)
-        self._main_splitter.setSizes(saved_main_sizes)
-        self._center_splitter.setSizes(saved_center_sizes)
-
-        # Defer one more re-apply so the sizes survive Qt's post-rebuild
-        # layout pass (same pattern as showEvent).
-        def _deferred_restore():
-            self._main_splitter.setSizes(saved_main_sizes)
-            self._center_splitter.setSizes(saved_center_sizes)
-        QTimer.singleShot(0, _deferred_restore)
+        # The layout rebuild inside _switch_to_manifest collapses the
+        # splitter panels to zero. Force-restore visibility and sizes.
+        self._force_restore_ui_state()
 
     # --- Status Message Helper -----------------------------------------------
 
@@ -1698,6 +1676,70 @@ class MCAEditorPanel(QWidget):
         # --- Font size (apply saved zoom level to all open editors) ---
         if self._default_font_size != 12:
             self._apply_font_size(notify=False)
+
+    def _force_restore_ui_state(self):
+        """
+        Restore splitter sizes and panel visibility after an operation
+        that disrupts the layout (e.g. auto-open project on startup).
+
+        Reads saved sizes from settings with sane fallback defaults.
+        If any saved size has a visible panel collapsed to 0, the
+        fallback defaults are used instead. Applies synchronously and
+        also defers a re-apply to survive Qt's post-rebuild layout pass.
+
+        Default splitter sizes (matching _setup_ui):
+            main_splitter:   [240, 800, 0]   (sidebar, center, right)
+            center_splitter: [250, 600, 0]   (output, editor, terminal)
+        """
+        s = self._settings
+
+        # Sane defaults matching _setup_ui.
+        default_main = [240, 800, 0]
+        default_center = [250, 600, 0]
+
+        # --- Main splitter (sidebar | center | right terminal) ---
+        main_sizes = None
+        saved_main = s.get("splitter_sizes")
+        if saved_main:
+            try:
+                main_sizes = [int(v) for v in saved_main]
+            except (TypeError, ValueError):
+                pass
+
+        # If the sidebar should be visible but has 0 width, use defaults.
+        sidebar_vis = s.get("sidebar_visible", True)
+        if not main_sizes or (sidebar_vis and len(main_sizes) >= 1 and main_sizes[0] == 0):
+            main_sizes = default_main
+
+        # --- Center splitter (output | editor | terminal) ---
+        center_sizes = None
+        saved_center = s.get("center_splitter_sizes")
+        if saved_center:
+            try:
+                center_sizes = [int(v) for v in saved_center]
+            except (TypeError, ValueError):
+                pass
+
+        # If the output should be visible but has 0 height, use defaults.
+        output_vis = s.get("output_visible", True)
+        if not center_sizes or (output_vis and len(center_sizes) >= 1 and center_sizes[0] == 0):
+            center_sizes = default_center
+
+        # Apply visibility.
+        self._sidebar.setVisible(sidebar_vis)
+        self._left_stripe.set_button_active("sidebar", sidebar_vis)
+        self._output.setVisible(output_vis)
+
+        # Apply sizes synchronously.
+        self._main_splitter.setSizes(main_sizes)
+        self._center_splitter.setSizes(center_sizes)
+
+        # Defer one more re-apply so the sizes survive Qt's post-rebuild
+        # layout pass (same pattern as showEvent).
+        def _deferred():
+            self._main_splitter.setSizes(main_sizes)
+            self._center_splitter.setSizes(center_sizes)
+        QTimer.singleShot(0, _deferred)
 
     def _restore_output(self):
         """
