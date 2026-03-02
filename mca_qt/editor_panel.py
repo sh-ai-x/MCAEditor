@@ -1617,15 +1617,7 @@ class MCAEditorPanel(QWidget):
         resets splitter sizes and panel visibility to defaults. This
         method layers the user's last-saved state on top.
         """
-        # --- Debug trace (survives Cython compilation) ---
-        import os as _os
-        _lp = _os.path.join(
-            _os.environ.get("LOCALAPPDATA", ""), "MCAEditor", "restore_debug.log"
-        )
-        _f = open(_lp, "w"); _f.write("ENTER\n"); _f.flush()
-
         s = self._settings
-        _f.write("1\n"); _f.flush()
 
         saved_main = s.get("splitter_sizes")
         if saved_main:
@@ -1633,7 +1625,6 @@ class MCAEditorPanel(QWidget):
                 self._main_splitter.setSizes([int(v) for v in saved_main])
             except (TypeError, ValueError):
                 pass
-        _f.write("2\n"); _f.flush()
 
         saved_center = s.get("center_splitter_sizes")
         if saved_center:
@@ -1641,7 +1632,6 @@ class MCAEditorPanel(QWidget):
                 self._center_splitter.setSizes([int(v) for v in saved_center])
             except (TypeError, ValueError):
                 pass
-        _f.write("3\n"); _f.flush()
 
         saved_sidebar = s.get("sidebar_splitter_sizes")
         if saved_sidebar:
@@ -1649,77 +1639,57 @@ class MCAEditorPanel(QWidget):
                 self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
             except (TypeError, ValueError):
                 pass
-        _f.write("4\n"); _f.flush()
 
         sidebar_vis = s.get("sidebar_visible", True)
         self._sidebar.setVisible(sidebar_vis)
         self._sidebar_visible = sidebar_vis
         self._left_stripe.set_button_active("sidebar", sidebar_vis)
-        _f.write("5\n"); _f.flush()
 
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
         self._output_visible = output_vis
-        _f.write("6\n"); _f.flush()
 
         legacy_term = s.get("terminal_visible", None)
         if legacy_term is not None:
             if s.get("bottom_terminal_visible", None) is None:
                 s.set("bottom_terminal_visible", legacy_term)
-        _f.write("7\n"); _f.flush()
 
         bottom_vis = s.get("bottom_terminal_visible", False)
-        _f.write("8 bottom_vis={} avail={}\n".format(bottom_vis, self._terminal_available)); _f.flush()
         if bottom_vis and self._terminal_available:
             self._bottom_terminal_panel.setVisible(True)
-            _f.write("8a\n"); _f.flush()
             sizes = self._center_splitter.sizes()
-            _f.write("8b sizes={}\n".format(sizes)); _f.flush()
             if len(sizes) >= 3 and sizes[2] < 50:
                 total = sum(sizes)
                 terminal_height = min(200, total // 4)
                 sizes[2] = terminal_height
                 sizes[1] = max(100, sizes[1] - terminal_height)
                 self._center_splitter.setSizes(sizes)
-            _f.write("8c\n"); _f.flush()
             QTimer.singleShot(500, self._bottom_terminal_panel.ensure_terminal)
-            _f.write("8d\n"); _f.flush()
             self._left_stripe.set_button_active("terminal", True)
-        _f.write("9\n"); _f.flush()
 
         right_term_vis = s.get("right_terminal_visible", False)
-        _f.write("10 right={}\n".format(right_term_vis)); _f.flush()
         if right_term_vis:
-            _f.write("10a setVisible\n"); _f.flush()
             self._right_terminal_panel.setVisible(True)
-            _f.write("10b sizes()\n"); _f.flush()
             sizes = self._main_splitter.sizes()
-            _f.write("10c sizes={}\n".format(sizes)); _f.flush()
             last = len(sizes) - 1
             if sizes[last] == 0:
                 total = sum(sizes)
                 sizes[last] = 300
                 sizes[1] = total - sizes[0] - sizes[last]
                 self._main_splitter.setSizes(sizes)
-            _f.write("10d\n"); _f.flush()
             QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
-            _f.write("10e\n"); _f.flush()
             self._right_stripe.set_button_active("terminal", True)
         else:
             self._right_terminal_panel.setVisible(False)
-        _f.write("11\n"); _f.flush()
 
         show_ws = s.get("show_whitespace", False)
-        _f.write("12 ws={}\n".format(show_ws)); _f.flush()
         if show_ws:
             self._whitespace_action.setChecked(True)
             for editor, name, path in self._group_container.all_editors():
                 editor.set_show_whitespace(True)
-        _f.write("13\n"); _f.flush()
 
         if self._default_font_size != 12:
             self._apply_font_size(notify=False)
-        _f.write("DONE\n"); _f.flush(); _f.close()
 
     def _restore_output(self):
         """

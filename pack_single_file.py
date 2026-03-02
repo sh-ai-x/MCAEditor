@@ -253,7 +253,8 @@ def create_payload_zip(dist_dir):
 
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(dist_dir):
-            # Skip __pycache__ directories
+            # Skip __pycache__ directories — sourceless .pyc files are
+            # placed directly in package dirs, not in __pycache__/.
             dirs[:] = [d for d in dirs if d != "__pycache__"]
 
             for filename in files:

@@ -541,13 +541,30 @@ class TerminalBackend(QThread):
         Stop the read loop and kill the child process.
 
         Handles cleanup for both PTY and subprocess backends.
-        Safe to call from the main thread.
+        Safe to call from the main thread.  Explicitly kills the
+        child shell process so Maya doesn't hang on exit waiting
+        for orphaned ConPTY children.
         """
         self._running = False
 
-        # The PTY object is managed by pywinpty — it handles cleanup
-        # when garbage collected.  Setting _running = False causes the
-        # read loop to exit, which ends the thread.
+        # PTY path — explicitly kill the child shell process via its
+        # PID so the ConPTY closes cleanly.  Relying on garbage
+        # collection alone is not reliable during Maya shutdown —
+        # the GC may never run, leaving the shell alive and causing
+        # Maya's process to hang as a zombie.
+        if self._pty:
+            try:
+                pid = self._pty.pid
+                if pid:
+                    import signal
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info("Sent SIGTERM to PTY child (pid=%d)", pid)
+            except (ProcessLookupError, OSError):
+                # Process already exited — that's fine.
+                pass
+            except Exception as exc:
+                logger.warning("Failed to kill PTY child: %s", exc)
+            self._pty = None
 
         # Subprocess path — actively kill the child process and close
         # its stdin pipe so the read loop's os.read() returns EOF.

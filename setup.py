@@ -90,8 +90,38 @@ def collect_extensions():
         print("Install with: pip install cython")
         return []
 
-    # All packages are compiled to .pyd — no source code ships in the build.
+    # Compile all packages.  The binding=True directive preserves Python
+    # method signatures so Shiboken can introspect Qt virtual overrides.
     packages = ["mca_core", "mca_qt", "mca_standalone", "mca_maya"]
+
+    # Files to skip during compilation (shipped as .pyc instead).
+    # ANY file with a Qt virtual method override (eventFilter, paintEvent,
+    # keyPressEvent, sizeHint, etc.) crashes when compiled to .pyd because
+    # Shiboken's C++ virtual dispatch fails on enum-typed arguments in
+    # Cython-compiled code.  The crash is ACCESS_VIOLATION at 0x00000008
+    # in Shiboken::Enum::unpickleEnum, triggered during Qt's paint/event
+    # dispatch cycles.  Files without Qt virtual overrides compile fine.
+    exclude_from_compilation = {
+        # --- mca_maya ---
+        os.path.join("mca_maya", "maya_window.py"),          # eventFilter, event
+        # --- mca_qt ---
+        os.path.join("mca_qt", "editor_panel.py"),           # showEvent
+        # --- mca_qt/widgets ---
+        os.path.join("mca_qt", "widgets", "code_editor.py"),       # paintEvent, keyPressEvent, sizeHint, event, etc.
+        os.path.join("mca_qt", "widgets", "completer.py"),         # eventFilter
+        os.path.join("mca_qt", "widgets", "drag_tab_manager.py"), # eventFilter
+        os.path.join("mca_qt", "widgets", "drop_zone_overlay.py"), # paintEvent
+        os.path.join("mca_qt", "widgets", "editor_group.py"),     # mousePressEvent, paintEvent, eventFilter, etc.
+        os.path.join("mca_qt", "widgets", "find_in_files.py"),    # closeEvent
+        os.path.join("mca_qt", "widgets", "find_replace_bar.py"), # eventFilter, keyPressEvent
+        os.path.join("mca_qt", "widgets", "output_window.py"),    # eventFilter, keyPressEvent, event
+        os.path.join("mca_qt", "widgets", "quick_open.py"),       # eventFilter
+        os.path.join("mca_qt", "widgets", "settings_dialog.py"),  # keyPressEvent
+        os.path.join("mca_qt", "widgets", "sidebar.py"),          # dragEnterEvent, dragMoveEvent, dropEvent
+        os.path.join("mca_qt", "widgets", "terminal_native.py"),  # eventFilter, resizeEvent
+        os.path.join("mca_qt", "widgets", "terminal_xterm.py"),   # eventFilter
+        os.path.join("mca_qt", "widgets", "tool_stripe.py"),      # sizeHint
+    }
 
     py_files = []
     for package in packages:
@@ -110,6 +140,9 @@ def collect_extensions():
                     continue
 
                 filepath = os.path.join(root, filename)
+                # Skip files excluded from compilation (shipped as .pyc).
+                if filepath in exclude_from_compilation:
+                    continue
                 py_files.append(filepath)
 
     if not py_files:
@@ -156,10 +189,9 @@ def collect_extensions():
             "binding": True,            # Required for PySide6/Shiboken — preserves
                                         # Python method signatures so Qt's metaclass
                                         # can introspect virtual overrides and slots.
-            "boundscheck": False,       # Disable bounds checking for speed.
+            "boundscheck": False,       # Disable for performance (all indexing is safe).
             "wraparound": True,         # Keep Python negative-indexing semantics —
-                                        # the codebase uses [-1] extensively and the
-                                        # performance cost is negligible for a UI app.
+                                        # the codebase uses [-1] extensively.
         },
         # Don't fail if a single file has issues.
         nthreads=os.cpu_count() or 1,

@@ -50,6 +50,33 @@ DIST_PURE_PYTHON = [
     os.path.join("mca_core", "mcp_maya_server.py"),
 ]
 
+# Files that ship as .pyc (bytecode) instead of .pyd (compiled C extension).
+# ANY file with a Qt virtual method override crashes when compiled because
+# Shiboken's C++ virtual dispatch fails on enum-typed arguments in
+# Cython-compiled code (ACCESS_VIOLATION in Shiboken::Enum::unpickleEnum).
+# Files without Qt virtual overrides compile fine.
+DIST_PYC_FILES = [
+    # --- mca_maya ---
+    os.path.join("mca_maya", "maya_window.py"),
+    # --- mca_qt ---
+    os.path.join("mca_qt", "editor_panel.py"),
+    # --- mca_qt/widgets ---
+    os.path.join("mca_qt", "widgets", "code_editor.py"),
+    os.path.join("mca_qt", "widgets", "completer.py"),
+    os.path.join("mca_qt", "widgets", "drag_tab_manager.py"),
+    os.path.join("mca_qt", "widgets", "drop_zone_overlay.py"),
+    os.path.join("mca_qt", "widgets", "editor_group.py"),
+    os.path.join("mca_qt", "widgets", "find_in_files.py"),
+    os.path.join("mca_qt", "widgets", "find_replace_bar.py"),
+    os.path.join("mca_qt", "widgets", "output_window.py"),
+    os.path.join("mca_qt", "widgets", "quick_open.py"),
+    os.path.join("mca_qt", "widgets", "settings_dialog.py"),
+    os.path.join("mca_qt", "widgets", "sidebar.py"),
+    os.path.join("mca_qt", "widgets", "terminal_native.py"),
+    os.path.join("mca_qt", "widgets", "terminal_xterm.py"),
+    os.path.join("mca_qt", "widgets", "tool_stripe.py"),
+]
+
 # Project root (directory containing this script).
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -348,6 +375,55 @@ def compile_extensions(mayapy):
     )
 
 
+def compile_pyc_files():
+    """
+    Compile .pyc fallback files and place them directly in package dirs.
+
+    Files listed in ``DIST_PYC_FILES`` are compiled to bytecode using
+    ``py_compile`` and placed directly in the package directory as
+    ``module.pyc`` (NOT in ``__pycache__/``).
+
+    Python's ``SourcelessFileLoader`` looks for ``.pyc`` files in the
+    package directory itself.  The ``__pycache__/`` mechanism is only
+    used by ``SourceFileLoader`` when a ``.py`` source file exists.
+    For sourceless distribution (no .py present), the ``.pyc`` must
+    live next to the ``__init__.py`` so ``FileFinder`` can discover it.
+
+    :return: Set of relative paths that were compiled (for logging).
+    :rtype: set
+    """
+    import py_compile
+
+    print("\n--- Compiling .pyc fallback files ---")
+
+    compiled = set()
+    for rel_path in DIST_PYC_FILES:
+        src_path = os.path.join(PROJECT_ROOT, rel_path)
+        if not os.path.isfile(src_path):
+            print("  WARNING: Source not found, skipping: {}".format(rel_path))
+            continue
+
+        # Place the .pyc directly in the package directory (sourceless import).
+        # e.g. mca_maya/maya_window.py -> dist/mca_maya/maya_window.pyc
+        rel_dir = os.path.dirname(rel_path)
+        basename = os.path.splitext(os.path.basename(rel_path))[0]
+        pyc_name = "{}.pyc".format(basename)
+
+        dest_dir = os.path.join(DIST_DIR, rel_dir)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        dest_pyc = os.path.join(dest_dir, pyc_name)
+
+        # Compile the .py to .pyc at the destination path.
+        py_compile.compile(src_path, cfile=dest_pyc, doraise=True)
+        compiled.add(rel_path)
+        print("  Compiled: {} -> {}".format(
+            rel_path, os.path.relpath(dest_pyc, DIST_DIR)
+        ))
+
+    return compiled
+
+
 def create_dist_structure():
     """
     Create the distribution directory and populate it with compiled files.
@@ -355,7 +431,8 @@ def create_dist_structure():
     For each package in DIST_PACKAGES:
         - Copies ``.pyd`` compiled extensions (preserving directory structure)
         - Copies ``__init__.py`` files (required for Python package discovery)
-        - Copies explicit DIST_PURE_PYTHON files
+        - Copies explicit DIST_PURE_PYTHON files as ``.py``
+        - Skips DIST_PYC_FILES (handled separately by ``compile_pyc_files()``)
         - Skips all other ``.py`` source files (code protection)
     """
     print("\n--- Creating distribution structure ---")
@@ -376,7 +453,7 @@ def create_dist_structure():
             rel_root = os.path.relpath(root, PROJECT_ROOT)
             dest_root = os.path.join(DIST_DIR, rel_root)
 
-            # Collect files to copy: .pyd (compiled) and __init__.py (package marker).
+            # Compiled package — copy .pyd + __init__.py + explicit pure files.
             pyd_files = [f for f in files if f.endswith(".pyd")]
             init_files = [f for f in files if f == "__init__.py"]
 
@@ -535,19 +612,22 @@ def main():
     # Step 4: Compile extensions in-place using Maya's Python.
     compile_extensions(mayapy)
 
-    # Step 5: Create distribution directory with compiled files.
+    # Step 5: Create distribution directory with compiled .pyd files.
     create_dist_structure()
 
-    # Step 6: Copy resource files (icons, images).
+    # Step 6: Compile .pyc fallback files for Qt widget subclasses.
+    compile_pyc_files()
+
+    # Step 7: Copy resource files (icons, images).
     copy_resources()
 
-    # Step 7: Write install/uninstall scripts into dist.
+    # Step 8: Write install/uninstall scripts into dist.
     create_install_scripts()
 
-    # Step 8: Create the zip archive.
+    # Step 9: Create the zip archive.
     zip_path = create_zip()
 
-    # Step 9: Clean in-place build artifacts from the source tree.
+    # Step 10: Clean in-place build artifacts from the source tree.
     clean_source_tree()
 
     # Done!

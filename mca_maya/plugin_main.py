@@ -192,6 +192,15 @@ def uninitializePlugin(plugin):
     """
     fn_plugin = om2.MFnPlugin(plugin)
 
+    # Clean up the editor window first — terminates terminal processes,
+    # adapters, and callbacks.  This must happen before the command ports
+    # are closed so any in-flight communication can finish.
+    try:
+        from mca_maya.maya_window import cleanup_editor
+        cleanup_editor()
+    except Exception as exc:
+        logger.warning("Editor cleanup failed: %s", exc)
+
     # Deregister the mcaEditor command.
     try:
         fn_plugin.deregisterCommand(MCAEditorCommand.COMMAND_NAME)

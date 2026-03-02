@@ -824,13 +824,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
 # --- Command Port Setup -----------------------------------------------------
 
-def _ensure_command_ports():
+def _open_command_ports_now():
     """
-    Open Maya's MEL (7001) and Python (7002) command ports if not already open.
+    Attempt to open Maya's MEL (7001) and Python (7002) command ports.
 
-    The MCP server runs as a separate process and communicates with Maya
-    over TCP on port 7002.  These ports must be open for Claude Code's
-    MCP tools to work.  If a port is already open, the call is a no-op.
+    :return: True if port 7002 is confirmed open after the attempt.
+    :rtype: bool
     """
     for port, src_type in [("7001", "mel"), ("7002", "python")]:
         port_name = ":{}".format(port)
@@ -839,7 +838,48 @@ def _ensure_command_ports():
             logger.info("Opened %s command port %s", src_type, port_name)
         except RuntimeError:
             # RuntimeError means the port is already open — that's fine.
-            logger.debug("Command port %s already open", port_name)
+            pass
+        except Exception as exc:
+            logger.warning("Failed to open command port %s: %s", port_name, exc)
+
+    # Verify port 7002 is actually open.
+    try:
+        return cmds.commandPort(":7002", query=True)
+    except Exception:
+        return False
+
+
+def _ensure_command_ports():
+    """
+    Open Maya's MEL (7001) and Python (7002) command ports if not already open.
+
+    The MCP server runs as a separate process and communicates with Maya
+    over TCP on port 7002.  These ports must be open for Claude Code's
+    MCP tools to work.  If a port is already open, the call is a no-op.
+
+    Maya's networking may not be ready during early startup (plugin init,
+    layout restore).  If the ports fail to open on the first attempt, a
+    1-second delayed retry is scheduled via QTimer to catch cases where
+    the initial call fires too early.
+    """
+    if _open_command_ports_now():
+        return
+
+    # First attempt failed — Maya's networking likely isn't ready yet.
+    # Schedule a delayed retry.  This catches the common case where
+    # _ensure_command_ports() is called during initializePlugin or
+    # uiScript layout restore, before Maya's networking stack is up.
+    try:
+        from PySide6.QtCore import QTimer
+    except ImportError:
+        from PySide2.QtCore import QTimer
+
+    def _retry():
+        """Delayed retry for command port opening."""
+        if not _open_command_ports_now():
+            logger.warning("Command ports still not open after retry")
+
+    QTimer.singleShot(2000, _retry)
 
 
 # --- Public API (called from plugin_main and MEL override) ------------------
@@ -859,6 +899,12 @@ def show_mca_editor():
     """
     global _mca_editor_window
     global _output_callback_id
+
+    # Ensure command ports are open FIRST — before any early return.
+    # When Maya restores a saved layout, the workspace control is already
+    # visible, so show_mca_editor() returns early below.  Without this,
+    # the MCP server (a separate process) can never connect to Maya.
+    _ensure_command_ports()
 
     # If the workspace control already exists from a previous session,
     # delete it so we can create a fresh one. Maya keeps the control
@@ -930,11 +976,6 @@ def show_mca_editor():
     _license_message = license_status.get("message", "")
     _show_license_notice = license_status.get("trial", False)
 
-    # Ensure command ports are open so the MCP server (a separate process)
-    # can communicate with Maya.  Claude Code talks to the MCP server via
-    # stdio, and the MCP server talks to Maya via TCP on port 7002.
-    _ensure_command_ports()
-
     # Kick off MCP server deployment in the background (idempotent).
     # This is also done in plugin_main.initializePlugin(), but when the
     # editor is launched via show_mca_editor() directly (without the
@@ -995,6 +1036,11 @@ def _restore_mca_editor():
     """
     global _mca_editor_window
 
+    # Ensure command ports are open so the MCP server can connect.
+    # This is the layout-restore path — show_mca_editor() may never
+    # run if Maya restores the editor from a saved workspace layout.
+    _ensure_command_ports()
+
     # Guard: if a valid window already exists, skip recreation.
     # Maya's uiScript can fire many times during a single layout
     # restore (10-20 calls is common).  Without this guard, each
@@ -1022,3 +1068,42 @@ def _restore_mca_editor():
     )
 
     logger.info("MCA Editor workspace control restored via uiScript")
+
+
+# --- Plugin Cleanup ---------------------------------------------------------
+
+def cleanup_editor():
+    """
+    Clean up the MCA Editor window and all child resources.
+
+    Called by ``uninitializePlugin()`` to ensure terminal processes,
+    adapters, and callbacks are properly shut down when the plugin is
+    unloaded or Maya exits.  Without this, ConPTY shell processes
+    survive Maya shutdown and prevent the process from exiting cleanly.
+    """
+    global _mca_editor_window
+    global _output_callback_id
+
+    # Remove Maya output hook.
+    if _output_callback_id is not None:
+        try:
+            om2.MMessage.removeCallback(_output_callback_id)
+        except Exception:
+            pass
+        _output_callback_id = None
+
+    # Clean up the editor window if it exists.
+    if _mca_editor_window is not None:
+        try:
+            # Remove hotkey filter.
+            app = QApplication.instance()
+            if app and hasattr(_mca_editor_window, '_hotkey_filter') and _mca_editor_window._hotkey_filter:
+                app.removeEventFilter(_mca_editor_window._hotkey_filter)
+
+            # Save state and terminate terminals/adapters.
+            _mca_editor_window._panel.save_window_state(_mca_editor_window._settings)
+            _mca_editor_window._panel.cleanup()
+            logger.info("MCA Editor cleanup completed (terminals terminated)")
+        except Exception as exc:
+            logger.warning("Error during MCA Editor cleanup: %s", exc)
+        _mca_editor_window = None

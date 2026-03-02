@@ -123,6 +123,11 @@ class TerminalWidget(QWidget):
         self._local_echo = False
         self._echo_buffer = ""
 
+        # Mouse selection state — when the user is click-dragging to
+        # select text, we pause the display rebuild so the selection
+        # isn't destroyed by the 60fps render timer.
+        self._mouse_selecting = False
+
         # Build the UI.
         self._setup_ui()
 
@@ -357,6 +362,15 @@ class TerminalWidget(QWidget):
         if not self._dirty and new_scrollback_count == 0:
             return
 
+        # If the user is selecting text (mouse held down or has a completed
+        # selection), defer the visual update so the 60fps rebuild doesn't
+        # destroy their selection.  Data has already been drained and fed
+        # to the parser above, so nothing is lost — we just skip the
+        # display rebuild this frame.  The _dirty flag stays True, so the
+        # next frame after they release the mouse will catch up.
+        if self._mouse_selecting or self._display.textCursor().hasSelection():
+            return
+
         # Get the visible grid and cursor position.
         grid_lines = self._parser.get_visible_lines()
         cursor_row, cursor_col = self._parser.get_cursor_position()
@@ -537,16 +551,19 @@ class TerminalWidget(QWidget):
             if etype == QEventType.Type.Wheel:
                 return self._handle_wheel(event)
 
-        # Block mouse clicks from repositioning the QPlainTextEdit cursor.
-        # In a terminal, clicking should not move the input cursor — only
-        # the shell controls cursor position.  We still allow mouse press
-        # so that context menus and text selection initiation work via
-        # the right-click handler, but consume single left-clicks.
-        if obj is self._display and event.type() == QEventType.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.LeftButton:
-                # Give focus to the display so keyboard input works.
-                self._display.setFocus()
-                return True
+        # Track mouse-down state for text selection.  While the left
+        # button is held, we pause the 60fps display rebuild so the
+        # user's click-drag selection isn't destroyed mid-frame.
+        if obj is self._display:
+            etype = event.type()
+            if etype == QEventType.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._mouse_selecting = True
+                    self._display.setFocus()
+                    # Fall through to default handler for selection support.
+            elif etype == QEventType.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._mouse_selecting = False
 
         return super().eventFilter(obj, event)
 
@@ -565,11 +582,21 @@ class TerminalWidget(QWidget):
         modifiers = event.modifiers()
         text = event.text()
 
-        # Ctrl+C — send interrupt signal and clear local echo buffer.
+        # Ctrl+C — smart behavior like Windows Terminal and GNOME Terminal:
+        # if the user has selected text, copy it; otherwise send interrupt
+        # (SIGINT / \x03).  Ctrl+Shift+C always copies regardless.
         if key == Qt.Key.Key_C and modifiers & Qt.KeyboardModifier.ControlModifier:
-            if self._local_echo:
-                self._echo_buffer = ""
-            self._backend.write(b"\x03")
+            has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            has_selection = self._display.textCursor().hasSelection()
+
+            if has_shift or has_selection:
+                # Copy the selection to the clipboard.
+                self.copy_selection()
+            else:
+                # No selection — send interrupt to the shell.
+                if self._local_echo:
+                    self._echo_buffer = ""
+                self._backend.write(b"\x03")
             return True
 
         # Ctrl+D — send EOF.
@@ -585,13 +612,6 @@ class TerminalWidget(QWidget):
         # Ctrl+L — clear screen.
         if key == Qt.Key.Key_L and modifiers & Qt.KeyboardModifier.ControlModifier:
             self._backend.write(b"\x0c")
-            return True
-
-        # Ctrl+Shift+C — copy selection.
-        if (key == Qt.Key.Key_C and
-            modifiers & Qt.KeyboardModifier.ControlModifier and
-            modifiers & Qt.KeyboardModifier.ShiftModifier):
-            self.copy_selection()
             return True
 
         # Ctrl+V or Ctrl+Shift+V — paste clipboard.
