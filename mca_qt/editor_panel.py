@@ -1617,91 +1617,109 @@ class MCAEditorPanel(QWidget):
         resets splitter sizes and panel visibility to defaults. This
         method layers the user's last-saved state on top.
         """
-        s = self._settings
+        # --- Debug trace (survives Cython compilation) ---
+        import os as _os
+        _lp = _os.path.join(
+            _os.environ.get("LOCALAPPDATA", ""), "MCAEditor", "restore_debug.log"
+        )
+        _f = open(_lp, "w"); _f.write("ENTER\n"); _f.flush()
 
-        # --- Main splitter (sidebar | editor | AI) ---
+        s = self._settings
+        _f.write("1\n"); _f.flush()
+
         saved_main = s.get("splitter_sizes")
         if saved_main:
-            # QSettings may return strings — coerce to int.
             try:
                 self._main_splitter.setSizes([int(v) for v in saved_main])
             except (TypeError, ValueError):
                 pass
+        _f.write("2\n"); _f.flush()
 
-        # --- Center splitter (output | editor tabs) ---
         saved_center = s.get("center_splitter_sizes")
         if saved_center:
             try:
                 self._center_splitter.setSizes([int(v) for v in saved_center])
             except (TypeError, ValueError):
                 pass
+        _f.write("3\n"); _f.flush()
 
-        # --- Sidebar internal splitter (Workspace | Open Editors | Outline) ---
         saved_sidebar = s.get("sidebar_splitter_sizes")
         if saved_sidebar:
             try:
                 self._sidebar.set_splitter_sizes([int(v) for v in saved_sidebar])
             except (TypeError, ValueError):
                 pass
+        _f.write("4\n"); _f.flush()
 
-        # --- Panel visibility ---
         sidebar_vis = s.get("sidebar_visible", True)
         self._sidebar.setVisible(sidebar_vis)
         self._sidebar_visible = sidebar_vis
         self._left_stripe.set_button_active("sidebar", sidebar_vis)
+        _f.write("5\n"); _f.flush()
 
         output_vis = s.get("output_visible", True)
         self._output.setVisible(output_vis)
         self._output_visible = output_vis
+        _f.write("6\n"); _f.flush()
 
-        # Migrate legacy "terminal_visible" key to "bottom_terminal_visible".
         legacy_term = s.get("terminal_visible", None)
         if legacy_term is not None:
             if s.get("bottom_terminal_visible", None) is None:
                 s.set("bottom_terminal_visible", legacy_term)
+        _f.write("7\n"); _f.flush()
 
-        # Restore bottom terminal panel visibility (hidden by default).
-        # Defer terminal creation so the layout is fully settled.
         bottom_vis = s.get("bottom_terminal_visible", False)
+        _f.write("8 bottom_vis={} avail={}\n".format(bottom_vis, self._terminal_available)); _f.flush()
         if bottom_vis and self._terminal_available:
             self._bottom_terminal_panel.setVisible(True)
-            # Give the panel space in the center splitter.
+            _f.write("8a\n"); _f.flush()
             sizes = self._center_splitter.sizes()
+            _f.write("8b sizes={}\n".format(sizes)); _f.flush()
             if len(sizes) >= 3 and sizes[2] < 50:
                 total = sum(sizes)
                 terminal_height = min(200, total // 4)
                 sizes[2] = terminal_height
                 sizes[1] = max(100, sizes[1] - terminal_height)
                 self._center_splitter.setSizes(sizes)
+            _f.write("8c\n"); _f.flush()
             QTimer.singleShot(500, self._bottom_terminal_panel.ensure_terminal)
+            _f.write("8d\n"); _f.flush()
             self._left_stripe.set_button_active("terminal", True)
+        _f.write("9\n"); _f.flush()
 
-        # Restore right terminal panel visibility.
         right_term_vis = s.get("right_terminal_visible", False)
+        _f.write("10 right={}\n".format(right_term_vis)); _f.flush()
         if right_term_vis:
+            _f.write("10a setVisible\n"); _f.flush()
             self._right_terminal_panel.setVisible(True)
-            # Expand the right panel in the main splitter if needed.
+            _f.write("10b sizes()\n"); _f.flush()
             sizes = self._main_splitter.sizes()
-            if sizes[-1] == 0:
+            _f.write("10c sizes={}\n".format(sizes)); _f.flush()
+            last = len(sizes) - 1
+            if sizes[last] == 0:
                 total = sum(sizes)
-                sizes[-1] = 300
-                sizes[1] = total - sizes[0] - sizes[-1]
+                sizes[last] = 300
+                sizes[1] = total - sizes[0] - sizes[last]
                 self._main_splitter.setSizes(sizes)
+            _f.write("10d\n"); _f.flush()
             QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
+            _f.write("10e\n"); _f.flush()
             self._right_stripe.set_button_active("terminal", True)
         else:
             self._right_terminal_panel.setVisible(False)
+        _f.write("11\n"); _f.flush()
 
-        # --- Whitespace rendering ---
         show_ws = s.get("show_whitespace", False)
+        _f.write("12 ws={}\n".format(show_ws)); _f.flush()
         if show_ws:
             self._whitespace_action.setChecked(True)
             for editor, name, path in self._group_container.all_editors():
                 editor.set_show_whitespace(True)
+        _f.write("13\n"); _f.flush()
 
-        # --- Font size (apply saved zoom level to all open editors) ---
         if self._default_font_size != 12:
             self._apply_font_size(notify=False)
+        _f.write("DONE\n"); _f.flush(); _f.close()
 
     def _restore_output(self):
         """
@@ -4043,15 +4061,10 @@ class MCAEditorPanel(QWidget):
         webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/Nodes/")
 
     def _show_licensing(self):
-        QMessageBox.information(
-            self, "Licensing",
-            "<h3>MCA Editor Licensing</h3>"
-            "<p><b>Current Tier:</b> Free</p>"
-            "<p>MCA Editor is currently in early development.<br>"
-            "Future licensing tiers (Standard, Pro, Studio) are planned.</p>"
-            "<hr>"
-            "<p style='color: #888;'>Contact: info@mechart.org</p>"
-        )
+        """Open the license dialog to view status or enter a new key."""
+        from mca_qt.widgets.license_dialog import LicenseDialog
+        dialog = LicenseDialog(self._settings, parent=self)
+        dialog.exec()
 
     def _show_about(self):
         QMessageBox.about(

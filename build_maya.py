@@ -44,14 +44,10 @@ RESOURCE_DIRS = ["resources/images"]
 # Pure-Python files that must ship uncompiled in the Maya distribution.
 # venv_manager.py runs at plugin init before the venv exists, so it
 # cannot be a compiled .pyd — it needs to work with just stdlib.
-# Terminal files are included so the native frontend works in Maya;
-# terminal_xterm.py is excluded since Maya lacks QtWebEngine.
+# mcp_maya_server.py runs as a separate process outside Maya.
 DIST_PURE_PYTHON = [
     os.path.join("mca_core", "venv_manager.py"),
-    os.path.join("mca_qt", "widgets", "terminal_factory.py"),
-    os.path.join("mca_qt", "widgets", "terminal_native.py"),
-    os.path.join("mca_qt", "widgets", "terminal_backend.py"),
-    os.path.join("mca_qt", "widgets", "ansi_parser.py"),
+    os.path.join("mca_core", "mcp_maya_server.py"),
 ]
 
 # Project root (directory containing this script).
@@ -359,6 +355,7 @@ def create_dist_structure():
     For each package in DIST_PACKAGES:
         - Copies ``.pyd`` compiled extensions (preserving directory structure)
         - Copies ``__init__.py`` files (required for Python package discovery)
+        - Copies explicit DIST_PURE_PYTHON files
         - Skips all other ``.py`` source files (code protection)
     """
     print("\n--- Creating distribution structure ---")

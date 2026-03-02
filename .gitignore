@@ -54,5 +54,8 @@ node_modules/
 package.json
 package-lock.json
 
+# --- License key generator (private, never distribute) ---
+tools/
+
 # --- Claude Code ---
 .claude/

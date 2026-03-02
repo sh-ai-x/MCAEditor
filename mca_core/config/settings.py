@@ -189,8 +189,9 @@ class MCASettings:
         "terminal_visible": False,       # Whether the terminal panel is shown.
         "sidebar_visible": True,         # Whether the sidebar is shown (Advanced mode).
 
-        # NOTE: Future tier/licensing hooks would add keys here:
-        #   "license_key", "license_tier" (free/standard/pro/studio)
+        # --- Licensing ---
+        "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).
+        "first_launch_date": "",         # ISO datetime of first launch (trial start).
     }
 
     def __init__(self, org_name="MCATools", app_name="MCAEditor", backend=None):

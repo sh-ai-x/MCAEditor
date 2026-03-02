@@ -17,3 +17,4 @@ from .editor_group import EditorGroup, SplittableTabBar
 from .editor_group_container import EditorGroupContainer
 from .drop_zone_overlay import DropZoneOverlay, DropZone
 from .drag_tab_manager import DragTabManager
+from .license_dialog import LicenseDialog

@@ -21,7 +21,7 @@ import logging
 
 from mca_core.venv_manager import setup_venv
 
-from mca_qt.qt_compat import QApplication, Qt
+from mca_qt.qt_compat import QApplication, QDialog, Qt
 from mca_qt.theme import create_dark_palette, GLOBAL_STYLESHEET
 from mca_core import __version__, __app_name__, __org_name__, __org_domain__
 from mca_core.config.settings import MCASettings
@@ -77,9 +77,36 @@ def main():
     # Load persistent settings.
     settings = MCASettings()
 
+    # --- License gate ---
+    # Check license status before creating the editor window.  If the
+    # trial has expired and no valid key exists, show the license dialog
+    # as a modal gate — the user must enter a key or cancel (exit).
+    from mca_core.license import check_license
+    from mca_qt.widgets.license_dialog import LicenseDialog
+
+    license_status = check_license(settings)
+    license_message = ""
+
+    if license_status["needs_key"]:
+        # Trial expired, no valid key — must enter one to proceed.
+        dialog = LicenseDialog(settings)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            # User cancelled — exit cleanly without opening the editor.
+            sys.exit(0)
+        # Re-check after dialog in case they entered a valid key.
+        license_status = check_license(settings)
+
+    if license_status["trial"]:
+        # Trial is active — store the message for the status bar.
+        license_message = license_status["message"]
+
     # Create and show the standalone window.
     window = StandaloneWindow(settings)
     window.show()
+
+    # Show trial notice on the status bar (non-blocking).
+    if license_message:
+        window.statusBar().showMessage(license_message, 10000)
 
     logger.info("MCA Editor window opened")
     sys.exit(app.exec())

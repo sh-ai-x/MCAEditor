@@ -900,6 +900,36 @@ def show_mca_editor():
         cmds.deleteUI(WORKSPACE_CONTROL_NAME)
         logger.info("Deleted stale workspace control: %s", WORKSPACE_CONTROL_NAME)
 
+    # --- License gate ---
+    # Check license status before creating the editor.  If the trial has
+    # expired and no valid key exists, show the license dialog.  If the
+    # user cancels, abort opening — don't kill Maya, just don't show the
+    # editor.
+    from mca_core.license import check_license
+    from mca_qt.widgets.license_dialog import LicenseDialog
+
+    _license_settings = MCASettings()
+    license_status = check_license(_license_settings)
+
+    if license_status["needs_key"]:
+        # Trial expired, no valid key — must enter one to proceed.
+        dialog = LicenseDialog(_license_settings)
+        try:
+            from PySide6.QtWidgets import QDialog as _QDialog
+        except ImportError:
+            from PySide2.QtWidgets import QDialog as _QDialog
+
+        if dialog.exec() != _QDialog.DialogCode.Accepted:
+            # User cancelled — don't open the editor, but don't kill Maya.
+            logger.info("License dialog cancelled — editor not opened")
+            return
+        # Re-check after dialog in case they entered a valid key.
+        license_status = check_license(_license_settings)
+
+    # Capture the license message for the status bar (trial or licensed).
+    _license_message = license_status.get("message", "")
+    _show_license_notice = license_status.get("trial", False)
+
     # Ensure command ports are open so the MCP server (a separate process)
     # can communicate with Maya.  Claude Code talks to the MCP server via
     # stdio, and the MCP server talks to Maya via TCP on port 7002.
@@ -915,21 +945,38 @@ def show_mca_editor():
     except Exception as exc:
         logger.warning("MCP setup trigger failed: %s", exc)
 
-    # Create the window widget.
-    _mca_editor_window = MCAMayaWindow()
+    # Create the window widget.  Wrapped in try/except so a failure in
+    # the editor panel doesn't take down all of Maya with a hard crash.
+    try:
+        _mca_editor_window = MCAMayaWindow()
+    except Exception as exc:
+        om2.MGlobal.displayError("MCA Editor failed to create window: {}".format(exc))
+        import traceback
+        traceback.print_exc()
+        return
 
     # Show as a dockable workspace control with persistence.
     # The uiScript is called by Maya when it needs to recreate the UI
     # (e.g., loading a saved layout).
-    _mca_editor_window.show(
-        dockable=True,
-        area="right",
-        floating=True,
-        width=1200,
-        height=800,
-        label="MCA Editor",
-        uiScript="from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()",
-    )
+    try:
+        _mca_editor_window.show(
+            dockable=True,
+            area="right",
+            floating=True,
+            width=1200,
+            height=800,
+            label="MCA Editor",
+            uiScript="from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()",
+        )
+    except Exception as exc:
+        om2.MGlobal.displayError("MCA Editor failed to show window: {}".format(exc))
+        import traceback
+        traceback.print_exc()
+        return
+
+    # Show trial notice on the Maya status bar if in trial mode.
+    if _show_license_notice and _license_message:
+        _mca_editor_window._on_status_message(_license_message, 10000)
 
     logger.info("MCA Editor dockable window created")
 
