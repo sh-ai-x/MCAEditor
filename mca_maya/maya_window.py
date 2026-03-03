@@ -329,7 +329,10 @@ class _MayaHotkeyFilter(QObject):
                         if terminal:
                             # Route through the terminal's eventFilter which
                             # handles Ctrl+V paste, Ctrl+C interrupt, etc.
-                            terminal.eventFilter(focus, event)
+                            # Pass terminal._display (not `focus`) because
+                            # the eventFilter checks `if obj is self._display:`
+                            # and rejects any other object.
+                            terminal.eventFilter(terminal._display, event)
                         elif hasattr(focus, "keyPressEvent"):
                             focus.keyPressEvent(event)
                     return True

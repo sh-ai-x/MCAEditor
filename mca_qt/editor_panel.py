@@ -37,6 +37,7 @@ from mca_qt.qt_compat import (
     QAction, QActionGroup, QKeySequence, QTextCursor,
 )
 
+from mca_core import __version__ as _APP_VERSION
 from mca_core.config.settings import MCASettings
 from mca_core.config.color_scheme import build_scheme_dict
 from mca_core.project import (
@@ -394,6 +395,18 @@ class MCAEditorPanel(QWidget):
         if not self._terminal_available:
             logger.info("Terminal unavailable — menu entries will be disabled")
 
+        # Minimum heights so panels never collapse to invisible.
+        # 20px is enough to show a title bar / resize handle so the user
+        # can always tell the panel exists and drag it back open.
+        self._output.setMinimumHeight(20)
+        self._group_container.setMinimumHeight(20)
+        self._bottom_terminal_panel.setMinimumHeight(20)
+
+        # Disable collapsing on all center splitter children so Qt
+        # respects the minimum heights instead of snapping to zero.
+        for i in range(self._center_splitter.count()):
+            self._center_splitter.setCollapsible(i, False)
+
         # Default split: 30% output (top), 70% editor (bottom), 0 terminal.
         self._center_splitter.setSizes([250, 600, 0])
 
@@ -413,6 +426,14 @@ class MCAEditorPanel(QWidget):
         # Right panel starts hidden.
         self._right_terminal_panel.setVisible(False)
         self._main_splitter.addWidget(self._right_terminal_panel)
+
+        # Minimum widths so panels never collapse to invisible.
+        center_widget.setMinimumWidth(20)
+
+        # Disable collapsing on all main splitter children so Qt
+        # respects the minimum sizes instead of snapping to zero.
+        for i in range(self._main_splitter.count()):
+            self._main_splitter.setCollapsible(i, False)
 
         # Default: sidebar visible, right panel hidden.
         self._main_splitter.setSizes([240, 800, 0])
@@ -4429,7 +4450,7 @@ class MCAEditorPanel(QWidget):
     def _show_about(self):
         QMessageBox.about(
             self, "About MCA Editor",
-            "<h3>MCA Editor v0.1.0</h3>"
+            f"<h3>MCA Editor v{_APP_VERSION}</h3>"
             "<p>Cross-DCC Script IDE</p>"
             "Supports Maya (with future expansion to Blender, Unreal, Unity, and more).</p>"
             "<p><b>Features:</b><br>"

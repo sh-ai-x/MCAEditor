@@ -362,13 +362,18 @@ class TerminalWidget(QWidget):
         if not self._dirty and new_scrollback_count == 0:
             return
 
-        # If the user is selecting text (mouse held down or has a completed
-        # selection), defer the visual update so the 60fps rebuild doesn't
-        # destroy their selection.  Data has already been drained and fed
-        # to the parser above, so nothing is lost — we just skip the
-        # display rebuild this frame.  The _dirty flag stays True, so the
-        # next frame after they release the mouse will catch up.
-        if self._mouse_selecting or self._display.textCursor().hasSelection():
+        # If the user is actively click-dragging to select text, defer
+        # the visual update so the 60fps rebuild doesn't destroy their
+        # selection mid-drag.  Data has already been drained and fed to
+        # the parser above, so nothing is lost — we just skip the
+        # display rebuild this frame.  The _dirty flag stays True, so
+        # the next frame after they release the mouse will catch up.
+        #
+        # NOTE: We only check _mouse_selecting (mouse held down), NOT
+        # hasSelection().  The old code also checked hasSelection() which
+        # stays True indefinitely after any selection, permanently
+        # blocking the render loop and making the cursor appear frozen.
+        if self._mouse_selecting:
             return
 
         # Get the visible grid and cursor position.
@@ -766,6 +771,12 @@ class TerminalWidget(QWidget):
             clipboard = QApplication.clipboard()
             # QPlainTextEdit uses Unicode paragraph separators — replace with newlines.
             clipboard.setText(selected.replace("\u2029", "\n"))
+
+            # Clear the selection so the render loop resumes immediately.
+            # Without this the cursor appears frozen until the next click.
+            cursor = self._display.textCursor()
+            cursor.clearSelection()
+            self._display.setTextCursor(cursor)
 
     def paste_clipboard(self):
         """Paste the system clipboard content into the terminal."""

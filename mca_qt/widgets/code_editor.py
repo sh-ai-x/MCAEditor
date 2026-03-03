@@ -1074,9 +1074,17 @@ class MCACodeEditor(QPlainTextEdit):
         try:
             from mca_core.analyzer import analyze_python
         except ImportError:
-            # Package root may have fallen off sys.path — re-add and retry.
-            import mca_core
-            mca_core.ensure_on_path()
+            # Package root may have fallen off sys.path (Maya does this
+            # occasionally).  Re-add it manually — we can't call
+            # mca_core.ensure_on_path() because mca_core itself is the
+            # module we can't find.  Walk up from this file's directory
+            # to find the package root (the dir containing mca_core/).
+            import os, sys
+            _pkg_root = os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))
+            ))
+            if _pkg_root not in sys.path:
+                sys.path.insert(0, _pkg_root)
             try:
                 from mca_core.analyzer import analyze_python
             except ImportError:
