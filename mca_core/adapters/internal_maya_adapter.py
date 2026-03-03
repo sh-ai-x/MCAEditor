@@ -244,11 +244,17 @@ class InternalMayaAdapter(DCCAdapter):
                 compiled = compile(code, "<mca_editor>", "eval")
                 result = eval(compiled, __main__.__dict__)
 
-                # Route the result through Maya's output system so it
-                # appears in BOTH the Script Editor and our panel (via
-                # the MCommandMessage callback with kResult type).
+                # Display the result in Maya's exact format:
+                #   # Result: <value> #
+                # Maya's Script Editor uses an internal C++ displayResult
+                # that produces kResult-type MCommandMessage output, but
+                # this is NOT exposed in Python API 2.0.  Instead we
+                # print() the formatted result, which goes through Maya's
+                # stdout hook and fires MCommandMessage with kDisplay type.
+                # Our _on_maya_output callback detects the "# Result:"
+                # prefix and routes it to write_result() for proper color.
                 if result is not None:
-                    om2.MGlobal.displayResult(repr(result))
+                    print("# Result: {} #".format(repr(result)))
 
             except SyntaxError:
                 # Not a single expression — execute as statements.

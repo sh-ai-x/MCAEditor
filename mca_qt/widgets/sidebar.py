@@ -514,6 +514,8 @@ class WorkspacePanel(QWidget):
     new_tab_requested = Signal()
     # Emitted when the user clicks the "Open" header button.
     open_file_requested = Signal()
+    # Emitted when a watched directory changes (git pull, external edit, etc.).
+    directory_changed = Signal(str)
 
     def __init__(self, parent=None):
         """
@@ -524,6 +526,13 @@ class WorkspacePanel(QWidget):
         super().__init__(parent)
         self._workspace_folders = []
         self._excluded_folders = set()    # Folder names to hide in the tree.
+
+        # --- Tree state persistence ---
+        # Tracks which folder paths are currently expanded so we can
+        # restore them after the tree is rebuilt (file watcher, refresh, etc.).
+        self._expanded_paths = set()
+        self._selected_path = None  # Last selected item path (for settings persistence).
+
         self._watcher = QFileSystemWatcher()
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._setup_ui()
@@ -697,6 +706,15 @@ class WorkspacePanel(QWidget):
             # setExpanded() on items that aren't in a tree yet.
             root_item.setExpanded(True)
 
+        # Re-expand any folders that were open before the rebuild.
+        # The itemExpanded signal fires for each one, which is fine —
+        # _on_item_expanded just does a set.add() (no-op for items
+        # already in the set) and swaps the icon.
+        for item in self._iter_all_items():
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if path and path in self._expanded_paths:
+                item.setExpanded(True)
+
     def _populate_folder(self, parent_item, folder_path, depth):
         """
         Recursively populate folder contents in the tree.
@@ -764,31 +782,39 @@ class WorkspacePanel(QWidget):
 
     def _on_item_expanded(self, item):
         """
-        Swap to the open folder icon when a folder is expanded.
+        Swap to the open folder icon when a folder is expanded,
+        and track the path in ``_expanded_paths`` for persistence.
 
         :param QTreeWidgetItem item: The expanded item.
         """
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and os.path.isdir(path):
             item.setIcon(0, folder_open())
+            self._expanded_paths.add(path)
 
     def _on_item_collapsed(self, item):
         """
-        Swap to the closed folder icon when a folder is collapsed.
+        Swap to the closed folder icon when a folder is collapsed,
+        and remove the path from ``_expanded_paths``.
 
         :param QTreeWidgetItem item: The collapsed item.
         """
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and os.path.isdir(path):
             item.setIcon(0, folder_closed())
+            self._expanded_paths.discard(path)
 
     def _on_directory_changed(self, path):
         """
         Refresh the tree when a watched directory changes.
 
+        Also emits ``directory_changed`` so the editor panel can trigger
+        a debounced re-index of the symbol index.
+
         :param str path: The directory that changed.
         """
         self._refresh_tree()
+        self.directory_changed.emit(path)
 
     def _on_file_moved(self, old_path, new_path):
         """
@@ -838,6 +864,13 @@ class WorkspacePanel(QWidget):
         for f in self._workspace_folders:
             self._watcher.removePath(f)
 
+        # We're switching to a completely different folder root, so
+        # previous expanded paths are no longer valid. Start fresh
+        # with just the new root expanded.
+        self._expanded_paths.clear()
+        self._expanded_paths.add(folder_path)
+        self._selected_path = None
+
         # Set the single locked folder.
         self._workspace_folders = [folder_path]
         self._watcher.addPath(folder_path)
@@ -867,6 +900,107 @@ class WorkspacePanel(QWidget):
         """
         self._excluded_folders = set(excluded)
         self._refresh_tree()
+
+    # --- Tree State Persistence -----------------------------------------------
+
+    def _iter_all_items(self):
+        """
+        Yield every QTreeWidgetItem in the tree, depth-first.
+
+        Useful for walking the tree to restore expanded/selected state
+        after a full rebuild.
+
+        :return: Generator of QTreeWidgetItem.
+        :rtype: generator
+        """
+        stack = []
+        # Seed the stack with top-level items (reverse so we visit in order).
+        for idx in range(self._tree.topLevelItemCount() - 1, -1, -1):
+            stack.append(self._tree.topLevelItem(idx))
+        while stack:
+            item = stack.pop()
+            yield item
+            # Push children in reverse order for depth-first traversal.
+            for child_idx in range(item.childCount() - 1, -1, -1):
+                stack.append(item.child(child_idx))
+
+    @staticmethod
+    def _tree_settings_key(prefix, project_root):
+        """
+        Build a QSettings-safe key for per-project tree state.
+
+        QSettings treats both ``\\`` and ``/`` as group separators, so
+        raw Windows paths in keys create broken nested registry entries.
+        We use a flat key with the project root's basename (unique enough
+        for most workflows) or ``"default"`` when no project is active.
+
+        :param str prefix: Key prefix (e.g. ``"tree_expanded"``).
+        :param str project_root: Project root path, or None.
+        :return: Sanitized settings key.
+        :rtype: str
+        """
+        if project_root:
+            safe_suffix = os.path.basename(project_root.rstrip("/\\"))
+        else:
+            safe_suffix = "default"
+        return "{}_{}".format(prefix, safe_suffix)
+
+    def save_tree_state_to_settings(self, settings, project_root=None):
+        """
+        Persist expanded paths and selected item to QSettings.
+
+        Uses a per-project key suffix so each project remembers its
+        own tree state independently.
+
+        :param MCASettings settings: Application settings instance.
+        :param str project_root: Project root path (None for default workspace).
+        """
+        try:
+            key_expanded = self._tree_settings_key("tree_expanded", project_root)
+            key_selected = self._tree_settings_key("tree_selected", project_root)
+
+            settings.set(key_expanded, list(self._expanded_paths))
+
+            # Grab the current selection if available.
+            current = self._tree.currentItem()
+            if current:
+                settings.set(key_selected, current.data(0, Qt.ItemDataRole.UserRole) or "")
+            elif self._selected_path:
+                settings.set(key_selected, self._selected_path)
+            else:
+                settings.set(key_selected, "")
+        except Exception:
+            logger.debug("Failed to save tree state to settings", exc_info=True)
+
+    def restore_tree_state_from_settings(self, settings, project_root=None):
+        """
+        Load expanded paths and selected item from QSettings.
+
+        Populates ``_expanded_paths`` and ``_selected_path`` so the
+        next ``_refresh_tree()`` call picks them up automatically.
+
+        :param MCASettings settings: Application settings instance.
+        :param str project_root: Project root path (None for default workspace).
+        """
+        try:
+            key_expanded = self._tree_settings_key("tree_expanded", project_root)
+            key_selected = self._tree_settings_key("tree_selected", project_root)
+
+            saved_expanded = settings.get(key_expanded, [])
+            # QSettings returns a bare string instead of a list when only
+            # one element was stored. Wrap it so set() doesn't iterate chars.
+            if isinstance(saved_expanded, str):
+                saved_expanded = [saved_expanded] if saved_expanded else []
+            if saved_expanded and isinstance(saved_expanded, list):
+                self._expanded_paths = set(saved_expanded)
+            else:
+                self._expanded_paths = set()
+
+            self._selected_path = settings.get(key_selected, None) or None
+        except Exception:
+            logger.debug("Failed to restore tree state from settings", exc_info=True)
+            self._expanded_paths = set()
+            self._selected_path = None
 
     # --- File Search Filtering -----------------------------------------------
 
@@ -1352,6 +1486,7 @@ class MCASidebar(QWidget):
     editor_selected = Signal(int)
     new_tab_requested = Signal()
     open_file_requested = Signal()
+    directory_changed = Signal(str)
 
     def __init__(self, parent=None):
         """
@@ -1384,6 +1519,7 @@ class MCASidebar(QWidget):
         self.workspace_panel.file_renamed.connect(self.file_renamed.emit)
         self.workspace_panel.new_tab_requested.connect(self.new_tab_requested.emit)
         self.workspace_panel.open_file_requested.connect(self.open_file_requested.emit)
+        self.workspace_panel.directory_changed.connect(self.directory_changed.emit)
         self._splitter.addWidget(self.workspace_panel)
 
         # Open editors panel (always visible).

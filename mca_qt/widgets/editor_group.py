@@ -27,6 +27,7 @@ from mca_qt.qt_compat import (
     QDrag, QMimeData, QByteArray, QPixmap, QColor, QPainter,
 )
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
+from mca_core.config.color_scheme import build_scheme_dict
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -866,7 +867,6 @@ class EditorGroup(QWidget):
         :param MCASettings settings: Settings instance.
         """
         # Build the color scheme once and share across all editors.
-        from mca_core.config.color_scheme import build_scheme_dict
         scheme = build_scheme_dict(settings)
 
         font_family = settings.get("font_family")

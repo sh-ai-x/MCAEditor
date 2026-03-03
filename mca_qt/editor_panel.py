@@ -38,6 +38,7 @@ from mca_qt.qt_compat import (
 )
 
 from mca_core.config.settings import MCASettings
+from mca_core.config.color_scheme import build_scheme_dict
 from mca_core.project import (
     MCAProject, has_project_file, detect_python_paths, create_default_project,
 )
@@ -57,10 +58,15 @@ from mca_qt.widgets.find_in_files import FindInFilesDialog
 from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup, GoToDeclarationPopup
 from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
+from mca_core.symbol_index import SymbolIndex, IndexWorker
 from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon, settings_icon
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
+
+# Sentinel object used by _auto_reload_module to distinguish "attribute
+# not present in __main__" from "attribute is None".
+_SENTINEL = object()
 
 
 # =============================================================================
@@ -144,6 +150,14 @@ class MCAEditorPanel(QWidget):
         # Session manager for buffer persistence across restarts.
         self._session_manager = SessionManager()
 
+        # Background symbol index for instant Go To Declaration lookups.
+        self._symbol_index = None   # SymbolIndex instance (created on project open).
+        self._index_worker = None   # IndexWorker thread (daemon, cancelled on close).
+        self._index_progress_timer = None  # QTimer that polls worker progress.
+
+        # Debounce timer for re-indexing after filesystem changes (git pull, etc.).
+        self._reindex_debounce_timer = None
+
         # Debounce timer for outline refresh — reparse 500ms after the user
         # stops typing, rather than on every keystroke.
         self._outline_timer = QTimer(self)
@@ -178,6 +192,13 @@ class MCAEditorPanel(QWidget):
             # Python and a MEL buffer so both languages are ready to go.
             self._new_python_buffer()
             self._new_mel_buffer()
+
+        # Apply saved appearance settings (font, color scheme, tab size)
+        # to all editors that were just created by session restore.
+        # Without this, editors use hardcoded defaults until the user
+        # opens Settings and saves — the color scheme from settings
+        # must be applied on every startup.
+        self._apply_settings_to_editors()
 
         # Ensure the default workspace (scripts + site-packages) exists,
         # and add site-packages to sys.path for user imports.
@@ -536,6 +557,9 @@ class MCAEditorPanel(QWidget):
         self._sidebar.new_tab_requested.connect(self._show_new_tab_dialog)
         self._sidebar.open_file_requested.connect(self._open_file)
 
+        # Filesystem change -> debounced re-index of symbol index.
+        self._sidebar.directory_changed.connect(self._on_workspace_directory_changed)
+
         # Output window error/warning counts -> forwarding signal for host windows.
         self._output.counts_changed.connect(self.output_counts_changed.emit)
 
@@ -582,6 +606,38 @@ class MCAEditorPanel(QWidget):
         if not self._embedded_in_dcc:
             self._build_dcc_menu(menubar)
         self._build_help_menu(menubar)
+
+        # Snapshot the hard-coded default shortcuts BEFORE restoring the
+        # user's customizations. The settings dialog needs these originals
+        # to know which shortcuts were changed (if it snapshots the live
+        # actions after restore, the restored customs look like defaults
+        # and get silently dropped on the next save).
+        self._default_shortcuts = {}
+        for name, action in self._action_registry.items():
+            self._default_shortcuts[name] = QKeySequence(action.shortcut())
+
+        # Restore any custom keyboard shortcuts the user saved in settings.
+        # Must run after all menus are built so _action_registry is populated.
+        self._restore_custom_shortcuts()
+
+    def _restore_custom_shortcuts(self):
+        """
+        Apply user-customized keyboard shortcuts from settings.
+
+        Reads the ``custom_shortcuts`` dict from settings and overrides
+        the hard-coded defaults for any registered action whose name
+        matches.  An empty string value means the user explicitly
+        removed the shortcut.
+        """
+        custom = self._settings.get("custom_shortcuts", {})
+        if not custom or not isinstance(custom, dict):
+            return
+
+        for name, seq_str in custom.items():
+            action = self._action_registry.get(name)
+            if action:
+                action.setShortcut(QKeySequence(seq_str) if seq_str else QKeySequence())
+                logger.debug("Restored custom shortcut: '%s' -> '%s'", name, seq_str)
 
     def _create_action(self, menu, text, name=None, shortcut=None, callback=None):
         """
@@ -1095,55 +1151,78 @@ class MCAEditorPanel(QWidget):
         Runs the shutdown script/code, removes project paths from
         sys.path, re-locks the workspace tree to the scripts/ directory,
         hides the project action buttons, and resets the project button.
+
+        Wrapped in try/except because an uncaught exception here tears
+        down the entire Maya workspace control (Shiboken destroys the
+        widget tree on unhandled Python errors in signal dispatch).
         """
         if not self._active_project:
             return
 
         project_name = self._active_project.name
 
-        # Save the project's tabs before tearing down.
-        self._save_context_session()
+        try:
+            # Stop background indexing and clear the symbol index.
+            self._stop_symbol_indexing()
 
-        # Run shutdown script/code while paths and env vars are still active.
-        self._run_shutdown_script()
+            # Save the project's tabs before tearing down.
+            self._save_context_session()
 
-        # Remove project env vars and paths.
-        self._remove_env_vars()
-        self._remove_project_paths()
+            # Persist the workspace tree state (expanded folders, selection) for
+            # this project so it can be restored when the project is reopened.
+            self._sidebar.workspace_panel.save_tree_state_to_settings(
+                self._settings, self._active_project.project_root
+            )
 
-        # Clear the project reference BEFORE loading default tabs so
-        # _save_session_manifest (called inside _switch_to_manifest)
-        # routes to the default session.json, not the project file.
-        self._active_project = None
+            # Run shutdown script/code while paths and env vars are still active.
+            self._run_shutdown_script()
 
-        # Re-lock workspace to the default scripts directory.
-        scripts_dir = self._session_manager.scripts_dir
-        self._sidebar.workspace_panel.set_locked_folder(scripts_dir)
-        self._sidebar.set_workspace_title("WORKSPACE")
-        self._sidebar.set_excluded_folders(set())
+            # Remove project env vars and paths.
+            self._remove_env_vars()
+            self._remove_project_paths()
 
-        # Reset UI elements.
-        self._project_button.setText("No Project")
-        self._load_action.setVisible(False)
-        self._refresh_action.setVisible(False)
-        self._reload_action.setVisible(False)
-        self._shutdown_action.setVisible(False)
+            # Clear the project reference BEFORE loading default tabs so
+            # _save_session_manifest (called inside _switch_to_manifest)
+            # routes to the default session.json, not the project file.
+            self._active_project = None
 
-        # Reset terminal cwd back to scripts directory.
-        self._bottom_terminal_panel._cwd = scripts_dir
-        self._right_terminal_panel._cwd = scripts_dir
+            # Re-lock workspace to the default scripts directory.
+            scripts_dir = self._session_manager.scripts_dir
+            self._sidebar.workspace_panel.set_locked_folder(scripts_dir)
 
-        # Restore the default workspace tabs.
-        default_manifest = self._session_manager.load_manifest()
-        self._switch_to_manifest(default_manifest)
+            self._sidebar.set_workspace_title("WORKSPACE")
 
-        # Clear last project path so it doesn't auto-reopen.
-        self._settings.set_last_project_path("")
+            self._sidebar.set_excluded_folders(set())
 
-        # Emit signal for host windows (empty string = no project).
-        self.mode_changed.emit("")
+            # Reset UI elements.
+            self._project_button.setText("No Project")
+            self._load_action.setVisible(False)
+            self._refresh_action.setVisible(False)
+            self._reload_action.setVisible(False)
+            self._shutdown_action.setVisible(False)
 
-        self._output.write_info("Closed project: {}".format(project_name))
+            # Reset terminal cwd back to scripts directory.
+            self._bottom_terminal_panel._cwd = scripts_dir
+            self._right_terminal_panel._cwd = scripts_dir
+
+            # Restore the default workspace tabs.
+            default_manifest = self._session_manager.load_manifest()
+            self._switch_to_manifest(default_manifest)
+
+            # Clear last project path so it doesn't auto-reopen.
+            self._settings.set_last_project_path("")
+
+            # Emit signal for host windows (empty string = no project).
+            self.mode_changed.emit("")
+
+            self._output.write_info("Closed project: {}".format(project_name))
+
+        except Exception as exc:
+            print("[_close_project] EXCEPTION: {}".format(exc))
+            logger.error("Error during project close: %s", exc, exc_info=True)
+            # Ensure the project reference is cleared even on error so
+            # the editor doesn't stay in a half-closed state.
+            self._active_project = None
 
     def _apply_project_mode(self):
         """
@@ -1166,6 +1245,13 @@ class MCAEditorPanel(QWidget):
         # Set excluded folders so the tree hides them.
         self._sidebar.set_excluded_folders(set(project.excluded_folders))
 
+        # Restore saved expanded folders for this project and rebuild
+        # the tree once more so the loaded paths take effect.
+        self._sidebar.workspace_panel.restore_tree_state_from_settings(
+            self._settings, project.project_root
+        )
+        self._sidebar.workspace_panel._refresh_tree()
+
         # Update toolbar button and show project action buttons.
         self._project_button.setText(project.name)
         self._load_action.setVisible(True)
@@ -1185,6 +1271,9 @@ class MCAEditorPanel(QWidget):
 
         # Emit signal for host windows (project name for title bar).
         self.mode_changed.emit(project.name)
+
+        # Start background symbol indexing for Go To Declaration.
+        self._start_symbol_indexing()
 
         # Decide whether to run startup scripts. Skip if the user
         # explicitly wants immediate loading, or if the project's
@@ -1459,28 +1548,35 @@ class MCAEditorPanel(QWidget):
         env vars, and runs the startup sequence.  Unlike close+open, this
         keeps the current editor tabs untouched and always forces startup
         scripts to run (bypasses the ``_is_project_already_active`` check).
+
+        Wrapped in try/except because an uncaught exception during
+        reload tears down the Maya workspace control.
         """
         if not self._active_project:
             return
 
-        project_root = self._active_project.project_root
+        try:
+            project_root = self._active_project.project_root
 
-        # --- Shutdown ---
-        self._run_shutdown_script()
-        self._remove_env_vars()
-        self._remove_project_paths()
+            # --- Shutdown ---
+            self._run_shutdown_script()
+            self._remove_env_vars()
+            self._remove_project_paths()
 
-        # Re-read the project file from disk so any manual edits are
-        # picked up (same as what _on_refresh_project does).
-        self._active_project = MCAProject(project_root)
+            # Re-read the project file from disk so any manual edits are
+            # picked up (same as what _on_refresh_project does).
+            self._active_project = MCAProject(project_root)
 
-        # --- Startup ---
-        self._inject_project_paths()
-        self._apply_env_vars()
-        self._run_startup_script()
+            # --- Startup ---
+            self._inject_project_paths()
+            self._apply_env_vars()
+            self._run_startup_script()
 
-        self._output.write_info("Reloaded project: {}".format(
-            self._active_project.name))
+            self._output.write_info("Reloaded project: {}".format(
+                self._active_project.name))
+
+        except Exception as exc:
+            logger.error("Error during project reload: %s", exc, exc_info=True)
 
     def _show_project_settings(self):
         """
@@ -1492,7 +1588,19 @@ class MCAEditorPanel(QWidget):
         if not self._active_project:
             return
 
-        from mca_qt.widgets.project_settings_dialog import ProjectSettingsDialog
+        try:
+            from mca_qt.widgets.project_settings_dialog import ProjectSettingsDialog
+        except ImportError:
+            # Package root may have fallen off sys.path — re-add and retry.
+            import mca_core
+            mca_core.ensure_on_path()
+            try:
+                from mca_qt.widgets.project_settings_dialog import ProjectSettingsDialog
+            except ImportError as exc:
+                logger.error("Could not import ProjectSettingsDialog: %s", exc)
+                self._output.write_error(
+                    "Failed to open project settings: {}".format(exc))
+                return
         dialog = ProjectSettingsDialog(self._active_project, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1690,6 +1798,14 @@ class MCAEditorPanel(QWidget):
 
         if self._default_font_size != 12:
             self._apply_font_size(notify=False)
+
+        # Restore workspace tree expanded folders from settings and rebuild
+        # so the loaded paths take effect.
+        project_root = (self._active_project.project_root
+                        if self._active_project else None)
+        wp = self._sidebar.workspace_panel
+        wp.restore_tree_state_from_settings(s, project_root)
+        wp._refresh_tree()
 
     def _restore_output(self):
         """
@@ -2016,6 +2132,10 @@ class MCAEditorPanel(QWidget):
             # Auto-reload the module in both local and DCC environments
             # so the project runs with the updated code immediately.
             self._auto_reload_module(editor.file_path)
+            # Incrementally update the symbol index for this file so
+            # Go To Declaration reflects the latest changes immediately.
+            if self._symbol_index is not None:
+                self._symbol_index.update_file(editor.file_path)
         else:
             # Temp buffer — persist to the buffers directory.
             self._save_buffer_content(editor)
@@ -2684,36 +2804,39 @@ class MCAEditorPanel(QWidget):
             self._save_buffer_content(editor)
         editor.document().setModified(False)
 
-    def _auto_reload_module(self, filepath):
+    def _resolve_module_name(self, filepath):
         """
-        Reload the Python module corresponding to *filepath* if it has
-        already been imported, both locally and in the connected DCC.
+        Convert a .py file path to its dotted module name.
 
-        Converts the file path to a module name by checking which
-        sys.path entry is a parent, then looks up that module name in
-        ``sys.modules``.  If found, calls ``importlib.reload()`` locally
-        and sends the equivalent reload command to the DCC adapter.
+        Searches ``sys.path`` for the longest parent directory of
+        *filepath* and converts the relative remainder to a dotted
+        module name.  Handles edge cases:
 
-        Skips silently for non-.py files, temp buffers, modules that
-        haven't been imported yet, or when the active project has
-        auto_reload_modules disabled.
+        - Empty string (``""``) and dot (``"."``) in ``sys.path`` are
+          resolved to the actual current working directory so they can
+          be compared against absolute file paths.
+        - Case-insensitive comparison on Windows via ``os.path.normcase``.
 
-        :param str filepath: Absolute path to the saved .py file.
+        If no ``sys.path`` entry matches, falls back to a reverse lookup
+        through ``sys.modules`` — checking each module's ``__file__``
+        attribute for a match.  This catches modules imported via CWD
+        or other mechanisms that don't have an explicit ``sys.path``
+        entry.
+
+        :param str filepath: Absolute path to the .py file.
+        :return: Dotted module name, or None if not resolvable.
+        :rtype: str or None
         """
-        if not filepath or not filepath.endswith(".py"):
-            return
+        norm = os.path.normcase(os.path.normpath(filepath))
 
-        # Respect the project-level toggle (defaults to True / on).
-        if self._active_project and not self._active_project.auto_reload_modules:
-            return
-
-        norm = os.path.normpath(filepath)
-
-        # Figure out the dotted module name by finding the longest
-        # sys.path prefix that contains this file.
+        # --- Strategy 1: find longest sys.path prefix ---
         module_name = None
         for sp in sys.path:
-            sp_norm = os.path.normpath(sp)
+            # Resolve empty string / dot to the real CWD so we can
+            # compare against the absolute file path.
+            if sp in ("", "."):
+                sp = os.getcwd()
+            sp_norm = os.path.normcase(os.path.normpath(sp))
             if not norm.startswith(sp_norm + os.sep):
                 continue
             # Build dotted name from the relative path (strip .py).
@@ -2724,29 +2847,148 @@ class MCAEditorPanel(QWidget):
             if parts[-1] == "__init__":
                 parts = parts[:-1]
             if parts:
+                # Skip if any part is not a valid Python identifier
+                # (e.g. "mca-maya" has a hyphen and can't be a module).
+                if not all(p.isidentifier() for p in parts):
+                    continue
                 candidate = ".".join(parts)
                 # Prefer the longest (most specific) match.
                 if module_name is None or len(candidate) > len(module_name):
                     module_name = candidate
 
-        if not module_name or module_name not in sys.modules:
+        if module_name:
+            return module_name
+
+        # --- Strategy 2: reverse-lookup via sys.modules __file__ ---
+        # Some modules are imported via CWD or path hooks that don't
+        # leave an obvious sys.path prefix.  Walk sys.modules and
+        # compare each module's __file__ to find a match.
+        for mod_name, mod in sys.modules.items():
+            mod_file = getattr(mod, "__file__", None)
+            if not mod_file:
+                continue
+            mod_norm = os.path.normcase(os.path.normpath(mod_file))
+            if mod_norm == norm:
+                return mod_name
+
+        # --- Strategy 3: use the bare filename as module name ---
+        # Last resort — if the file is a simple script like
+        # ``node_util.py``, assume the module name is ``node_util``.
+        # This won't match packages, but covers the common case of
+        # single-file scripts in the user's project.
+        basename = os.path.basename(filepath)
+        if basename.endswith(".py"):
+            bare = basename[:-3]
+            if bare and bare != "__init__":
+                return bare
+
+        return None
+
+    def _auto_reload_module(self, filepath):
+        """
+        Reload the Python module corresponding to *filepath* if it has
+        already been imported, both locally and in the connected DCC.
+
+        Resolves the file path to a dotted module name, then reloads it
+        in both the editor's local Python and the connected DCC.  After
+        reloading, patches stale ``from module import func`` references
+        in ``__main__.__dict__``.
+
+        Shows a message in the output panel on success so the user can
+        confirm the reload happened.
+
+        Skips silently for non-.py files or temp buffers.
+
+        :param str filepath: Absolute path to the saved .py file.
+        """
+        if not filepath or not filepath.endswith(".py"):
             return
 
-        # --- Reload locally ---
-        try:
-            importlib.reload(sys.modules[module_name])
-            logger.info("Auto-reloaded local module: %s", module_name)
-        except Exception as exc:
-            logger.warning("Failed to auto-reload %s locally: %s", module_name, exc)
+        # Respect the project-level toggle (defaults to True / on).
+        if self._active_project and not self._active_project.auto_reload_modules:
+            return
+
+        # Resolve the file path to a dotted module name.
+        module_name = self._resolve_module_name(filepath)
+
+        if not module_name:
+            logger.debug("Auto-reload: could not resolve module name for %s", filepath)
+            return
+
+        # --- Reload locally (if the module has been imported here) ---
+        reloaded_locally = False
+        if module_name in sys.modules:
+            try:
+                mod = sys.modules[module_name]
+
+                # Snapshot attribute values BEFORE reload.  importlib.reload
+                # modifies the module object in-place, so after reload() the
+                # module's attributes are the NEW values.  We need the old
+                # values to find stale references in __main__.__dict__.
+                old_attrs = {
+                    name: getattr(mod, name, None) for name in dir(mod)
+                }
+
+                importlib.reload(mod)
+                reloaded_locally = True
+                logger.info("Auto-reloaded local module: %s", module_name)
+
+                # Patch stale references in __main__.__dict__.
+                # When the user did  "from my_module import func"  the
+                # name 'func' in __main__ still points at the old function
+                # object.  Walk the snapshot and replace any __main__ refs
+                # that still hold the old value with the new one.
+                try:
+                    import __main__
+                    for attr_name, old_val in old_attrs.items():
+                        if old_val is None:
+                            continue
+                        new_val = getattr(mod, attr_name, None)
+                        if new_val is old_val:
+                            continue  # Unchanged attribute — skip.
+                        main_val = getattr(__main__, attr_name, _SENTINEL)
+                        if main_val is old_val:
+                            setattr(__main__, attr_name, new_val)
+                except Exception:
+                    pass
+
+                # Show confirmation in the output panel so the user
+                # can verify the reload happened.
+                self._output.write_info("Auto-reloaded: {}".format(module_name))
+
+            except Exception as exc:
+                logger.warning("Failed to auto-reload %s locally: %s", module_name, exc)
+                self._output.write_warning(
+                    "Auto-reload failed for {}: {}".format(module_name, exc))
+        else:
+            logger.debug("Auto-reload: %s not in local sys.modules", module_name)
 
         # --- Reload in the connected DCC ---
+        # Always attempt the DCC reload even if the local lookup failed —
+        # the module may be imported in Maya's interpreter but not in the
+        # editor's own Python (standalone editor case).
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
+            # The DCC reload code snapshots old attribute values before
+            # reload, then patches __main__ references that still hold the
+            # old function/class objects.  Uses _mca_ prefixed temporaries
+            # to avoid polluting the user's namespace.
             reload_code = (
                 "import importlib, sys\n"
                 "if '{mod}' in sys.modules:\n"
-                "    importlib.reload(sys.modules['{mod}'])\n"
+                "    _mca_m = sys.modules['{mod}']\n"
+                "    _mca_snap = {{n: getattr(_mca_m, n, None) for n in dir(_mca_m)}}\n"
+                "    importlib.reload(_mca_m)\n"
+                "    import __main__ as _mca_main\n"
+                "    for _mca_n, _mca_ov in _mca_snap.items():\n"
+                "        if _mca_ov is None: continue\n"
+                "        _mca_nv = getattr(_mca_m, _mca_n, None)\n"
+                "        if _mca_nv is _mca_ov: continue\n"
+                "        if getattr(_mca_main, _mca_n, None) is _mca_ov:\n"
+                "            setattr(_mca_main, _mca_n, _mca_nv)\n"
                 "    print('Auto-reloaded: {mod}')\n"
+                "else:\n"
+                "    print('Auto-reload: {mod} not in sys.modules (not imported yet)')\n"
             ).format(mod=module_name)
             try:
                 adapter.execute(reload_code, "python")
@@ -3488,7 +3730,12 @@ class MCAEditorPanel(QWidget):
         self._output.clear()
 
     def _show_settings(self):
-        dlg = SettingsDialog(self._settings, action_registry=self._action_registry, parent=self)
+        dlg = SettingsDialog(
+            self._settings,
+            action_registry=self._action_registry,
+            default_shortcuts=self._default_shortcuts,
+            parent=self,
+        )
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self._apply_settings_to_editors()
 
@@ -3538,10 +3785,11 @@ class MCAEditorPanel(QWidget):
 
     def _apply_editor_state(self, editor):
         """
-        Apply the current font size and whitespace setting to a single editor.
+        Apply the current font, color scheme, and whitespace setting to a
+        single editor.
 
         Called when a new tab is created so it inherits the active zoom
-        level and whitespace rendering state from the session.
+        level, color scheme, and whitespace rendering state from the session.
 
         :param MCACodeEditor editor: The editor to configure.
         """
@@ -3553,6 +3801,10 @@ class MCAEditorPanel(QWidget):
             editor.setTabStopDistance(
                 editor.fontMetrics().horizontalAdvance(" ") * editor._tab_size
             )
+
+        # Apply the saved color scheme so new tabs match existing ones.
+        scheme = build_scheme_dict(self._settings)
+        editor.set_color_scheme(scheme)
 
         # Inherit whitespace rendering.
         if self._settings.get("show_whitespace", False):
@@ -3686,6 +3938,119 @@ class MCAEditorPanel(QWidget):
         if ok:
             editor.go_to_line(line)
 
+    # --- Background Symbol Index -----------------------------------------------
+
+    def _start_symbol_indexing(self):
+        """
+        Create a fresh ``SymbolIndex`` and launch an ``IndexWorker`` thread.
+
+        Called when a project is opened.  A 500 ms QTimer polls the worker
+        for progress and updates the status bar until indexing finishes.
+        """
+        # Cancel any previous indexing run first.
+        self._stop_symbol_indexing()
+
+        folders = self._get_workspace_folders()
+        if not folders:
+            return
+
+        # Determine excluded folders from the active project config.
+        excluded = set()
+        if self._active_project:
+            excluded = set(self._active_project.excluded_folders)
+
+        self._symbol_index = SymbolIndex()
+        self._index_worker = IndexWorker(self._symbol_index, folders, excluded)
+        self._index_worker.start()
+
+        # Poll progress every 500 ms from the main thread (no cross-thread signals).
+        self._index_progress_timer = QTimer(self)
+        self._index_progress_timer.setInterval(500)
+        self._index_progress_timer.timeout.connect(self._poll_index_progress)
+        self._index_progress_timer.start()
+
+        logger.info("Started background symbol indexing")
+
+    def _stop_symbol_indexing(self):
+        """
+        Cancel the running worker, join with a short timeout, stop the
+        progress timer, and clear the index.
+
+        Called on project close and editor cleanup.
+        """
+        # Stop the progress polling timer.
+        if self._index_progress_timer is not None:
+            self._index_progress_timer.stop()
+            self._index_progress_timer = None
+
+        # Stop the debounce timer if running.
+        if self._reindex_debounce_timer is not None:
+            self._reindex_debounce_timer.stop()
+            self._reindex_debounce_timer = None
+
+        # Cancel the worker thread and wait briefly for it to finish.
+        if self._index_worker is not None:
+            self._index_worker.cancel()
+            self._index_worker.join(timeout=2.0)
+            self._index_worker = None
+
+        # Clear the index data.
+        if self._symbol_index is not None:
+            self._symbol_index.clear()
+            self._symbol_index = None
+
+    def _poll_index_progress(self):
+        """
+        Called by the progress QTimer every 500 ms.
+
+        Reads the worker's progress and updates the status bar.  When
+        indexing is complete, stops the timer and shows the final count.
+        """
+        if self._symbol_index is None:
+            return
+
+        state = self._symbol_index.get_state()
+        done, total = self._symbol_index.get_progress()
+
+        if state == "indexing" and total > 0:
+            # Show percentage progress during indexing.
+            pct = int(done * 100 / total)
+            self._show_status("Indexing symbols... {}%".format(pct))
+
+        elif state == "ready":
+            # Indexing is done — show final stats and stop the timer.
+            file_count = self._symbol_index.get_file_count()
+            sym_count = self._symbol_index.get_symbol_count()
+            msg = "Indexed {} files ({} symbols)".format(file_count, sym_count)
+            self._show_status(msg, duration_ms=10000)
+            self._output.write_info(msg)
+            if self._index_progress_timer is not None:
+                self._index_progress_timer.stop()
+                self._index_progress_timer = None
+
+    def _on_workspace_directory_changed(self, path):
+        """
+        Handle filesystem changes detected by the workspace file watcher.
+
+        Debounces for 3 seconds, then re-indexes the workspace.  This
+        catches external changes like git pull, branch switch, etc.
+
+        :param str path: The directory that changed (unused — we re-index all folders).
+        """
+        # Only re-index if we have an active index.
+        if self._symbol_index is None:
+            return
+
+        # Reset the debounce timer — 3 seconds after the last change.
+        if self._reindex_debounce_timer is None:
+            self._reindex_debounce_timer = QTimer(self)
+            self._reindex_debounce_timer.setSingleShot(True)
+            self._reindex_debounce_timer.setInterval(3000)
+            self._reindex_debounce_timer.timeout.connect(self._start_symbol_indexing)
+
+        # Restart the debounce window.
+        self._reindex_debounce_timer.start()
+
     # --- Go to Declaration / Find Usages (Ctrl+B) -----------------------------
 
     # Regex patterns that match symbol definitions in Python and MEL.
@@ -3769,13 +4134,23 @@ class MCAEditorPanel(QWidget):
             self._show_status("No workspace folders — add one first")
             return
 
+        # Use the background symbol index if it's ready (instant O(1) lookup).
+        # Otherwise fall back to the synchronous filesystem scan.
+        use_index = (self._symbol_index is not None and self._symbol_index.is_ready())
+
         if on_definition:
             # Cursor is on a definition — find all usages of this symbol.
-            results = self._find_symbol_usages(word, folders)
+            if use_index:
+                results = self._symbol_index.find_usages(word)
+            else:
+                results = self._find_symbol_usages(word, folders)
             popup_title = "Usages of '{}'".format(word)
         else:
             # Cursor is on a usage — find the definition.
-            results = self._find_symbol_definition(word, folders)
+            if use_index:
+                results = self._symbol_index.find_definitions(word)
+            else:
+                results = self._find_symbol_definition(word, folders)
             popup_title = "Definition of '{}'".format(word)
 
         if not results:
@@ -4094,6 +4469,13 @@ class MCAEditorPanel(QWidget):
         folders = self._sidebar.workspace_panel.get_workspace_folders()
         settings.set("workspace_folders", folders)
 
+        # Persist workspace tree expanded folders and selection.
+        project_root = (self._active_project.project_root
+                        if self._active_project else None)
+        self._sidebar.workspace_panel.save_tree_state_to_settings(
+            settings, project_root
+        )
+
         settings.sync()
 
     def cleanup(self):
@@ -4121,6 +4503,16 @@ class MCAEditorPanel(QWidget):
         output_text = self._output._output.toPlainText()
         if output_text.strip():
             self._session_manager.save_output(output_text)
+
+        # Persist workspace tree state so expanded folders survive restarts.
+        project_root = (self._active_project.project_root
+                        if self._active_project else None)
+        self._sidebar.workspace_panel.save_tree_state_to_settings(
+            self._settings, project_root
+        )
+
+        # Stop background symbol indexing before shutdown.
+        self._stop_symbol_indexing()
 
         # Terminate all terminal processes in both panels.
         self._bottom_terminal_panel.cleanup()

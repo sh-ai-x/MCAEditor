@@ -18,6 +18,7 @@ from mca_qt.qt_compat import (
     QPlainTextEdit, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     Qt, Signal, QEvent, QComboBox, QFileDialog, QMessageBox, QMenu,
     QColor, QTextCharFormat, QFont, QTextCursor, QLineEdit, QTimer, QTextEdit,
+    QApplication,
 )
 
 # Module-level logger for output window operations.
@@ -32,7 +33,7 @@ COLOR_ERROR = "#f44747"        # Error messages (red)
 COLOR_WARNING = "#e5e510"      # Warning messages (yellow)
 COLOR_SUCCESS = "#4ec9b0"      # Success messages (green)
 COLOR_INFO = "#569cd6"         # Informational messages (blue)
-COLOR_RESULT = "#dcdcaa"       # Return values / results (yellow)
+COLOR_RESULT = "#6a9955"       # Return values / results (green)
 COLOR_TIMESTAMP = "#666666"    # Timestamp prefix (dim gray)
 
 # --- Search Highlight Colors ------------------------------------------------
@@ -516,6 +517,23 @@ class _OutputTextEdit(QPlainTextEdit):
 
         menu.exec(self.mapToGlobal(pos))
 
+    def copy(self):
+        """
+        Copy selected text to the clipboard with proper newlines.
+
+        QPlainTextEdit internally uses Unicode paragraph separators
+        (U+2029) instead of newlines in its text model.  The default
+        ``copy()`` puts these separators on the clipboard, which
+        produces extra blank lines and ``^`` characters when pasted
+        into other applications.  We replace them with standard
+        newlines before setting the clipboard text.
+        """
+        selected = self.textCursor().selectedText()
+        if selected:
+            clipboard = QApplication.clipboard()
+            # Replace paragraph separators with standard newlines.
+            clipboard.setText(selected.replace("\u2029", "\n"))
+
     def wheelEvent(self, event):
         """
         Handle Ctrl+scroll wheel for output font size zoom.
@@ -823,8 +841,14 @@ class OutputWindow(QWidget):
         self._pending_messages.append((text, fmt))
 
         # Start the flush timer if it isn't already running.
-        if not self._flush_timer.isActive():
-            self._flush_timer.start()
+        # Guard against the C++ QTimer being deleted before Python lets go
+        # of the reference — happens when Maya fires output callbacks after
+        # the editor widget has been torn down (project close / reload).
+        try:
+            if not self._flush_timer.isActive():
+                self._flush_timer.start()
+        except RuntimeError:
+            pass
 
     def _flush_pending(self):
         """

@@ -201,7 +201,10 @@ class _MayaHotkeyFilter(QObject):
         :return: The TerminalWidget ancestor, or None.
         :rtype: QWidget or None
         """
-        from mca_qt.widgets.terminal_native import TerminalWidget
+        try:
+            from mca_qt.widgets.terminal_native import TerminalWidget
+        except ImportError:
+            return None
         parent = widget
         while parent:
             if isinstance(parent, TerminalWidget):
@@ -566,11 +569,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
             # Detect message type from the prefix that Maya's output
             # system embedded in the reporter text.
-            if "Error:" in stripped and stripped.startswith("//"):
+            # MEL format:   // Error: message //
+            # Python format: # Error: message #
+            if "Error:" in stripped and (stripped.startswith("//") or stripped.startswith("#")):
                 output.write_error(line)
-            elif "Warning:" in stripped and stripped.startswith("//"):
+            elif "Warning:" in stripped and (stripped.startswith("//") or stripped.startswith("#")):
                 output.write_warning(line)
-            elif stripped.startswith("// Result:"):
+            elif stripped.startswith("// Result:") or stripped.startswith("# Result:"):
                 output.write_result(line)
             else:
                 output.write_output(line)
@@ -610,38 +615,59 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
             return
 
-        text = message.rstrip()
-        output = self._panel._output
+        # Guard against the output widget being destroyed (C++ side)
+        # while this callback is still registered.  Happens when the
+        # editor window is torn down but Maya output keeps firing.
+        # An unhandled RuntimeError here cascades through Maya's callback
+        # dispatch and can crash the entire session.
+        try:
+            text = message.rstrip()
+            output = self._panel._output
 
-        # Route to the appropriate output method based on message type.
-        # Color coding: red for errors, orange for warnings, yellow for
-        # results, blue for info, white for display (print output).
-        # No focus save/restore needed — OutputWindow uses a document
-        # cursor for batch writes, which never affects widget focus.
-        if message_type == om2.MCommandMessage.kError:
-            output.write_error(text)
+            # Route to the appropriate output method based on message type.
+            # Color coding: red for errors, orange for warnings, yellow for
+            # results, blue for info, white for display (print output).
+            # No focus save/restore needed — OutputWindow uses a document
+            # cursor for batch writes, which never affects widget focus.
+            if message_type == om2.MCommandMessage.kError:
+                output.write_error(text)
 
-        elif message_type == om2.MCommandMessage.kWarning:
-            output.write_warning(text)
+            elif message_type == om2.MCommandMessage.kWarning:
+                output.write_warning(text)
 
-        elif message_type == om2.MCommandMessage.kResult:
-            output.write_result(text)
+            elif message_type == om2.MCommandMessage.kResult:
+                output.write_result(text)
 
-        elif message_type == om2.MCommandMessage.kInfo:
-            output.write_info(text)
+            elif message_type == om2.MCommandMessage.kInfo:
+                output.write_info(text)
 
-        else:
-            # kDisplay and any other types — standard output.
-            # This is the path for print() output and MEL echo.
-            output.write_output(text)
+            else:
+                # kDisplay and any other types — standard output.
+                # This is the path for print() output and MEL echo.
+                #
+                # Detect result-formatted output from our internal adapter.
+                # Maya's C++ displayResult (kResult type) is not exposed in
+                # Python API 2.0, so the adapter prints the result in Maya's
+                # exact format: "# Result: <value> #".  We detect that
+                # pattern here and route it to write_result() for proper
+                # result coloring — matching Maya's Script Editor appearance.
+                stripped = text.strip()
+                if stripped.startswith("# Result:") and stripped.endswith("#"):
+                    output.write_result(text)
+                else:
+                    output.write_output(text)
 
-        # Force-flush and repaint immediately so output appears in
-        # real-time during code execution.  Without this, the 16ms
-        # QTimer can't fire while exec() blocks the event loop, and
-        # all output would dump at once when execution finishes.
-        # repaint() calls paintEvent() directly, bypassing the event
-        # loop — safe even during a blocking exec().
-        output.flush()
+            # Force-flush and repaint immediately so output appears in
+            # real-time during code execution.  Without this, the 16ms
+            # QTimer can't fire while exec() blocks the event loop, and
+            # all output would dump at once when execution finishes.
+            # repaint() calls paintEvent() directly, bypassing the event
+            # loop — safe even during a blocking exec().
+            output.flush()
+
+        except RuntimeError:
+            # Widget already deleted — silently ignore.
+            pass
 
     # --- Status Bar ----------------------------------------------------------
 
@@ -800,8 +826,14 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         Called by Maya when the dockable window is closed.
 
         Removes the output hook, hotkey filter, saves state, and cleans up.
+        Sets ``editor_was_open`` to False so the editor stays closed on next
+        Maya launch (user explicitly closed it).
         """
         global _output_callback_id
+
+        # Record that the user explicitly closed the editor — don't auto-open
+        # on next Maya launch.
+        self._settings.set("editor_was_open", False)
 
         # Remove the Maya output hook so we stop receiving messages.
         if _output_callback_id is not None:
@@ -1007,13 +1039,16 @@ def show_mca_editor():
             width=1200,
             height=800,
             label="MCA Editor",
-            uiScript="from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()",
+            uiScript="exec('try:\\n from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()\\nexcept: pass')",
         )
     except Exception as exc:
         om2.MGlobal.displayError("MCA Editor failed to show window: {}".format(exc))
         import traceback
         traceback.print_exc()
         return
+
+    # Record that the editor is now open so it auto-opens on next Maya launch.
+    MCASettings().set("editor_was_open", True)
 
     # Show trial notice on the Maya status bar if in trial mode.
     if _show_license_notice and _license_message:
@@ -1064,7 +1099,7 @@ def _restore_mca_editor():
     # we just need to populate it with our widget.
     _mca_editor_window.show(
         dockable=True,
-        uiScript="from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()",
+        uiScript="exec('try:\\n from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()\\nexcept: pass')",
     )
 
     logger.info("MCA Editor workspace control restored via uiScript")
@@ -1107,3 +1142,17 @@ def cleanup_editor():
         except Exception as exc:
             logger.warning("Error during MCA Editor cleanup: %s", exc)
         _mca_editor_window = None
+
+    # Delete the workspace control so Maya does NOT save it in the
+    # workspace layout.  Without this, Maya caches our uiScript in its
+    # preferences — on next startup, workspace restore fires the stale
+    # uiScript before the plugin is loaded, causing "No module named
+    # 'mca_maya'" errors.  Our own editor_was_open setting and
+    # _do_auto_open_editor() handle reopening, so we don't need Maya's
+    # workspace persistence at all.
+    try:
+        if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
+            cmds.deleteUI(WORKSPACE_CONTROL_NAME)
+            logger.info("Deleted workspace control to prevent stale layout save")
+    except Exception:
+        pass

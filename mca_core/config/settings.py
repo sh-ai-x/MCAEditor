@@ -192,6 +192,9 @@ class MCASettings:
         # --- Licensing ---
         "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).
         "first_launch_date": "",         # ISO datetime of first launch (trial start).
+
+        # --- Session Persistence ---
+        "editor_was_open": False,        # Whether the editor was open when Maya last shut down.
     }
 
     def __init__(self, org_name="MCATools", app_name="MCAEditor", backend=None):

@@ -1071,7 +1071,16 @@ class MCACodeEditor(QPlainTextEdit):
             self.set_diagnostics([])
             return
 
-        from mca_core.analyzer import analyze_python
+        try:
+            from mca_core.analyzer import analyze_python
+        except ImportError:
+            # Package root may have fallen off sys.path — re-add and retry.
+            import mca_core
+            mca_core.ensure_on_path()
+            try:
+                from mca_core.analyzer import analyze_python
+            except ImportError:
+                return
 
         code = self.toPlainText()
         diagnostics = analyze_python(code)

@@ -26,6 +26,9 @@ from mca_qt.qt_compat import (
     Qt, QSize, Signal, QKeyCombination,
     QFont, QFontDatabase, QKeySequence, QColor,
 )
+from mca_core.config.color_scheme import (
+    TOKEN_DEFAULTS, get_tokens_for_language, build_scheme_dict, set_token_style,
+)
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -165,13 +168,17 @@ class SettingsDialog(QDialog):
         "Python",
     ]
 
-    def __init__(self, settings, action_registry=None, parent=None):
+    def __init__(self, settings, action_registry=None, default_shortcuts=None, parent=None):
         """
         Initialize the settings dialog and populate all pages.
 
         :param MCASettings settings: Application settings instance.
         :param dict action_registry: Mapping of command name -> QAction
             from the main window, used by the Keyboard page.
+        :param dict default_shortcuts: Mapping of command name -> QKeySequence
+            representing the hard-coded defaults (before user customization).
+            Used by "Restore Defaults" and to detect which shortcuts changed.
+            If None, snapshots the live actions (legacy fallback).
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
@@ -181,10 +188,16 @@ class SettingsDialog(QDialog):
         # Keys are clean command names, values are live QAction objects.
         self._action_registry = action_registry or {}
 
-        # Snapshot of original shortcuts so Restore Defaults can revert.
-        self._default_shortcuts = {}
-        for name, action in self._action_registry.items():
-            self._default_shortcuts[name] = QKeySequence(action.shortcut())
+        # Hard-coded default shortcuts for Restore Defaults and change detection.
+        # Prefer the caller-supplied dict (snapshotted before customs were applied)
+        # so we always compare against the true originals.
+        if default_shortcuts is not None:
+            self._default_shortcuts = dict(default_shortcuts)
+        else:
+            # Legacy fallback — snapshot the live actions.
+            self._default_shortcuts = {}
+            for name, action in self._action_registry.items():
+                self._default_shortcuts[name] = QKeySequence(action.shortcut())
 
         self.setWindowTitle("Settings")
         self.setMinimumSize(DIALOG_MIN_WIDTH, DIALOG_MIN_HEIGHT)
@@ -596,10 +609,6 @@ class SettingsDialog(QDialog):
         side-by-side, then a live preview with language selector,
         and a Restore Defaults button at the bottom.
         """
-        from mca_core.config.color_scheme import (
-            TOKEN_DEFAULTS, get_tokens_for_language, build_scheme_dict,
-        )
-
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -844,8 +853,6 @@ class SettingsDialog(QDialog):
         """
         Reset the working color scheme to TOKEN_DEFAULTS and refresh everything.
         """
-        from mca_core.config.color_scheme import TOKEN_DEFAULTS
-
         # Rebuild the working scheme from canonical defaults.
         self._working_scheme = {}
         for (lang, token_key), info in TOKEN_DEFAULTS.items():
@@ -1227,7 +1234,6 @@ class SettingsDialog(QDialog):
         self._chk_fixed_width.setChecked(s.get("show_fixed_width_only"))
 
         # --- Color scheme ---
-        from mca_core.config.color_scheme import build_scheme_dict
         self._working_scheme = build_scheme_dict(s)
         # Initialize the preview with the first language (Python).
         self._preview_highlighter = None
@@ -1329,7 +1335,6 @@ class SettingsDialog(QDialog):
         s.set("show_fixed_width_only", self._chk_fixed_width.isChecked())
 
         # --- Color scheme ---
-        from mca_core.config.color_scheme import set_token_style
         for (lang, token_key), style in self._working_scheme.items():
             set_token_style(
                 s, lang, token_key,
@@ -1391,6 +1396,19 @@ class SettingsDialog(QDialog):
         s.set("py_autocomplete_builtins", self._chk_py_ac_builtins.isChecked())
         s.set("py_native_maya_fallback", self._chk_py_native_maya.isChecked())
         s.set("py_forced_imports", self._py_forced_imports.text())
+
+        # --- Keyboard Shortcuts ---
+        # Persist any shortcut that differs from its hard-coded default so
+        # custom bindings survive editor restarts.
+        custom_shortcuts = {}
+        for name, action in self._action_registry.items():
+            current = action.shortcut().toString()
+            default = self._default_shortcuts.get(name, QKeySequence())
+            default_str = default.toString() if default else ""
+            # Store the entry if the user changed or cleared the shortcut.
+            if current != default_str:
+                custom_shortcuts[name] = current
+        s.set("custom_shortcuts", custom_shortcuts)
 
         # Flush to persistent storage.
         s.sync()
