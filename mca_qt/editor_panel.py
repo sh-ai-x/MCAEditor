@@ -2127,6 +2127,13 @@ class MCAEditorPanel(QWidget):
         editor = self._current_editor()
         if not editor:
             return
+
+        # If the editor is locked (read-only), saving implies the user
+        # wants to edit — unlock it so subsequent keystrokes don't bounce.
+        if editor.isReadOnly():
+            editor.setReadOnly(False)
+            self._show_status("File unlocked")
+
         if editor.file_path:
             self._write_file(editor, editor.file_path)
             # Auto-reload the module in both local and DCC environments
@@ -2904,8 +2911,10 @@ class MCAEditorPanel(QWidget):
         if not filepath or not filepath.endswith(".py"):
             return
 
-        # Respect the project-level toggle (defaults to True / on).
-        if self._active_project and not self._active_project.auto_reload_modules:
+        # Auto-reload is a project-only feature.  In default mode (no
+        # active project) we skip it entirely.  In project mode, respect
+        # the project's toggle (which defaults to True / on).
+        if not self._active_project or not self._active_project.auto_reload_modules:
             return
 
         # Resolve the file path to a dotted module name.
@@ -2987,8 +2996,6 @@ class MCAEditorPanel(QWidget):
                 "        if getattr(_mca_main, _mca_n, None) is _mca_ov:\n"
                 "            setattr(_mca_main, _mca_n, _mca_nv)\n"
                 "    print('Auto-reloaded: {mod}')\n"
-                "else:\n"
-                "    print('Auto-reload: {mod} not in sys.modules (not imported yet)')\n"
             ).format(mod=module_name)
             try:
                 adapter.execute(reload_code, "python")
@@ -3684,6 +3691,14 @@ class MCAEditorPanel(QWidget):
 
         # First, try the standard path lookup (handles file-backed tabs).
         group, idx, existing = self._group_container.find_editor_by_path(filepath)
+
+        # If the file IS found, switch to that tab so _current_editor()
+        # returns the correct widget below.  Without this, navigating to
+        # a file that's already open in a non-active tab silently does
+        # nothing — go_to_line() runs on the wrong editor.
+        if group is not None and idx >= 0:
+            group.set_current_index(idx)
+            self._group_container._on_group_activated(group)
 
         # If not found, also check each editor's file_path attribute.
         # Buffer tabs store path=None in the group, but editor.file_path

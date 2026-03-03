@@ -29,8 +29,9 @@ import zipfile
 
 # --- Constants ---------------------------------------------------------------
 
-# Version must match mca_core/__init__.py.
-VERSION = "0.1.0"
+# Pull the canonical version from mca_core so there is one source of truth.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mca_core import __version__ as VERSION
 
 # Default location of Maya 2025's Python interpreter on Windows.
 DEFAULT_MAYAPY = "C:/Program Files/Autodesk/Maya2025/bin/mayapy.exe"

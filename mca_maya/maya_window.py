@@ -269,12 +269,13 @@ class _MayaHotkeyFilter(QObject):
 
         # --- Phase 1: Block Maya's hotkey system entirely ---
         if event.type() == QEvent.Type.ShortcutOverride:
-            # Check both the regular focus test AND the forced-focus flag.
-            # After Phase 0 forces focus via setFocus(), Qt may not have
-            # updated focusWidget() yet when the very next ShortcutOverride
-            # arrives in the same event loop iteration.
+            # Check the regular focus test AND the forced-focus flag.
+            # _focus_forced is managed by focusChanged (set when focus
+            # enters our editor tree, cleared when it leaves).  We do
+            # NOT clear it here — that caused a first-press bug where
+            # Ctrl+C in the output window leaked to Maya because the
+            # flag was consumed before Phase 2 could use it.
             if self._focus_in_editor() or getattr(self, "_focus_forced", False):
-                self._focus_forced = False
                 # Accept ALL shortcut overrides. This prevents Maya's
                 # hotkey system from seeing any key while our editor
                 # has focus. The key will arrive as a normal KeyPress.
@@ -427,6 +428,15 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if app:
             app.installEventFilter(self._hotkey_filter)
 
+            # Listen for global focus changes so we can set _focus_forced
+            # whenever focus enters our editor tree.  On the very first
+            # interaction (clicking into the docked panel from Maya's
+            # viewport), Qt may not update focusWidget() fast enough for
+            # Phase 1 to detect it.  The focusChanged signal fires
+            # reliably, giving us a safety net so Phase 1 always accepts
+            # ShortcutOverride and Maya's hotkeys don't steal the key.
+            app.focusChanged.connect(self._on_app_focus_changed)
+
         # Hook into Maya's output system so ALL Maya messages (startup logs,
         # warnings, errors, command results) appear in our output window —
         # just like Maya's Script Editor and Charcoal Editor 2.
@@ -468,14 +478,43 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         :rtype: bool
         """
         if event.type() == QEvent.Type.WindowActivate:
-            # If nothing in our tree currently has focus, give it to the
-            # panel (which will forward to the active editor via Qt's
-            # focus chain).
+            # Always mark focus as forced when our window activates.
+            # If nothing in our tree currently has focus, also push it
+            # to the panel (which will forward to the active editor
+            # via Qt's focus chain).
+            self._hotkey_filter._focus_forced = True
             if not self._hotkey_filter._focus_in_editor():
                 self._panel.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-                self._hotkey_filter._focus_forced = True
 
         return super().event(event)
+
+    def _on_app_focus_changed(self, old, new):
+        """
+        Manage the hotkey filter's ``_focus_forced`` flag on focus changes.
+
+        Qt's ``QApplication.focusChanged`` signal fires whenever keyboard
+        focus moves between widgets.  We use it to track whether focus is
+        inside our editor tree:
+
+        - **Enters our tree** → set ``_focus_forced = True`` so Phase 1
+          accepts ShortcutOverride even if ``focusWidget()`` hasn't
+          updated yet.
+        - **Leaves our tree** → clear the flag so we stop stealing
+          shortcuts from Maya.
+
+        This replaces the old approach where Phase 1 consumed the flag
+        on every ShortcutOverride, which caused a first-press bug:
+        Ctrl+C in the output window leaked to Maya's ``cutCopyPaste.mel``
+        on the initial interaction.
+
+        :param QWidget old: The widget that lost focus (may be None).
+        :param QWidget new: The widget that gained focus (may be None).
+        """
+        if new and self._hotkey_filter._widget_in_editor(new):
+            self._hotkey_filter._focus_forced = True
+        elif new is not None:
+            # Focus moved to a widget outside our editor tree.
+            self._hotkey_filter._focus_forced = False
 
     # --- Maya Output Hook ---------------------------------------------------
 

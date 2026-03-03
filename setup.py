@@ -23,6 +23,10 @@ import sys
 
 from setuptools import setup, find_packages
 
+# Pull the canonical version from the package so there is one source of truth.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mca_core import __version__ as VERSION
+
 # --- Maya Python Include Path ------------------------------------------------
 # Maya 2025 puts Python.h in a non-standard location:
 #   <MAYA>/include/Python311/Python/Python.h
@@ -205,7 +209,7 @@ if __name__ == "__main__":
 
     setup(
         name="mcaeditor",
-        version="0.1.0",
+        version=VERSION,
         packages=find_packages(include=[
             "mca_core*", "mca_qt*", "mca_standalone*", "mca_maya*", "mca_editor*",
         ]),

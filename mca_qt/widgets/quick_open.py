@@ -19,8 +19,15 @@ import logging
 
 from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-    Qt, QEvent, QPoint,
+    Qt, QEvent, QPoint, QColor,
 )
+
+# --- Extra Qt imports for the custom item delegate --------------------------
+# QStyledItemDelegate and QStyle are not in qt_compat (only used here).
+try:
+    from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+except ImportError:
+    from PySide2.QtWidgets import QStyledItemDelegate, QStyle
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -124,12 +131,13 @@ class QuickOpenPopup(QDialog):
         """
         super().__init__(parent)
 
-        # Frameless popup window that closes on focus loss.
+        # Popup window that auto-closes when the user clicks outside.
+        # Popup grabs mouse/keyboard input so clicking anywhere else
+        # dismisses it — no need for setModal().
         self.setWindowFlags(
-            Qt.WindowType.Dialog
+            Qt.WindowType.Popup
             | Qt.WindowType.FramelessWindowHint
         )
-        self.setModal(True)
 
         # --- Build the layout ---
         layout = QVBoxLayout(self)
@@ -291,8 +299,12 @@ class QuickOpenPopup(QDialog):
             return
 
         _display, _search, data = self._visible_items[row]
-        self.accept()
+        # Navigate BEFORE closing the dialog.  Calling accept() first
+        # hides the popup and returns focus to the parent, which can
+        # trigger state changes (tab switches, focus handlers) that
+        # make _current_editor() return the wrong widget.
         self._on_confirm(data)
+        self.accept()
 
     def _on_item_double_clicked(self, list_item):
         """
@@ -542,6 +554,97 @@ class GoToSymbolPopup(QuickOpenPopup):
 
 
 # =============================================================================
+# GoToDeclarationPopup — Custom Item Delegate
+# =============================================================================
+
+class _DeclarationItemDelegate(QStyledItemDelegate):
+    """
+    Custom delegate for Go to Declaration list items.
+
+    Paints each row as two aligned columns:
+        1. **Location** (filename:line) in yellow, fixed-width
+        2. **Code preview** in dim gray, filling the remaining space
+
+    The fixed-width location column ensures all rows line up uniformly
+    regardless of filename length.
+
+    :param int location_col_width: Pixel width of the location column.
+    :param QWidget parent: Parent widget (usually the QListWidget).
+    """
+
+    # VS Code-style yellow for identifiers / filenames.
+    _LOCATION_COLOR = QColor("#dcdcaa")
+
+    # Dim gray for the code preview text.
+    _CODE_COLOR = QColor("#9a9a9a")
+
+    # Selection highlight matching the popup stylesheet.
+    _SELECTED_BG = QColor("#094771")
+
+    def __init__(self, location_col_width, parent=None):
+        """
+        Initialize the delegate.
+
+        :param int location_col_width: Pixel width reserved for the
+            filename:line column (computed from the widest entry).
+        :param QWidget parent: Parent widget.
+        """
+        super().__init__(parent)
+        self._location_col_width = location_col_width
+
+    def paint(self, painter, option, index):
+        """
+        Paint a single list row with colored, aligned columns.
+
+        Reads ``(location_str, code_str)`` from ``Qt.UserRole`` on
+        the item.  Falls back to the default delegate if no structured
+        data is present.
+
+        :param QPainter painter: The painter to draw with.
+        :param QStyleOptionViewItem option: Style options for the item.
+        :param QModelIndex index: Index of the item being painted.
+        """
+        painter.save()
+
+        # Draw selection background when this row is highlighted.
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, self._SELECTED_BG)
+
+        # Read the structured data stored in UserRole.
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            painter.restore()
+            return super().paint(painter, option, index)
+
+        location_text, code_text = data
+
+        # Left padding matches the stylesheet's QListWidget::item padding.
+        left_pad = 8
+
+        # --- Location column (yellow) ---
+        loc_rect = option.rect.adjusted(left_pad, 0, 0, 0)
+        loc_rect.setWidth(self._location_col_width)
+        painter.setPen(self._LOCATION_COLOR)
+        painter.drawText(
+            loc_rect,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            location_text,
+        )
+
+        # --- Code preview column (gray) ---
+        code_x = left_pad + self._location_col_width + 16
+        code_rect = option.rect.adjusted(code_x, 0, -left_pad, 0)
+        painter.setPen(self._CODE_COLOR)
+        painter.drawText(
+            code_rect,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            code_text,
+        )
+
+        painter.restore()
+
+
+# =============================================================================
 # GoToDeclarationPopup
 # =============================================================================
 
@@ -552,6 +655,9 @@ class GoToDeclarationPopup(QuickOpenPopup):
     Shows a list of pre-computed results (definitions or usages) with
     file path, line number, and the matching line text.  On confirm,
     navigates to the selected location via the provided callback.
+
+    Uses a custom delegate to render the filename:line in yellow with
+    uniform column alignment across all rows.
 
     :param QWidget parent: Parent window.
     :param list results: List of (filepath, line_number, line_text) tuples.
@@ -572,9 +678,40 @@ class GoToDeclarationPopup(QuickOpenPopup):
         self._results = results
         self._navigate_callback = navigate_callback
 
+    def exec(self):
+        """
+        Compute column width from results and install the custom delegate
+        before the base class populates the list.
+
+        :return: Dialog result code.
+        :rtype: int
+        """
+        # Measure the widest "filename:line" string to set a uniform
+        # column width.  This runs before super().exec() which calls
+        # _populate_list → _get_items.
+        font_metrics = self._list.fontMetrics()
+        max_loc_width = 0
+        for filepath, line_num, _line_text in self._results:
+            filename = os.path.basename(filepath)
+            location = "{}:{}".format(filename, line_num)
+            width = font_metrics.horizontalAdvance(location)
+            if width > max_loc_width:
+                max_loc_width = width
+
+        # Install the delegate so it's active when items are painted.
+        self._list.setItemDelegate(
+            _DeclarationItemDelegate(max_loc_width, self._list)
+        )
+
+        return super().exec()
+
     def _get_items(self):
         """
         Convert pre-computed results to popup items.
+
+        Item data includes the location and code strings so
+        ``_populate_list`` can attach them to each QListWidgetItem
+        for the custom delegate.
 
         :return: List of (display_text, search_text, item_data) tuples.
         :rtype: list
@@ -582,21 +719,46 @@ class GoToDeclarationPopup(QuickOpenPopup):
         items = []
 
         for filepath, line_num, line_text in self._results:
-            # Show just the filename + line number, with the matched text.
             filename = os.path.basename(filepath)
-            display = "{}:{}  {}".format(filename, line_num, line_text.strip()[:120])
+            location = "{}:{}".format(filename, line_num)
+            code = line_text.strip()[:120]
+
+            # Display text is used for fuzzy filtering only (not painted
+            # directly — the delegate reads from UserRole instead).
+            display = "{}  {}".format(location, code)
             search_text = filename + " " + line_text
-            # item_data is the (filepath, line_number) tuple for navigation.
-            items.append((display, search_text, (filepath, line_num)))
+
+            # Pack location + code into item_data alongside the nav coords.
+            items.append((display, search_text, (filepath, line_num, location, code)))
 
         return items
+
+    def _populate_list(self, items):
+        """
+        Populate the list and attach structured data for the delegate.
+
+        After the base class creates QListWidgetItems, this stores
+        ``(location_str, code_str)`` in each item's UserRole so the
+        custom delegate can paint the two-column layout.
+
+        :param list items: Filtered (display, search, item_data) tuples.
+        """
+        super()._populate_list(items)
+
+        # Attach structured display data to each list item.
+        for i, (_display, _search, data) in enumerate(items):
+            if i < self._list.count():
+                _fp, _ln, location, code = data
+                self._list.item(i).setData(
+                    Qt.ItemDataRole.UserRole, (location, code)
+                )
 
     def _on_confirm(self, item_data):
         """
         Navigate to the confirmed location.
 
-        :param tuple item_data: (filepath, line_number) to navigate to.
+        :param tuple item_data: (filepath, line_number, location, code) tuple.
         """
-        filepath, line_num = item_data
+        filepath, line_num = item_data[0], item_data[1]
         logger.info("GoToDeclaration: navigating to %s:%d", filepath, line_num)
         self._navigate_callback(filepath, line_num)

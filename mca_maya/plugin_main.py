@@ -63,7 +63,7 @@ _exit_callback_id = None
 # Plugin metadata.
 PLUGIN_NAME = "MCA Editor"
 PLUGIN_VENDOR = "MCA Tools"
-PLUGIN_VERSION = "0.1.0"
+from mca_core import __version__ as PLUGIN_VERSION
 
 
 # --- MCA Editor Command (for mel: mcaEditor) --------------------------------

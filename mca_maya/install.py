@@ -21,6 +21,8 @@ import sys
 import shutil
 import logging
 
+from mca_core import __version__
+
 # Module-level logger.
 logger = logging.getLogger(__name__)
 
@@ -149,7 +151,7 @@ def install():
     os.makedirs(modules_dir, exist_ok=True)
 
     mod_path = os.path.join(modules_dir, "mcaeditor.mod")
-    mod_content = MOD_TEMPLATE.format(version="0.1.0", package_root=package_root)
+    mod_content = MOD_TEMPLATE.format(version=__version__, package_root=package_root)
 
     with open(mod_path, "w", encoding="utf-8") as f:
         f.write(mod_content)
