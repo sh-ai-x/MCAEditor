@@ -45,10 +45,12 @@ RESOURCE_DIRS = ["resources/images"]
 # Pure-Python files that must ship uncompiled in the Maya distribution.
 # venv_manager.py runs at plugin init before the venv exists, so it
 # cannot be a compiled .pyd — it needs to work with just stdlib.
-# mcp_maya_server.py runs as a separate process outside Maya.
+# mcp_maya_server.py and mcp_editor_server.py run as separate processes
+# outside Maya, launched by Claude Code via MCP stdio.
 DIST_PURE_PYTHON = [
     os.path.join("mca_core", "venv_manager.py"),
     os.path.join("mca_core", "mcp_maya_server.py"),
+    os.path.join("mca_core", "mcp_editor_server.py"),
 ]
 
 # Files that ship as .pyc (bytecode) instead of .pyd (compiled C extension).

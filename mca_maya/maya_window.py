@@ -330,15 +330,21 @@ class _MayaHotkeyFilter(QObject):
                     if focus:
                         # Walk up the parent chain looking for a terminal.
                         terminal = self._find_parent_terminal(focus)
-                        if terminal:
-                            # Route through the terminal's eventFilter which
-                            # handles Ctrl+V paste, Ctrl+C interrupt, etc.
-                            # Pass terminal._display (not `focus`) because
-                            # the eventFilter checks `if obj is self._display:`
-                            # and rejects any other object.
-                            terminal.eventFilter(terminal._display, event)
-                        elif hasattr(focus, "keyPressEvent"):
-                            focus.keyPressEvent(event)
+                        try:
+                            if terminal:
+                                # Route through the terminal's eventFilter which
+                                # handles Ctrl+V paste, Ctrl+C interrupt, etc.
+                                # Pass terminal._display (not `focus`) because
+                                # the eventFilter checks `if obj is self._display:`
+                                # and rejects any other object.
+                                terminal.eventFilter(terminal._display, event)
+                            elif hasattr(focus, "keyPressEvent"):
+                                focus.keyPressEvent(event)
+                        except RuntimeError:
+                            # The focused widget's C++ object was deleted between
+                            # the focusWidget() call and the dispatch.  This
+                            # happens when tabs close or widgets rebuild mid-event.
+                            pass
                     return True
 
         return super().eventFilter(watched, event)

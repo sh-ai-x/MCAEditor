@@ -1,16 +1,20 @@
 """
 MCA Core - MCP Server Setup Orchestrator.
 
-Handles the full lifecycle of getting the MCA Maya MCP server deployed and
-registered with Claude Code.  The entire process is idempotent — safe to
-call on every launch.  Fast path on subsequent runs (just file existence
-checks, no subprocesses).
+Handles the full lifecycle of getting the MCA MCP servers deployed and
+registered with Claude Code.  Two servers are managed:
+
+    1. **MCAMayaMCP** — Maya scene tools (create_object, materials, etc.)
+    2. **MCAEditorMCP** — Editor tools (open files, edit buffers, execute code)
+
+The entire process is idempotent — safe to call on every launch.  Fast path
+on subsequent runs (just file existence checks, no subprocesses).
 
 Setup sequence:
     1. Clone MayaMCP repo (if not present)
-    2. Apply patches (delete generate_scene.py, copy our server)
+    2. Apply patches (delete generate_scene.py, copy our servers)
     3. Create venv with ``mcp`` package (if not present)
-    4. Register with Claude Code (if not registered)
+    4. Register both servers with Claude Code (if not registered)
 
 All failures are logged but **never** block the editor.  If ``git`` is not
 installed, or there's no network, or Claude Code CLI is missing, the setup
@@ -20,11 +24,13 @@ Storage layout::
 
     ~/Documents/mca_preferences/mcp_servers/
         MayaMCP/                    # Git clone (untouched, can git pull)
-            src/mayatools/          # Tool .py files (used by our server)
-            .venv/                  # Venv with mcp package
+            src/mayatools/          # Tool .py files (used by Maya server)
+            .venv/                  # Venv with mcp package (shared by both servers)
             requirements.txt        # Just "mcp"
-        mca_maya_server.py          # Our custom server (copied from repo)
-        mca_maya_server.log         # Server log output
+        mca_maya_server.py          # Maya scene MCP server (copied from repo)
+        mca_maya_server.log         # Maya server log output
+        mca_editor_server.py        # Editor MCP server (copied from repo)
+        mca_editor_server.log       # Editor server log output
 
 Dependencies:
     - None (pure Python stdlib).  Subprocess calls only when setup is needed.
@@ -32,7 +38,7 @@ Dependencies:
 Side effects:
     - Clones a git repo into ``mca_preferences/mcp_servers/MayaMCP/``
     - Creates a venv at ``mca_preferences/mcp_servers/MayaMCP/.venv/``
-    - Copies ``mcp_maya_server.py`` to ``mca_preferences/mcp_servers/``
+    - Copies ``mcp_maya_server.py`` and ``mcp_editor_server.py`` to deploy dir
     - Modifies ``~/.claude.json`` (via ``claude`` CLI or direct JSON write)
 """
 
@@ -59,12 +65,20 @@ _MCP_DIR = os.path.join(_PREFS_DIR, "mcp_servers")
 # MayaMCP clone location.
 _MAYAMCP_DIR = os.path.join(_MCP_DIR, "MayaMCP")
 
-# Our custom server's deployed location.
+# Our custom Maya server's deployed location.
 _SERVER_DEPLOY_PATH = os.path.join(_MCP_DIR, "mca_maya_server.py")
 
-# The source file to copy (lives in the repo alongside this file).
+# The Maya server source file (lives in the repo alongside this file).
 _SERVER_SOURCE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "mcp_maya_server.py"
+)
+
+# Our custom Editor server's deployed location.
+_EDITOR_SERVER_DEPLOY_PATH = os.path.join(_MCP_DIR, "mca_editor_server.py")
+
+# The Editor server source file (lives in the repo alongside this file).
+_EDITOR_SERVER_SOURCE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "mcp_editor_server.py"
 )
 
 # MayaMCP git repo URL.
@@ -78,8 +92,9 @@ _GENERATE_SCENE_PATH = os.path.join(
 # Venv location inside the MayaMCP clone.
 _MAYAMCP_VENV_DIR = os.path.join(_MAYAMCP_DIR, ".venv")
 
-# Claude Code registration name.
+# Claude Code registration names.
 _MCP_SERVER_NAME = "MCAMayaMCP"
+_EDITOR_MCP_SERVER_NAME = "MCAEditorMCP"
 
 # Subprocess timeout for git/pip operations (seconds).
 _SUBPROCESS_TIMEOUT = 120
@@ -124,31 +139,48 @@ def ensure_maya_mcp(background=True, status_callback=None):
 
 def get_mcp_server_status():
     """
-    Return the current status of the MCP server deployment.
+    Return the current status of both MCP server deployments.
 
     Used by ``get_mcp_server_info()`` in the adapter classes to report
     actual installation state instead of hardcoded ``installed: False``.
 
-    :return: Status dictionary with keys: name, description, installed,
-        registered, server_path, venv_path, clone_path.
+    :return: Status dictionary with ``maya`` and ``editor`` sub-dicts,
+        each containing: name, description, installed, registered, server_path.
+        Also includes shared keys: venv_path, clone_path.
     :rtype: dict
     """
-    installed = (
+    venv_ready = _is_venv_ready()
+
+    # Maya MCP server status.
+    maya_installed = (
         os.path.isfile(_SERVER_DEPLOY_PATH)
         and os.path.isdir(_MAYAMCP_DIR)
-        and _is_venv_ready()
+        and venv_ready
     )
+    maya_registered = _is_registered(_MCP_SERVER_NAME)
 
-    registered = _is_registered()
+    # Editor MCP server status.
+    editor_installed = (
+        os.path.isfile(_EDITOR_SERVER_DEPLOY_PATH)
+        and venv_ready
+    )
+    editor_registered = _is_registered(_EDITOR_MCP_SERVER_NAME)
 
     return {
         "name": _MCP_SERVER_NAME,
         "description": "MCP server for Maya scene manipulation via MCA Editor",
-        "installed": installed,
-        "registered": registered,
+        "installed": maya_installed,
+        "registered": maya_registered,
         "server_path": _SERVER_DEPLOY_PATH if os.path.isfile(_SERVER_DEPLOY_PATH) else None,
         "venv_path": _MAYAMCP_VENV_DIR if os.path.isdir(_MAYAMCP_VENV_DIR) else None,
         "clone_path": _MAYAMCP_DIR if os.path.isdir(_MAYAMCP_DIR) else None,
+        "editor": {
+            "name": _EDITOR_MCP_SERVER_NAME,
+            "description": "MCP server for editor control via Claude Code",
+            "installed": editor_installed,
+            "registered": editor_registered,
+            "server_path": _EDITOR_SERVER_DEPLOY_PATH if os.path.isfile(_EDITOR_SERVER_DEPLOY_PATH) else None,
+        },
     }
 
 
@@ -192,13 +224,19 @@ def _run_setup(status_callback=None):
                 _status("MCP setup: venv creation failed")
                 return
 
-        # Step 4: Register with Claude Code.
-        if not _is_registered():
-            _status("Registering MCP server with Claude Code...")
-            _register_with_claude_code()
+        # Step 4: Register Maya MCP server with Claude Code.
+        if not _is_registered(_MCP_SERVER_NAME):
+            _status("Registering Maya MCP server with Claude Code...")
+            _register_server_with_claude_code(_MCP_SERVER_NAME, _SERVER_DEPLOY_PATH)
 
-        _status("MCP server ready")
-        logger.info("MCP setup complete. Server: %s", _SERVER_DEPLOY_PATH)
+        # Step 5: Register Editor MCP server with Claude Code.
+        if not _is_registered(_EDITOR_MCP_SERVER_NAME):
+            _status("Registering Editor MCP server with Claude Code...")
+            _register_server_with_claude_code(_EDITOR_MCP_SERVER_NAME, _EDITOR_SERVER_DEPLOY_PATH)
+
+        _status("MCP servers ready")
+        logger.info("MCP setup complete. Maya: %s, Editor: %s",
+                     _SERVER_DEPLOY_PATH, _EDITOR_SERVER_DEPLOY_PATH)
 
     except Exception as exc:
         logger.warning("MCP setup failed with unexpected error: %s", exc, exc_info=True)
@@ -273,7 +311,8 @@ def _apply_patches():
     Apply post-clone patches.
 
     - Delete ``generate_scene.py`` (broken/dangerous tool)
-    - Copy our custom MCP server to the deployment directory
+    - Copy our custom Maya MCP server to the deployment directory
+    - Copy our custom Editor MCP server to the deployment directory
 
     Safe to call multiple times.
     """
@@ -285,18 +324,27 @@ def _apply_patches():
         except OSError as exc:
             logger.warning("Could not delete generate_scene.py: %s", exc)
 
-    # Copy our server to the deployment directory.
-    if not os.path.isfile(_SERVER_SOURCE_PATH):
-        logger.warning("Server source not found at %s — cannot deploy", _SERVER_SOURCE_PATH)
-        return
-
-    # Always copy (ensures updates propagate on editor upgrade).
     os.makedirs(_MCP_DIR, exist_ok=True)
-    try:
-        shutil.copy2(_SERVER_SOURCE_PATH, _SERVER_DEPLOY_PATH)
-        logger.info("Deployed MCP server to %s", _SERVER_DEPLOY_PATH)
-    except OSError as exc:
-        logger.warning("Failed to copy server: %s", exc)
+
+    # Copy the Maya MCP server to the deployment directory.
+    if os.path.isfile(_SERVER_SOURCE_PATH):
+        try:
+            shutil.copy2(_SERVER_SOURCE_PATH, _SERVER_DEPLOY_PATH)
+            logger.info("Deployed Maya MCP server to %s", _SERVER_DEPLOY_PATH)
+        except OSError as exc:
+            logger.warning("Failed to copy Maya server: %s", exc)
+    else:
+        logger.warning("Maya server source not found at %s — cannot deploy", _SERVER_SOURCE_PATH)
+
+    # Copy the Editor MCP server to the deployment directory.
+    if os.path.isfile(_EDITOR_SERVER_SOURCE_PATH):
+        try:
+            shutil.copy2(_EDITOR_SERVER_SOURCE_PATH, _EDITOR_SERVER_DEPLOY_PATH)
+            logger.info("Deployed Editor MCP server to %s", _EDITOR_SERVER_DEPLOY_PATH)
+        except OSError as exc:
+            logger.warning("Failed to copy Editor server: %s", exc)
+    else:
+        logger.warning("Editor server source not found at %s — cannot deploy", _EDITOR_SERVER_SOURCE_PATH)
 
 
 # =============================================================================
@@ -451,12 +499,13 @@ def _get_venv_site_packages():
 # Step 4: Registration with Claude Code
 # =============================================================================
 
-def _is_registered():
+def _is_registered(server_name):
     """
-    Check if our MCP server is registered in Claude Code's config.
+    Check if an MCP server is registered in Claude Code's config.
 
-    Looks for the ``MCAMayaMCP`` entry in ``~/.claude.json``.
+    Looks for the given server name entry in ``~/.claude.json``.
 
+    :param str server_name: The MCP server registration name to check.
     :return: True if already registered.
     :rtype: bool
     """
@@ -469,31 +518,34 @@ def _is_registered():
     except (json.JSONDecodeError, OSError):
         return False
 
-    # Check for our server in the mcpServers section.
+    # Check for the server in the mcpServers section.
     mcp_servers = config.get("mcpServers", {})
-    return _MCP_SERVER_NAME in mcp_servers
+    return server_name in mcp_servers
 
 
-def _register_with_claude_code():
+def _register_server_with_claude_code(server_name, server_script_path):
     """
-    Register our MCP server with Claude Code.
+    Register an MCP server with Claude Code.
 
     Strategy:
         1. Try ``claude mcp add-json`` CLI command (preferred — handles all config)
         2. Fallback: write directly to ``~/.claude.json``
 
-    The registration tells Claude Code how to start our MCP server:
-    use MayaMCP's venv Python to run our custom server script.
+    The registration tells Claude Code how to start the MCP server:
+    use MayaMCP's venv Python to run the server script.
+
+    :param str server_name: The registration name (e.g. ``MCAMayaMCP``).
+    :param str server_script_path: Absolute path to the server ``.py`` file.
     """
     venv_python = _get_venv_python()
     if not venv_python:
-        logger.warning("Cannot register: MCP venv Python not found")
+        logger.warning("Cannot register %s: MCP venv Python not found", server_name)
         return
 
     # Build the server configuration JSON.
     server_config = {
         "command": venv_python.replace("\\", "/"),
-        "args": [_SERVER_DEPLOY_PATH.replace("\\", "/")],
+        "args": [server_script_path.replace("\\", "/")],
     }
 
     # Try the Claude CLI first.
@@ -502,28 +554,30 @@ def _register_with_claude_code():
         config_json = json.dumps(server_config)
         try:
             subprocess.run(
-                [claude_cli, "mcp", "add-json", _MCP_SERVER_NAME, config_json,
+                [claude_cli, "mcp", "add-json", server_name, config_json,
                  "--scope", "user"],
                 check=True,
                 timeout=30,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            logger.info("Registered MCP server via Claude CLI: %s", _MCP_SERVER_NAME)
+            logger.info("Registered MCP server via Claude CLI: %s", server_name)
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("Claude CLI registration failed, falling back to direct write: %s", exc)
+            logger.warning("Claude CLI registration for %s failed, falling back to direct write: %s",
+                           server_name, exc)
 
     # Fallback: write directly to ~/.claude.json.
-    _register_direct(server_config)
+    _register_direct(server_name, server_config)
 
 
-def _register_direct(server_config):
+def _register_direct(server_name, server_config):
     """
     Register by writing directly to ``~/.claude.json``.
 
     Creates the file if it doesn't exist, or merges into the existing config.
 
+    :param str server_name: The registration name (e.g. ``MCAMayaMCP``).
     :param dict server_config: The MCP server configuration dict.
     """
     config = {}
@@ -542,13 +596,13 @@ def _register_direct(server_config):
     if "mcpServers" not in config:
         config["mcpServers"] = {}
 
-    # Add our server.
-    config["mcpServers"][_MCP_SERVER_NAME] = server_config
+    # Add the server.
+    config["mcpServers"][server_name] = server_config
 
     try:
         with open(_CLAUDE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
-        logger.info("Registered MCP server via direct write to %s", _CLAUDE_CONFIG_PATH)
+        logger.info("Registered %s via direct write to %s", server_name, _CLAUDE_CONFIG_PATH)
     except OSError as exc:
         logger.warning("Failed to write claude.json: %s", exc)
 

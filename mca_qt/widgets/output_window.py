@@ -826,6 +826,26 @@ class OutputWindow(QWidget):
         """
         return self._output.toPlainText()
 
+    def get_recent_text(self, max_lines=100):
+        """
+        Return the last ``max_lines`` lines from the output panel.
+
+        Used by the EditorAPI to avoid sending megabytes of output over
+        the JSON-RPC socket when only recent context is needed.
+
+        :param int max_lines: Maximum number of lines to return.
+        :return: The last ``max_lines`` lines joined by newline.
+        :rtype: str
+        """
+        full_text = self._output.toPlainText()
+        if not full_text:
+            return ""
+        lines = full_text.split("\n")
+        # Return only the tail if content exceeds max_lines.
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return "\n".join(lines)
+
     def set_line_wrap_mode(self, mode):
         """
         Set the line-wrap mode on the underlying text edit.

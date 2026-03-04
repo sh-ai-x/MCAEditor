@@ -238,6 +238,24 @@ class MCAEditorPanel(QWidget):
         # layout rebuild doesn't trigger Qt reflows that collapse splitters.
         self._auto_open_last_project()
 
+        # --- EditorAPI & JSON-RPC Server ------------------------------------
+        # Register this panel with the public API singleton so external
+        # tools can control the editor programmatically.
+        from mca_core.editor_api import register_panel as _register_panel
+        _register_panel(self)
+
+        # Start the TCP JSON-RPC server in a daemon thread.
+        from mca_core.editor_api_server import start_server, drain_queue
+        api_port = self._settings.get("api_port", 7003)
+        start_server(port=api_port)
+
+        # A QTimer drains the server's request queue on the main thread
+        # every 50ms, executing EditorAPI methods safely.
+        self._api_dispatch_timer = QTimer(self)
+        self._api_dispatch_timer.setInterval(50)
+        self._api_dispatch_timer.timeout.connect(drain_queue)
+        self._api_dispatch_timer.start()
+
     # --- Default Workspace Initialization ------------------------------------
 
     def _init_default_workspace(self):
@@ -3150,6 +3168,57 @@ class MCAEditorPanel(QWidget):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
+    def _api_execute_code(self, code, language="python"):
+        """
+        Execute code via the API — takes explicit code + language params.
+
+        For DCC execution, sends code through the active adapter and returns
+        the socket response.  For local execution, redirects stdout/stderr
+        and uses the persistent namespace.
+
+        Called by ``EditorAPI.execute_in_dcc()`` — not intended for direct
+        UI use (the regular ``_execute_all`` reads from the active editor).
+
+        :param str code: Source code to execute.
+        :param str language: 'python' or 'mel' (default 'python').
+        :return: Dict with ``success``, ``output``, ``error``.
+        :rtype: dict
+        """
+        adapter = self._adapter_manager.get_active_adapter()
+        if adapter and adapter.is_connected:
+            try:
+                result = adapter.execute(code, language)
+                return {"success": True, "output": result or "", "error": None}
+            except Exception as exc:
+                return {"success": False, "output": "", "error": str(exc)}
+        else:
+            # No DCC connected — fall back to local execution for Python.
+            if language != "python":
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": "No DCC connected. Cannot execute {} code.".format(language),
+                }
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            try:
+                exec(code, self._local_namespace)
+                output = sys.stdout.getvalue()
+                errors = sys.stderr.getvalue()
+                return {
+                    "success": True,
+                    "output": output.rstrip() if output else "",
+                    "error": errors.rstrip() if errors else None,
+                }
+            except Exception:
+                tb = traceback.format_exc()
+                return {"success": False, "output": "", "error": tb.rstrip()}
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
     # =========================================================================
     # DCC Connection
     # =========================================================================
@@ -4609,4 +4678,14 @@ class MCAEditorPanel(QWidget):
         self._right_terminal_panel.cleanup()
 
         self._adapter_manager.disconnect_all()
+
+        # Stop the API dispatch timer and shut down the JSON-RPC server.
+        if hasattr(self, "_api_dispatch_timer"):
+            self._api_dispatch_timer.stop()
+        try:
+            from mca_core.editor_api_server import stop_server
+            stop_server()
+        except Exception as exc:
+            logger.warning("Failed to stop API server: %s", exc)
+
         logger.info("MCA Editor panel cleaning up")
