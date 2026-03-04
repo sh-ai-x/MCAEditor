@@ -850,16 +850,8 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         :param str message: The status message.
         :param int duration_ms: Display duration (used for logging context).
         """
-        try:
-            # Use Maya's inViewMessage for prominent feedback.
-            cmds.inViewMessage(
-                assistMessage=message,
-                position="topCenter",
-                fade=True,
-            )
-        except Exception:
-            # Fallback: just print to Maya's script editor output.
-            print("[MCA Editor] {}".format(message))
+        # Print to Maya's script editor output (non-intrusive).
+        print("[MCA Editor] {}".format(message))
 
     # --- Cleanup ------------------------------------------------------------
 

@@ -376,13 +376,14 @@ def compile_extensions(mayapy):
     )
 
 
-def compile_pyc_files():
+def compile_pyc_files(mayapy):
     """
     Compile .pyc fallback files and place them directly in package dirs.
 
     Files listed in ``DIST_PYC_FILES`` are compiled to bytecode using
-    ``py_compile`` and placed directly in the package directory as
-    ``module.pyc`` (NOT in ``__pycache__/``).
+    Maya's ``mayapy`` interpreter so the magic number matches Maya's
+    Python version.  The ``.pyc`` files are placed directly in the
+    package directory as ``module.pyc`` (NOT in ``__pycache__/``).
 
     Python's ``SourcelessFileLoader`` looks for ``.pyc`` files in the
     package directory itself.  The ``__pycache__/`` mechanism is only
@@ -390,12 +391,16 @@ def compile_pyc_files():
     For sourceless distribution (no .py present), the ``.pyc`` must
     live next to the ``__init__.py`` so ``FileFinder`` can discover it.
 
+    Using ``mayapy`` is critical: if the build host runs a different
+    Python version than Maya, ``py_compile`` would produce ``.pyc``
+    files with a mismatched magic number, causing "bad magic number"
+    errors when Maya tries to load the modules.
+
+    :param str mayapy: Path to Maya's Python interpreter.
     :return: Set of relative paths that were compiled (for logging).
     :rtype: set
     """
-    import py_compile
-
-    print("\n--- Compiling .pyc fallback files ---")
+    print("\n--- Compiling .pyc fallback files (using mayapy) ---")
 
     compiled = set()
     for rel_path in DIST_PYC_FILES:
@@ -415,8 +420,18 @@ def compile_pyc_files():
 
         dest_pyc = os.path.join(dest_dir, pyc_name)
 
-        # Compile the .py to .pyc at the destination path.
-        py_compile.compile(src_path, cfile=dest_pyc, doraise=True)
+        # Use mayapy to compile so the .pyc magic number matches Maya's
+        # Python version, not the build host's Python version.
+        result = subprocess.run(
+            [mayapy, "-c",
+             "import py_compile; py_compile.compile(r'{}', cfile=r'{}', doraise=True)".format(
+                 src_path, dest_pyc)],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print("  ERROR compiling {}: {}".format(rel_path, result.stderr.strip()))
+            continue
+
         compiled.add(rel_path)
         print("  Compiled: {} -> {}".format(
             rel_path, os.path.relpath(dest_pyc, DIST_DIR)
@@ -617,7 +632,8 @@ def main():
     create_dist_structure()
 
     # Step 6: Compile .pyc fallback files for Qt widget subclasses.
-    compile_pyc_files()
+    # Must use mayapy so the .pyc magic number matches Maya's Python.
+    compile_pyc_files(mayapy)
 
     # Step 7: Copy resource files (icons, images).
     copy_resources()

@@ -4049,7 +4049,7 @@ class MCAEditorPanel(QWidget):
         done, total = self._symbol_index.get_progress()
 
         if state == "indexing" and total > 0:
-            # Show percentage progress during indexing.
+            # Show percentage progress during indexing on the status bar.
             pct = int(done * 100 / total)
             self._show_status("Indexing symbols... {}%".format(pct))
 

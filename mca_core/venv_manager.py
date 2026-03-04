@@ -98,13 +98,19 @@ def get_venv_python():
     venv_dir = get_venv_dir()
 
     if platform.system() == "Windows":
-        python = os.path.join(venv_dir, "Scripts", "python.exe")
+        # Check for python.exe first, then mayapy.exe — Maya's venv module
+        # names the venv executable after the source interpreter (mayapy.exe)
+        # instead of the standard python.exe.
+        for exe_name in ("python.exe", "mayapy.exe"):
+            candidate = os.path.join(venv_dir, "Scripts", exe_name)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
     else:
         python = os.path.join(venv_dir, "bin", "python")
-
-    if os.path.isfile(python):
-        return python
-    return None
+        if os.path.isfile(python):
+            return python
+        return None
 
 
 def get_venv_site_packages():
@@ -173,9 +179,25 @@ def ensure_venv():
     # Make sure the parent directory exists.
     os.makedirs(_PREFS_DIR, exist_ok=True)
 
+    # Determine the best Python executable for venv creation.
+    # Inside Maya, sys.executable is "maya.exe" which doesn't support
+    # "-m venv" (it shows Maya's command-line help instead).  We need
+    # "mayapy.exe" which is the real Python interpreter in Maya's bin dir.
+    python_exe = sys.executable
+    exe_name = os.path.basename(python_exe).lower()
+    if exe_name.startswith("maya") and not exe_name.startswith("mayapy"):
+        # Running inside Maya — swap to mayapy in the same directory.
+        mayapy = os.path.join(os.path.dirname(python_exe), "mayapy.exe")
+        if os.path.isfile(mayapy):
+            python_exe = mayapy
+            logger.debug("Using mayapy for venv creation: %s", mayapy)
+
+    # Create the venv without pip first — ensurepip often fails when the
+    # venv executable is named mayapy.exe (Maya's Python interpreter).
+    # We'll bootstrap pip separately after fixing the executable name.
     try:
         subprocess.run(
-            [sys.executable, "-m", "venv", venv_dir],
+            [python_exe, "-m", "venv", "--without-pip", venv_dir],
             check=True,
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
@@ -195,10 +217,51 @@ def ensure_venv():
         logger.warning("Venv creation OS error: %s", exc)
         return False
 
+    # Maya's venv module names the venv executable "mayapy.exe" instead of
+    # "python.exe".  Copy it to "python.exe" so pip, ensurepip, and all
+    # standard tooling works correctly inside the venv.
+    if platform.system() == "Windows":
+        import shutil
+        scripts_dir = os.path.join(venv_dir, "Scripts")
+        mayapy_in_venv = os.path.join(scripts_dir, "mayapy.exe")
+        python_in_venv = os.path.join(scripts_dir, "python.exe")
+        if os.path.isfile(mayapy_in_venv) and not os.path.isfile(python_in_venv):
+            shutil.copy2(mayapy_in_venv, python_in_venv)
+            logger.debug("Copied mayapy.exe -> python.exe in venv Scripts/")
+
     # Verify the venv Python exists after creation.
-    if not os.path.isfile(get_venv_python()):
+    venv_python = get_venv_python()
+    if venv_python is None or not os.path.isfile(venv_python):
         logger.warning("Venv created but Python not found at expected path")
         return False
+
+    # Bootstrap pip into the venv using the *host* interpreter (not the
+    # venv copy) to avoid issues with Maya-named executables.
+    try:
+        subprocess.run(
+            [python_exe, "-m", "ensurepip", "--upgrade",
+             "--default-pip", "--root", venv_dir],
+            check=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "VIRTUAL_ENV": venv_dir},
+        )
+        logger.debug("Pip bootstrapped via host interpreter.")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # Fallback: try ensurepip from inside the venv itself.
+        try:
+            subprocess.run(
+                [venv_python, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                check=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            logger.debug("Pip bootstrapped via venv interpreter.")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("ensurepip failed — pip install will be unavailable: %s", exc)
+            # Continue anyway — the venv itself is valid, just pip-less.
 
     logger.info("Venv created successfully.")
     return True
