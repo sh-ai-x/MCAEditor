@@ -78,7 +78,6 @@ class AdapterManager:
     def _register_builtin_adapters(self):
         """Register all built-in DCC adapters (Maya-only for now)."""
         self._adapters[DCCType.MAYA] = MayaAdapter()
-        # Future: self._adapters[DCCType.BLENDER] = BlenderAdapter()
         logger.debug("Registered built-in adapter: Maya")
 
     # --- Connection Callbacks ------------------------------------------------

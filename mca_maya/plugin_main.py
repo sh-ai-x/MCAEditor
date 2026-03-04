@@ -275,8 +275,11 @@ def initializePlugin(plugin):
         # unchecks "Auto load" in the Plug-in Manager, our userSetup.py
         # will NOT reload the plugin on next launch.
         import os
+        # Derive the Maya version dynamically so this works across
+        # Maya 2024, 2025, 2026, etc. without hardcoding.
+        maya_version = cmds.about(version=True)
         scripts_dir = os.path.join(
-            os.path.expanduser("~"), "Documents", "maya", "2025", "scripts"
+            os.path.expanduser("~"), "Documents", "maya", maya_version, "scripts"
         )
         setup_path = os.path.join(scripts_dir, "userSetup.py")
 

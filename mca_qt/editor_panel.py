@@ -23,6 +23,7 @@ Dependencies:
 import importlib
 import io
 import os
+import re
 import sys
 import logging
 import traceback
@@ -38,6 +39,7 @@ from mca_qt.qt_compat import (
 )
 
 from mca_core import __version__ as _APP_VERSION
+from mca_qt.constants import SKIP_DIRS, MAX_WALK_DEPTH
 from mca_core.config.settings import MCASettings
 from mca_core.config.color_scheme import build_scheme_dict
 from mca_core.project import (
@@ -110,6 +112,10 @@ class MCAEditorPanel(QWidget):
     # Args: (error_count, warning_count)
     output_counts_changed = Signal(int, int)
 
+    # Signal emitted when the symbol index status changes.
+    # Args: (status_text) — e.g. "Indexing 45%", "Indexed 120 files", or ""
+    index_status_changed = Signal(str)
+
     # Signal emitted when the user toggles the activity bar (bottom status bar).
     activity_bar_toggled = Signal()
 
@@ -128,8 +134,6 @@ class MCAEditorPanel(QWidget):
         # When embedded, the DCC menu and toolbar indicator are hidden
         # since the host already provides direct execution access.
         self._embedded_in_dcc = adapter_manager is not None
-        # NOTE: _editors list is no longer maintained here — editors are
-        # tracked inside EditorGroupContainer -> EditorGroup instances.
         self._active_project = None  # MCAProject instance or None.
         self._closed_files = []  # Track recently closed files for reopen feature.
         # Restore saved font size (falls back to 12 if never changed).
@@ -547,14 +551,16 @@ class MCAEditorPanel(QWidget):
         self._load_action.setVisible(False)
         self._toolbar.addAction(self._load_action)
 
-        self._refresh_action = QAction("Refresh", self)
-        self._refresh_action.setToolTip("Re-read project file and refresh paths")
-        self._refresh_action.triggered.connect(self._on_refresh_project)
-        self._refresh_action.setVisible(False)
-        self._toolbar.addAction(self._refresh_action)
+        self._reload_scripts_action = QAction("Reload Scripts", self)
+        self._reload_scripts_action.setToolTip(
+            "Re-import all open Python modules in Maya (use after external edits)")
+        self._reload_scripts_action.triggered.connect(self._on_reload_scripts)
+        self._reload_scripts_action.setVisible(False)
+        self._toolbar.addAction(self._reload_scripts_action)
 
-        self._reload_action = QAction("Reload", self)
-        self._reload_action.setToolTip("Close and re-open the current project (runs shutdown then startup)")
+        self._reload_action = QAction("Reload Project", self)
+        self._reload_action.setToolTip(
+            "Close and re-open the project environment (runs shutdown, then startup scripts)")
         self._reload_action.triggered.connect(self._on_reload_project)
         self._reload_action.setVisible(False)
         self._toolbar.addAction(self._reload_action)
@@ -1089,6 +1095,10 @@ class MCAEditorPanel(QWidget):
 
         menu.addSeparator()
 
+        # Refresh re-reads the .mca-project file and re-injects paths.
+        refresh_action = menu.addAction("Refresh Project", self._on_refresh_project)
+        refresh_action.setEnabled(self._active_project is not None)
+
         settings_action = menu.addAction("Project Settings...", self._show_project_settings)
         settings_action.setEnabled(self._active_project is not None)
 
@@ -1218,7 +1228,7 @@ class MCAEditorPanel(QWidget):
             # Reset UI elements.
             self._project_button.setText("No Project")
             self._load_action.setVisible(False)
-            self._refresh_action.setVisible(False)
+            self._reload_scripts_action.setVisible(False)
             self._reload_action.setVisible(False)
             self._shutdown_action.setVisible(False)
 
@@ -1239,7 +1249,6 @@ class MCAEditorPanel(QWidget):
             self._output.write_info("Closed project: {}".format(project_name))
 
         except Exception as exc:
-            print("[_close_project] EXCEPTION: {}".format(exc))
             logger.error("Error during project close: %s", exc, exc_info=True)
             # Ensure the project reference is cleared even on error so
             # the editor doesn't stay in a half-closed state.
@@ -1250,8 +1259,8 @@ class MCAEditorPanel(QWidget):
         Apply the active project's settings to the UI.
 
         Unlocks the workspace tree to the project root, sets excluded
-        folders, updates the header and button text, shows the refresh
-        button, injects paths, and emits the mode_changed signal.
+        folders, updates the header and button text, shows project toolbar
+        buttons, injects paths, and emits the mode_changed signal.
         """
         project = self._active_project
         if not project:
@@ -1276,7 +1285,7 @@ class MCAEditorPanel(QWidget):
         # Update toolbar button and show project action buttons.
         self._project_button.setText(project.name)
         self._load_action.setVisible(True)
-        self._refresh_action.setVisible(True)
+        self._reload_scripts_action.setVisible(True)
         self._reload_action.setVisible(True)
         self._shutdown_action.setVisible(True)
 
@@ -1433,11 +1442,32 @@ class MCAEditorPanel(QWidget):
         self._output.write_info("Running project startup...")
         self._run_startup_script()
 
+    def _on_reload_scripts(self):
+        """
+        Reload all open Python modules so external edits are picked up.
+
+        Walks every open editor tab and forces a module reload for each
+        ``.py`` file, regardless of the project's auto-reload toggle.
+        Useful when files have been edited outside the editor (e.g. by
+        Claude or another tool) and the user wants Maya to pick up the
+        changes without re-saving each file.
+        """
+        reloaded = 0
+        for editor, name, path in self._group_container.all_editors():
+            if path and path.endswith(".py"):
+                self._auto_reload_module(path, force=True)
+                reloaded += 1
+
+        if reloaded:
+            self._output.write_info("Reloaded {} module(s)".format(reloaded))
+        else:
+            self._output.write_info("No open .py files to reload.")
+
     def _on_refresh_project(self):
         """
         Re-read the ``.mca-project`` file and re-inject paths.
 
-        Called when the user clicks the Refresh button.
+        Called from the MCA dropdown menu.
         """
         if not self._active_project:
             return
@@ -2912,7 +2942,7 @@ class MCAEditorPanel(QWidget):
 
         return None
 
-    def _auto_reload_module(self, filepath):
+    def _auto_reload_module(self, filepath, force=False):
         """
         Reload the Python module corresponding to *filepath* if it has
         already been imported, both locally and in the connected DCC.
@@ -2928,6 +2958,9 @@ class MCAEditorPanel(QWidget):
         Skips silently for non-.py files or temp buffers.
 
         :param str filepath: Absolute path to the saved .py file.
+        :param bool force: When True, skip the project/auto-reload
+            checks and reload unconditionally. Used by the "Reload
+            Scripts" toolbar button.
         """
         if not filepath or not filepath.endswith(".py"):
             return
@@ -2935,8 +2968,11 @@ class MCAEditorPanel(QWidget):
         # Auto-reload is a project-only feature.  In default mode (no
         # active project) we skip it entirely.  In project mode, respect
         # the project's toggle (which defaults to True / on).
-        if not self._active_project or not self._active_project.auto_reload_modules:
-            return
+        # When force=True, bypass these checks so the user can trigger
+        # reloads manually via the toolbar button.
+        if not force:
+            if not self._active_project or not self._active_project.auto_reload_modules:
+                return
 
         # Resolve the file path to a dotted module name.
         module_name = self._resolve_module_name(filepath)
@@ -3783,12 +3819,12 @@ class MCAEditorPanel(QWidget):
             group.apply_settings(s)
         # Output word wrap.
         output_wrap = s.get("output_word_wrap")
-        if hasattr(self._output, "_output"):
+        if hasattr(self._output, "set_line_wrap_mode"):
             wrap_mode = (
                 QPlainTextEdit.LineWrapMode.WidgetWidth if output_wrap
                 else QPlainTextEdit.LineWrapMode.NoWrap
             )
-            self._output._output.setLineWrapMode(wrap_mode)
+            self._output.set_line_wrap_mode(wrap_mode)
         logger.info("Settings applied to running editors")
 
     # --- View handlers ---
@@ -4035,6 +4071,9 @@ class MCAEditorPanel(QWidget):
             self._symbol_index.clear()
             self._symbol_index = None
 
+        # Clear the action bar indicator.
+        self.index_status_changed.emit("")
+
     def _poll_index_progress(self):
         """
         Called by the progress QTimer every 500 ms.
@@ -4052,6 +4091,7 @@ class MCAEditorPanel(QWidget):
             # Show percentage progress during indexing on the status bar.
             pct = int(done * 100 / total)
             self._show_status("Indexing symbols... {}%".format(pct))
+            self.index_status_changed.emit("Indexing {}%".format(pct))
 
         elif state == "ready":
             # Indexing is done — show final stats and stop the timer.
@@ -4060,6 +4100,10 @@ class MCAEditorPanel(QWidget):
             msg = "Indexed {} files ({} symbols)".format(file_count, sym_count)
             self._show_status(msg, duration_ms=10000)
             self._output.write_info(msg)
+            # Emit persistent index status for the action bar indicator.
+            self.index_status_changed.emit(
+                "Indexed {} files".format(file_count)
+            )
             if self._index_progress_timer is not None:
                 self._index_progress_timer.stop()
                 self._index_progress_timer = None
@@ -4097,12 +4141,11 @@ class MCAEditorPanel(QWidget):
         r"^\s*proc\s+\w*\s*{symbol}\b",
     ]
 
-    # Directories to skip during workspace scanning (matches quick_open.py).
-    _DECL_SKIP_DIRS = {
-        "__pycache__", ".git", ".venv", "venv", "node_modules",
-        ".mypy_cache", ".pytest_cache", ".tox", ".eggs", "dist",
-        "build", ".idea", ".vs", ".vscode",
-    }
+    # Directories to skip during workspace scanning (imported from constants).
+    _DECL_SKIP_DIRS = SKIP_DIRS
+
+    # Maximum directory depth for workspace scanning (imported from constants).
+    _DECL_MAX_DEPTH = MAX_WALK_DEPTH
 
     # Binary / non-text extensions to skip.
     _DECL_SKIP_EXTS = {
@@ -4110,8 +4153,6 @@ class MCAEditorPanel(QWidget):
         ".jpeg", ".gif", ".bmp", ".ico", ".ttf", ".otf", ".woff", ".woff2",
         ".zip", ".gz", ".tar", ".7z", ".rar", ".db", ".sqlite",
     }
-
-    _DECL_MAX_DEPTH = 5
 
     def _go_to_declaration(self):
         """
@@ -4132,7 +4173,6 @@ class MCAEditorPanel(QWidget):
         # Get the word under the cursor.  WordUnderCursor can sometimes
         # grab punctuation (e.g. "():" if the cursor is on parentheses),
         # so we validate the result is a valid identifier.
-        import re as _re
         cursor = editor.textCursor()
 
         # Save the original column BEFORE WordUnderCursor moves the
@@ -4144,7 +4184,7 @@ class MCAEditorPanel(QWidget):
 
         # If the selection isn't a clean identifier, try extracting one
         # from the line text at the original cursor position instead.
-        if not word or not _re.match(r'^[A-Za-z_]\w*$', word):
+        if not word or not re.match(r'^[A-Za-z_]\w*$', word):
             line_text = cursor.block().text()
             col = original_col
             # Walk backward to find the start of the identifier.
@@ -4157,7 +4197,7 @@ class MCAEditorPanel(QWidget):
                 end += 1
             word = line_text[start:end].strip()
 
-        if not word or not _re.match(r'^[A-Za-z_]\w*$', word):
+        if not word or not re.match(r'^[A-Za-z_]\w*$', word):
             self._show_status("No symbol under cursor")
             return
 
@@ -4217,7 +4257,6 @@ class MCAEditorPanel(QWidget):
         :return: True if the line defines the symbol.
         :rtype: bool
         """
-        import re
         for pat_template in self._DEFINITION_PATTERNS:
             pat = pat_template.format(symbol=re.escape(word))
             if re.search(pat, line_text):
@@ -4236,7 +4275,6 @@ class MCAEditorPanel(QWidget):
         :return: List of (filepath, line_number, line_text) tuples.
         :rtype: list
         """
-        import re
         # Build a combined regex matching any definition form.
         patterns = []
         for pat_template in self._DEFINITION_PATTERNS:
@@ -4258,7 +4296,6 @@ class MCAEditorPanel(QWidget):
         :return: List of (filepath, line_number, line_text) tuples.
         :rtype: list
         """
-        import re
         # Match the symbol as a whole word.
         usage_regex = re.compile(r"\b" + re.escape(symbol) + r"\b")
 
@@ -4289,7 +4326,6 @@ class MCAEditorPanel(QWidget):
         :return: List of (filepath, line_number, line_text) tuples.
         :rtype: list
         """
-        import os
         results = []
 
         for folder in folders:
@@ -4308,7 +4344,6 @@ class MCAEditorPanel(QWidget):
         :param re.Pattern regex: Compiled search regex.
         :param list results: Accumulator for (filepath, line_number, line_text) tuples.
         """
-        import os
         if depth > self._DECL_MAX_DEPTH:
             return
 
@@ -4396,14 +4431,29 @@ class MCAEditorPanel(QWidget):
         self._show_status("Verbosity: {}".format(level))
 
     def _toggle_line_numbers_in_errors(self, checked):
+        """
+        Toggle whether error output includes source line numbers.
+
+        :param bool checked: True to show line numbers, False to hide.
+        """
         self._settings.set("line_numbers_in_errors", checked)
         self._show_status("Line numbers in errors: {}".format("on" if checked else "off"))
 
     def _toggle_stack_trace(self, checked):
+        """
+        Toggle full stack trace display in the output panel.
+
+        :param bool checked: True to show full stack traces, False to hide.
+        """
         self._settings.set("show_stack_trace", checked)
         self._show_status("Stack trace: {}".format("on" if checked else "off"))
 
     def _toggle_suppress_stack(self, checked):
+        """
+        Toggle suppression of the Maya stack trace popup window.
+
+        :param bool checked: True to suppress the popup, False to allow.
+        """
         self._settings.set("suppress_stack_window", checked)
         self._show_status("Suppress stack window: {}".format("on" if checked else "off"))
 
@@ -4414,7 +4464,7 @@ class MCAEditorPanel(QWidget):
         )
         if filepath:
             try:
-                text = self._output._output.toPlainText()
+                text = self._output.get_plain_text()
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(text)
                 self._output.write_info("Output written to: {}".format(filepath))
@@ -4433,12 +4483,15 @@ class MCAEditorPanel(QWidget):
     # --- Help handlers ---
 
     def _open_mel_reference(self):
-        webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/CommandsPython/")
+        """Open the Autodesk MEL Command Reference in the default browser."""
+        webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/Commands/")
 
     def _open_python_reference(self):
+        """Open the Autodesk Maya Python Command Reference in the default browser."""
         webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/CommandsPython/")
 
     def _open_node_reference(self):
+        """Open the Autodesk Maya Node Reference in the default browser."""
         webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/Nodes/")
 
     def _show_licensing(self):
@@ -4448,6 +4501,7 @@ class MCAEditorPanel(QWidget):
         dialog.exec()
 
     def _show_about(self):
+        """Display the About dialog with version and feature info."""
         QMessageBox.about(
             self, "About MCA Editor",
             f"<h3>MCA Editor v{_APP_VERSION}</h3>"
@@ -4521,11 +4575,11 @@ class MCAEditorPanel(QWidget):
         Saves all temp buffer contents, the session manifest, and the
         output panel content so the editor can restore them on next launch.
         """
-        # Save every open tab to disk before shutting down.
-        # File-backed tabs (including buffers) write to their file_path.
-        # Legacy pathless buffers fall back to _save_buffer_content().
+        # Save modified file-backed tabs to disk before shutting down.
+        # Only writes tabs whose document has been modified to avoid
+        # permission errors on read-only files that were just viewed.
         for editor, name, path in self._group_container.all_editors():
-            if editor.file_path:
+            if editor.file_path and editor.document().isModified():
                 try:
                     with open(editor.file_path, "w", encoding="utf-8") as f:
                         f.write(editor.toPlainText())
@@ -4536,7 +4590,7 @@ class MCAEditorPanel(QWidget):
         self._save_session_manifest()
 
         # Persist the output panel content so it survives restarts.
-        output_text = self._output._output.toPlainText()
+        output_text = self._output.get_plain_text()
         if output_text.strip():
             self._session_manager.save_output(output_text)
 

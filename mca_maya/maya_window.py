@@ -21,6 +21,9 @@ Dependencies:
 """
 
 import logging
+import struct
+import sys
+import traceback
 
 import maya.cmds as cmds
 import maya.api.OpenMaya as om2
@@ -35,10 +38,7 @@ except ImportError:
     from PySide2.QtCore import QObject, QEvent
     from PySide2.QtWidgets import QApplication, QWidget as _QWidget
 
-import struct
-import sys
-
-from mca_qt.qt_compat import QWidget, QVBoxLayout, QHBoxLayout, QMenuBar, QLabel, QFrame, Qt, QKeySequence
+from mca_qt.qt_compat import QWidget, QVBoxLayout, QHBoxLayout, QMenuBar, QLabel, QFrame, QDialog, Qt, QTimer, QKeySequence
 from mca_qt.editor_panel import MCAEditorPanel
 from mca_qt.theme import GLOBAL_STYLESHEET
 from mca_core.config.settings import MCASettings
@@ -237,35 +237,39 @@ class _MayaHotkeyFilter(QObject):
         # it the active window, then setFocus() on the clicked child so
         # focus is transferred BEFORE any subsequent key events arrive.
         if event.type() == QEvent.Type.MouseButtonPress:
-            if isinstance(watched, _QWidget) and self._widget_in_editor(watched):
-                # Activate the top-level window first — setFocus() has
-                # no effect if the window isn't active (common when
-                # clicking from Maya's viewport into a docked panel).
-                top = self._target.window()
-                if top:
-                    top.activateWindow()
+            if isinstance(watched, _QWidget):
+                if self._widget_in_editor(watched):
+                    # Click inside our editor — claim keyboard ownership.
+                    # Activate the top-level window first — setFocus() has
+                    # no effect if the window isn't active (common when
+                    # clicking from Maya's viewport into a docked panel).
+                    top = self._target.window()
+                    if top:
+                        top.activateWindow()
 
-                # Find the appropriate focus target.
-                focus_target = watched
-                # Walk down to the actual focusable child if the clicked
-                # widget doesn't accept focus (e.g. a QFrame layout).
-                if focus_target.focusPolicy() == Qt.FocusPolicy.NoFocus:
-                    child = focus_target.focusProxy()
-                    if child:
-                        focus_target = child
-                    else:
-                        # No focus proxy — walk children for the first
-                        # widget that accepts focus (depth-first).
-                        for c in focus_target.findChildren(_QWidget):
-                            if c.focusPolicy() != Qt.FocusPolicy.NoFocus:
-                                focus_target = c
-                                break
+                    # Find the appropriate focus target.
+                    focus_target = watched
+                    # Walk down to the actual focusable child if the clicked
+                    # widget doesn't accept focus (e.g. a QFrame layout).
+                    if focus_target.focusPolicy() == Qt.FocusPolicy.NoFocus:
+                        child = focus_target.focusProxy()
+                        if child:
+                            focus_target = child
+                        else:
+                            # No focus proxy — walk children for the first
+                            # widget that accepts focus (depth-first).
+                            for c in focus_target.findChildren(_QWidget):
+                                if c.focusPolicy() != Qt.FocusPolicy.NoFocus:
+                                    focus_target = c
+                                    break
 
-                focus_target.setFocus(Qt.FocusReason.MouseFocusReason)
-                # Mark that we forced focus so Phase 1 treats the very
-                # next ShortcutOverride as ours even if focusWidget()
-                # hasn't updated yet.
-                self._focus_forced = True
+                    focus_target.setFocus(Qt.FocusReason.MouseFocusReason)
+                    # Mark that we own keyboard focus.  Only cleared by
+                    # an explicit click OUTSIDE our tree (below).
+                    self._focus_forced = True
+                else:
+                    # Click outside our editor — release keyboard ownership.
+                    self._focus_forced = False
 
         # --- Phase 1: Block Maya's hotkey system entirely ---
         if event.type() == QEvent.Type.ShortcutOverride:
@@ -420,6 +424,7 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._panel.mode_changed.connect(self._on_mode_changed)
         self._panel.status_message.connect(self._on_status_message)
         self._panel.output_counts_changed.connect(self._on_counts_changed)
+        self._panel.index_status_changed.connect(self._on_index_status)
         self._panel.activity_bar_toggled.connect(self._toggle_status_bar)
 
         # Install an application-level event filter to prevent Maya's
@@ -456,7 +461,6 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # output to grow exponentially with each editor open.
         #
         # Deferred via QTimer.singleShot(0) so the window paints first.
-        from mca_qt.qt_compat import QTimer
         QTimer.singleShot(0, self._load_maya_history)
 
         logger.info("MCA Maya Editor window initialized")
@@ -493,31 +497,28 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
     def _on_app_focus_changed(self, old, new):
         """
-        Manage the hotkey filter's ``_focus_forced`` flag on focus changes.
+        Reinforce the hotkey filter's ``_focus_forced`` flag on focus changes.
 
         Qt's ``QApplication.focusChanged`` signal fires whenever keyboard
-        focus moves between widgets.  We use it to track whether focus is
-        inside our editor tree:
+        focus moves between widgets.  When focus enters our editor tree,
+        we set ``_focus_forced = True`` so Phase 1 accepts ShortcutOverride
+        even if ``focusWidget()`` hasn't settled yet.
 
-        - **Enters our tree** → set ``_focus_forced = True`` so Phase 1
-          accepts ShortcutOverride even if ``focusWidget()`` hasn't
-          updated yet.
-        - **Leaves our tree** → clear the flag so we stop stealing
-          shortcuts from Maya.
+        We intentionally do NOT clear the flag here.  During Maya's
+        workspace control activation (especially on the very first click
+        into a docked panel), ``focusChanged`` fires multiple times with
+        transient intermediate widgets that are outside our tree.  Clearing
+        the flag on those transients caused the first-click hotkey leak
+        (Ctrl+C/S leaked to Maya on the initial interaction).
 
-        This replaces the old approach where Phase 1 consumed the flag
-        on every ShortcutOverride, which caused a first-press bug:
-        Ctrl+C in the output window leaked to Maya's ``cutCopyPaste.mel``
-        on the initial interaction.
+        The flag is only cleared by an explicit ``MouseButtonPress`` outside
+        our editor tree (handled in the event filter's Phase 0).
 
         :param QWidget old: The widget that lost focus (may be None).
         :param QWidget new: The widget that gained focus (may be None).
         """
         if new and self._hotkey_filter._widget_in_editor(new):
             self._hotkey_filter._focus_forced = True
-        elif new is not None:
-            # Focus moved to a widget outside our editor tree.
-            self._hotkey_filter._focus_forced = False
 
     # --- Maya Output Hook ---------------------------------------------------
 
@@ -753,6 +754,11 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._warning_label.setStyleSheet(label_style)
         bar_layout.addWidget(self._warning_label)
 
+        # Symbol index status indicator — shows indexing progress or final count.
+        self._index_label = QLabel("")
+        self._index_label.setStyleSheet(label_style)
+        bar_layout.addWidget(self._index_label)
+
         # Status message area (stretches to fill remaining space between
         # the left-side info labels and the right-side position/lang labels).
         self._status_message_label = QLabel("")
@@ -820,10 +826,15 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         :param str message: The status message text.
         :param int duration_ms: How long to display before clearing.
         """
-        self._status_message_label.setText(message)
-        # Auto-clear after the specified duration.
-        from mca_qt.qt_compat import QTimer
-        QTimer.singleShot(duration_ms, lambda: self._status_message_label.setText(""))
+        try:
+            self._status_message_label.setText(message)
+        except RuntimeError:
+            return
+        # Auto-clear after the specified duration.  Guard the lambda
+        # against the C++ label being deleted before the timer fires
+        # (happens when the editor is closed while a timer is pending).
+        label = self._status_message_label
+        QTimer.singleShot(duration_ms, lambda: _safe_clear_label(label))
 
     def _toggle_status_bar(self):
         """Toggle visibility of the bottom blue status bar."""
@@ -838,6 +849,14 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         """
         self._error_label.setText("\u2297 {}".format(errors))
         self._warning_label.setText("\u26a0 {}".format(warnings))
+
+    def _on_index_status(self, text):
+        """
+        Update the symbol index indicator in the action bar.
+
+        :param str text: Status text (e.g. "Indexing 45%", "Indexed 120 files", or "" to clear).
+        """
+        self._index_label.setText(text)
 
     # --- Status Callback (prints to Maya's output) --------------------------
 
@@ -888,6 +907,22 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         logger.info("MCA Maya Editor window closed")
 
 
+# --- Helpers ----------------------------------------------------------------
+
+def _safe_clear_label(label):
+    """
+    Clear a QLabel's text, silently ignoring if the C++ object is already deleted.
+
+    Used by QTimer.singleShot callbacks that may fire after the editor is closed.
+
+    :param QLabel label: The label to clear.
+    """
+    try:
+        label.setText("")
+    except RuntimeError:
+        pass
+
+
 # --- Command Port Setup -----------------------------------------------------
 
 def _open_command_ports_now():
@@ -935,11 +970,6 @@ def _ensure_command_ports():
     # Schedule a delayed retry.  This catches the common case where
     # _ensure_command_ports() is called during initializePlugin or
     # uiScript layout restore, before Maya's networking stack is up.
-    try:
-        from PySide6.QtCore import QTimer
-    except ImportError:
-        from PySide2.QtCore import QTimer
-
     def _retry():
         """Delayed retry for command port opening."""
         if not _open_command_ports_now():
@@ -1026,12 +1056,8 @@ def show_mca_editor():
     if license_status["needs_key"]:
         # Trial expired, no valid key — must enter one to proceed.
         dialog = LicenseDialog(_license_settings)
-        try:
-            from PySide6.QtWidgets import QDialog as _QDialog
-        except ImportError:
-            from PySide2.QtWidgets import QDialog as _QDialog
 
-        if dialog.exec() != _QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             # User cancelled — don't open the editor, but don't kill Maya.
             logger.info("License dialog cancelled — editor not opened")
             return
@@ -1058,8 +1084,7 @@ def show_mca_editor():
         _mca_editor_window = MCAMayaWindow()
     except Exception as exc:
         om2.MGlobal.displayError("MCA Editor failed to create window: {}".format(exc))
-        import traceback
-        traceback.print_exc()
+        logger.exception("MCA Editor failed to create window")
         return
 
     # Show as a dockable workspace control with persistence.
@@ -1077,8 +1102,7 @@ def show_mca_editor():
         )
     except Exception as exc:
         om2.MGlobal.displayError("MCA Editor failed to show window: {}".format(exc))
-        import traceback
-        traceback.print_exc()
+        logger.exception("MCA Editor failed to show window")
         return
 
     # Record that the editor is now open so it auto-opens on next Maya launch.

@@ -37,6 +37,7 @@ Side effects:
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import sys
 
@@ -221,7 +222,6 @@ def ensure_venv():
     # "python.exe".  Copy it to "python.exe" so pip, ensurepip, and all
     # standard tooling works correctly inside the venv.
     if platform.system() == "Windows":
-        import shutil
         scripts_dir = os.path.join(venv_dir, "Scripts")
         mayapy_in_venv = os.path.join(scripts_dir, "mayapy.exe")
         python_in_venv = os.path.join(scripts_dir, "python.exe")
@@ -334,22 +334,6 @@ def ensure_packages(package_map=None):
         return False
 
 
-def is_package_available(import_name):
-    """
-    Quick check whether a package is installed in the venv.
-
-    Checks for the package directory, single-file module, or compiled
-    extension in the venv's site-packages.  Does NOT actually import
-    the package (avoids side effects).
-
-    :param str import_name: The importable module name (e.g. ``"winpty"``,
-        ``"pyflakes"``).
-    :return: *True* if the package appears to be installed.
-    :rtype: bool
-    """
-    return _is_installed_locally(import_name)
-
-
 # --- sys.path Injection ------------------------------------------------------
 
 def inject_venv_path():
@@ -384,43 +368,6 @@ def inject_venv_path():
     logger.info("Injected venv site-packages into sys.path: %s", site_pkg)
 
     return site_pkg
-
-
-# --- Repair / Recreation -----------------------------------------------------
-
-def recreate_venv():
-    """
-    Delete and recreate the managed venv from scratch.
-
-    Use this to repair a corrupted environment (e.g. Python version
-    upgrade broke compiled extensions).  After recreation the packages
-    are reinstalled and the path is re-injected.
-
-    :return: *True* if the fresh venv is ready, *False* on failure.
-    :rtype: bool
-    """
-    import shutil
-
-    venv_dir = get_venv_dir()
-
-    # Remove existing venv directory.
-    if os.path.isdir(venv_dir):
-        logger.info("Removing existing venv at %s ...", venv_dir)
-        try:
-            shutil.rmtree(venv_dir)
-        except OSError as exc:
-            logger.warning("Failed to remove venv: %s", exc)
-            return False
-
-    # Rebuild: create venv, install packages, re-inject path.
-    if not ensure_venv():
-        return False
-    if not ensure_packages():
-        return False
-    if not inject_venv_path():
-        return False
-
-    return True
 
 
 # --- Internal Helpers ---------------------------------------------------------

@@ -185,7 +185,6 @@ def collect_extensions():
         )
         extensions.append(ext)
 
-    from Cython.Build import cythonize
     return cythonize(
         extensions,
         compiler_directives={

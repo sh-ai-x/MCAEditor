@@ -250,17 +250,6 @@ class SymbolIndex:
         with self._lock:
             return self._progress
 
-    def get_all_symbols(self):
-        """
-        Return a sorted list of all indexed symbol names.
-
-        Useful for future autocomplete features.
-
-        :rtype: list[str]
-        """
-        with self._lock:
-            return sorted(self._symbols_by_name.keys())
-
     def get_symbol_count(self):
         """
         Return the total number of indexed symbol entries.

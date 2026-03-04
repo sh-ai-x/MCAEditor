@@ -194,7 +194,7 @@ class MayaAdapter(DCCAdapter):
 
             # Parse version — take just the last non-empty line to avoid
             # any command-port echo noise in the response.
-            version_lines = [l.strip() for l in result.strip().splitlines() if l.strip()]
+            version_lines = [line.strip() for line in result.strip().splitlines() if line.strip()]
             version = version_lines[-1] if version_lines else result.strip()
 
             # Also verify the Python port is reachable.

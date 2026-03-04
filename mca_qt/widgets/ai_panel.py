@@ -98,9 +98,6 @@ class AIPanel(QWidget):
     :param QWidget parent: Optional parent widget.
     """
 
-    # Emitted when AI generates code that should be inserted/executed.
-    execute_code_requested = Signal(str)
-
     def __init__(self, settings, parent=None):
         """
         Initialize the AI panel.
@@ -112,7 +109,6 @@ class AIPanel(QWidget):
         self._settings = settings
         self._messages = []
         self._connected = False
-        self._context = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -370,19 +366,9 @@ class AIPanel(QWidget):
         """)
         input_layout.addWidget(self._chat_input)
 
-        # Button row: Insert Code + Send.
+        # Button row: Send.
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
-
-        self._insert_btn = QPushButton("Insert Code")
-        self._insert_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #569cd6; border: 1px solid #569cd6;
-                border-radius: 3px; padding: 3px 8px; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #264f78; }
-        """)
-        btn_row.addWidget(self._insert_btn)
 
         btn_row.addStretch()
 
@@ -505,18 +491,3 @@ class AIPanel(QWidget):
             self._chat_scroll.verticalScrollBar().maximum()
         ))
 
-    # --- Context Update ------------------------------------------------------
-
-    def set_context(self, code="", output="", scene_info=None):
-        """
-        Update the context that will be sent with AI requests.
-
-        :param str code: Current editor content.
-        :param str output: Recent output window content.
-        :param dict scene_info: DCC scene metadata.
-        """
-        self._context = {
-            "code": code,
-            "output": output,
-            "scene_info": scene_info or {},
-        }

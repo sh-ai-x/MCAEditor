@@ -21,24 +21,12 @@ import logging
 from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QCheckBox, QComboBox, QLabel, QTreeWidget, QTreeWidgetItem,
-    Qt, Signal, QThread, QApplication,
+    Qt, Signal, QThread,
 )
+from mca_qt.constants import SKIP_DIRS as _SKIP_DIRS, MAX_WALK_DEPTH as _MAX_DEPTH
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
-
-
-# --- Shared Skip Rules -------------------------------------------------------
-
-# Directories to skip during recursive file search (matches quick_open.py).
-_SKIP_DIRS = {
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    ".mypy_cache", ".pytest_cache", ".tox", ".eggs", "dist",
-    "build", ".idea", ".vs", ".vscode",
-}
-
-# Maximum directory depth for recursive scanning.
-_MAX_DEPTH = 5
 
 # Binary / non-text extensions to skip entirely.
 _SKIP_EXTENSIONS = {

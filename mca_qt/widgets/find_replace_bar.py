@@ -19,7 +19,7 @@ import logging
 
 from mca_qt.qt_compat import (
     QWidget, QHBoxLayout, QVBoxLayout, QLineEdit, QPushButton, QLabel,
-    Qt, Signal, QTimer, QColor, QTextCursor, QTextEdit, QTextCharFormat,
+    Qt, Signal, QTimer, QColor, QTextCursor, QTextEdit,
     QEvent,
 )
 

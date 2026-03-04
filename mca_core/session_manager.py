@@ -26,9 +26,10 @@ Side effects:
 
 import glob
 import json
-import os
 import logging
+import os
 import shutil
+import sys
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -339,8 +340,6 @@ class SessionManager:
         :return: The scripts directory path (for use as a workspace root).
         :rtype: str
         """
-        import sys
-
         os.makedirs(self._scripts_dir, exist_ok=True)
         os.makedirs(self._site_packages_dir, exist_ok=True)
 
@@ -353,38 +352,6 @@ class SessionManager:
         return self._scripts_dir
 
     # --- Session Manifest I/O ------------------------------------------------
-
-    def save_manifest(self, tabs, active_tab_index):
-        """
-        Write the session manifest to disk.
-
-        The manifest records the complete tab state so the editor can
-        restore the exact layout on next launch.
-
-        :param list tabs: List of tab dicts. Each dict has:
-            - ``type`` (str): "buffer" or "file"
-            - ``language`` (str): Language identifier
-            - ``title`` (str): Tab display name
-            - ``buffer_file`` (str, optional): Buffer filename for temp tabs
-            - ``file_path`` (str, optional): Absolute path for file-backed tabs
-        :param int active_tab_index: Index of the currently active tab.
-        """
-        self._ensure_dirs()
-        manifest_path = os.path.join(self._prefs_dir, "session.json")
-
-        manifest = {
-            "version": self.MANIFEST_VERSION,
-            "next_buffer_id": self._next_buffer_id,
-            "tabs": tabs,
-            "active_tab": active_tab_index,
-        }
-
-        try:
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, indent=4)
-            logger.debug("Saved session manifest: %d tabs", len(tabs))
-        except Exception as exc:
-            logger.error("Failed to save session manifest: %s", exc)
 
     def load_manifest(self):
         """
@@ -423,38 +390,6 @@ class SessionManager:
         except Exception as exc:
             logger.error("Failed to load session manifest: %s", exc)
             return None
-
-    def save_manifest_v2(self, groups_data, active_group_index, splitter_sizes):
-        """
-        Write a v2 grouped session manifest to disk.
-
-        :param list groups_data: List of group dicts, each containing:
-            - ``tabs`` (list): Tab dicts for this group
-            - ``active_tab`` (int): Active tab index within the group
-        :param int active_group_index: Index of the active group.
-        :param list splitter_sizes: Splitter sizes for group layout.
-        """
-        self._ensure_dirs()
-        manifest_path = os.path.join(self._prefs_dir, "session.json")
-
-        # Count total tabs across all groups.
-        total_tabs = sum(len(g.get("tabs", [])) for g in groups_data)
-
-        manifest = {
-            "version": self.MANIFEST_VERSION,
-            "next_buffer_id": self._next_buffer_id,
-            "groups": groups_data,
-            "active_group": active_group_index,
-            "group_splitter_sizes": splitter_sizes,
-        }
-
-        try:
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, indent=4)
-            logger.debug("Saved v2 session manifest: %d group(s), %d tabs",
-                         len(groups_data), total_tabs)
-        except Exception as exc:
-            logger.error("Failed to save session manifest: %s", exc)
 
     def save_manifest_v3(self, layout_tree, active_group_index):
         """

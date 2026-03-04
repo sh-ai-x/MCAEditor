@@ -27,6 +27,7 @@ from mca_qt.qt_compat import (
     QDrag, QMimeData, QByteArray, QPixmap, QColor, QPainter,
 )
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
+from mca_qt.widgets.drag_tab_manager import MCA_TAB_MIME_TYPE
 from mca_core.config.color_scheme import build_scheme_dict
 
 # Module-level logger.
@@ -35,9 +36,6 @@ logger = logging.getLogger(__name__)
 # Distance in pixels the cursor must travel outside the tab bar
 # vertically before initiating a QDrag operation.
 DRAG_OUT_THRESHOLD = 20
-
-# MIME type for tab drag payloads (shared with drag_tab_manager).
-MCA_TAB_MIME_TYPE = "application/x-mca-editor-tab"
 
 
 # =============================================================================

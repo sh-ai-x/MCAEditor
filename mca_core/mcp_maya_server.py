@@ -41,8 +41,6 @@ import logging
 import os
 import pprint as pprint_mod
 import socket
-import sys
-import traceback
 from itertools import chain
 from typing import get_origin
 

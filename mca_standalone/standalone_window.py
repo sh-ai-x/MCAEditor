@@ -17,7 +17,7 @@ import struct
 import sys
 
 from mca_qt.qt_compat import (
-    QMainWindow, QStatusBar, QLabel, QMessageBox, QVBoxLayout, QWidget,
+    QMainWindow, QStatusBar, QLabel, QMessageBox,
 )
 from mca_qt.editor_panel import MCAEditorPanel
 from mca_core.config.settings import MCASettings
@@ -68,9 +68,7 @@ class StandaloneWindow(QMainWindow):
         self._panel.language_changed.connect(self._on_language_changed)
         self._panel.mode_changed.connect(self._on_mode_changed)
         self._panel.output_counts_changed.connect(self._on_counts_changed)
-
-        # Also provide the direct callback for non-signal status messages.
-        self._panel.set_status_callback(self._status_callback)
+        self._panel.index_status_changed.connect(self._on_index_status)
 
         # Restore saved geometry if available.
         self._restore_geometry()
@@ -104,6 +102,11 @@ class StandaloneWindow(QMainWindow):
         self._warning_label.setStyleSheet(label_style)
         self._statusbar.addWidget(self._warning_label)
 
+        # Symbol index status indicator — shows indexing progress or final count.
+        self._index_label = QLabel("")
+        self._index_label.setStyleSheet(label_style)
+        self._statusbar.addWidget(self._index_label)
+
         # --- Right-aligned widgets (addPermanentWidget) ---
 
         # Cursor position display.
@@ -131,15 +134,6 @@ class StandaloneWindow(QMainWindow):
     def _on_status_message(self, message, duration_ms):
         """
         Show a status message in the status bar.
-
-        :param str message: The message text.
-        :param int duration_ms: Display duration in milliseconds.
-        """
-        self._statusbar.showMessage(message, duration_ms)
-
-    def _status_callback(self, message, duration_ms):
-        """
-        Direct callback for status messages (used by panel's set_status_callback).
 
         :param str message: The message text.
         :param int duration_ms: Display duration in milliseconds.
@@ -185,6 +179,14 @@ class StandaloneWindow(QMainWindow):
         """
         self._error_label.setText("\u2297 {}".format(errors))
         self._warning_label.setText("\u26a0 {}".format(warnings))
+
+    def _on_index_status(self, text):
+        """
+        Update the symbol index indicator in the status bar.
+
+        :param str text: Status text (e.g. "Indexing 45%", "Indexed 120 files", or "" to clear).
+        """
+        self._index_label.setText(text)
 
     # --- Geometry Save/Restore ----------------------------------------------
 

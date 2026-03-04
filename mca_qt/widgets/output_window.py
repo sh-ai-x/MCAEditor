@@ -814,6 +814,26 @@ class OutputWindow(QWidget):
         else:
             self._search_bar.show_bar()
 
+    def get_plain_text(self):
+        """
+        Return the full plain-text content of the output panel.
+
+        Public accessor so callers don't need to reach into
+        the private ``_output`` text edit.
+
+        :return: All text currently in the output panel.
+        :rtype: str
+        """
+        return self._output.toPlainText()
+
+    def set_line_wrap_mode(self, mode):
+        """
+        Set the line-wrap mode on the underlying text edit.
+
+        :param QPlainTextEdit.LineWrapMode mode: The wrap mode to apply.
+        """
+        self._output.setLineWrapMode(mode)
+
     def _make_format(self, hex_color):
         """
         Create a QTextCharFormat with the given foreground color.

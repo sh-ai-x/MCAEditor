@@ -18,13 +18,9 @@ Dependencies:
 
 import os
 import sys
-import shutil
 import logging
 
 from mca_core import __version__
-
-# Module-level logger.
-logger = logging.getLogger(__name__)
 
 # The .mod file content template. Maya reads this on startup to find
 # our package. The path placeholder is replaced with the actual install

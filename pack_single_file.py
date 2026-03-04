@@ -354,6 +354,10 @@ def pack(dist_dir, output_path):
 # ============================================================================
 
 def main():
+    """
+    CLI entry point: parse arguments, build the zip payload, and write the
+    single-file Maya plugin to disk.
+    """
     parser = argparse.ArgumentParser(
         description="Pack MCA Editor into a single mcaEditor.py file",
     )

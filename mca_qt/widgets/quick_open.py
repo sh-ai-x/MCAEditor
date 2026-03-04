@@ -365,15 +365,8 @@ class QuickOpenPopup(QDialog):
 # GoToFilePopup
 # =============================================================================
 
-# Directories to skip during recursive file discovery.
-_SKIP_DIRS = {
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    ".mypy_cache", ".pytest_cache", ".tox", ".eggs", "dist",
-    "build", ".idea", ".vs", ".vscode",
-}
-
-# Maximum directory depth for recursive scanning.
-_MAX_DEPTH = 5
+# Import shared skip rules and depth limit from the central constants module.
+from mca_qt.constants import SKIP_DIRS as _SKIP_DIRS, MAX_WALK_DEPTH as _MAX_DEPTH
 
 
 class GoToFilePopup(QuickOpenPopup):

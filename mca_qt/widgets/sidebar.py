@@ -24,6 +24,7 @@ from mca_qt.qt_compat import (
     QColor,
 )
 from mca_qt.icons import folder_closed, folder_open, python_logo, maya_logo, text_icon
+from mca_qt.constants import MAX_WALK_DEPTH
 
 # Module-level logger for sidebar operations.
 logger = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ FILE_ICONS = {
     ".md": "MD",
 }
 
-MAX_TREE_DEPTH = 5  # Maximum depth for recursive folder traversal
+# Maximum depth for recursive folder traversal (imported from constants).
+MAX_TREE_DEPTH = MAX_WALK_DEPTH
 
 
 # =============================================================================
@@ -1536,10 +1538,6 @@ class MCASidebar(QWidget):
         self._splitter.setSizes([300, 100, 200])
 
         layout.addWidget(self._splitter)
-
-    def set_simple_mode(self):
-        """Switch to simple mode - hide the workspace panel."""
-        self.workspace_panel.setVisible(False)
 
     def set_advanced_mode(self):
         """Switch to advanced mode - show the workspace panel."""

@@ -21,9 +21,9 @@ from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QListWidget,
     QStackedWidget, QGroupBox, QCheckBox, QSpinBox, QComboBox,
     QLabel, QLineEdit, QPushButton, QListWidgetItem, QFileDialog,
-    QAbstractItemView, QFontComboBox, QTextEdit, QPlainTextEdit,
+    QAbstractItemView, QFontComboBox, QPlainTextEdit,
     QTreeWidget, QTreeWidgetItem, QColorDialog,
-    Qt, QSize, Signal, QKeyCombination,
+    Qt, Signal, QKeyCombination,
     QFont, QFontDatabase, QKeySequence, QColor,
 )
 from mca_core.config.color_scheme import (
@@ -65,14 +65,14 @@ class ShortcutRecorderWidget(QLineEdit):
     Custom line edit that captures key combinations when focused.
 
     When the user presses a key combo (e.g. Ctrl+Shift+F), this widget
-    displays the human-readable string and emits ``shortcutRecorded``
+    displays the human-readable string and emits ``shortcut_recorded``
     with the corresponding QKeySequence.
 
     :param QWidget parent: Optional parent widget.
     """
 
     # Emitted when a valid shortcut is captured.
-    shortcutRecorded = Signal(QKeySequence)
+    shortcut_recorded = Signal(QKeySequence)
 
     def __init__(self, parent=None):
         """
@@ -116,7 +116,7 @@ class ShortcutRecorderWidget(QLineEdit):
         self.setText(seq.toString(QKeySequence.SequenceFormat.NativeText))
 
         # Let listeners know a shortcut was captured.
-        self.shortcutRecorded.emit(seq)
+        self.shortcut_recorded.emit(seq)
 
     def recorded_sequence(self):
         """
@@ -406,7 +406,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(QLabel("Press Shortcut Keys:"))
         press_row = QHBoxLayout()
         self._shortcut_recorder = ShortcutRecorderWidget()
-        self._shortcut_recorder.shortcutRecorded.connect(self._on_shortcut_recorded)
+        self._shortcut_recorder.shortcut_recorded.connect(self._on_shortcut_recorded)
         press_row.addWidget(self._shortcut_recorder, 1)
 
         self._assign_btn = QPushButton("Assign")
