@@ -356,6 +356,12 @@ def _server_thread_main(port):
     try:
         loop.run_until_complete(_run_server(port))
     except asyncio.CancelledError:
+        # Expected when server.close() cancels serve_forever().
+        pass
+    except RuntimeError:
+        # Expected during shutdown: loop.stop() fires before
+        # serve_forever() can process the server.close() cancellation,
+        # raising "Event loop stopped before Future completed".
         pass
     except Exception as exc:
         logger.error("EditorAPI server error: %s", exc)

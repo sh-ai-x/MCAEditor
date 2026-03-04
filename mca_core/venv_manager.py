@@ -67,6 +67,44 @@ REQUIRED_PACKAGES = {
 # Timeout (seconds) for subprocess calls to pip / venv creation.
 _SUBPROCESS_TIMEOUT = 120
 
+# Template for sitecustomize.py placed in the venv's site-packages.
+# Maya's compiled extensions (e.g. _ssl.pyd) depend on runtime DLLs
+# (libssl, libcrypto) that live in Maya's bin directory.  Python 3.8+
+# on Windows no longer searches PATH for DLLs — os.add_dll_directory()
+# is required.  This sitecustomize runs at interpreter startup and
+# registers Maya's bin so all compiled extensions can load.
+_SITECUSTOMIZE_SRC = '''\
+"""
+MCA Editor venv sitecustomize.
+
+Adds Maya's bin directory to the DLL search path so compiled extensions
+like _ssl.pyd can find their runtime dependencies (libssl, libcrypto).
+Python 3.8+ on Windows requires os.add_dll_directory() for this.
+"""
+import os
+
+
+def _add_maya_dll_dir():
+    """Read pyvenv.cfg and add Maya bin dir to DLL search path."""
+    # Navigate from site-packages up to the venv root:
+    # site-packages/ -> Lib/ -> .venv-X.Y/
+    _venv_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    _cfg = os.path.join(_venv_root, "pyvenv.cfg")
+    if not os.path.isfile(_cfg):
+        return
+    with open(_cfg) as _f:
+        for _line in _f:
+            if _line.startswith("home"):
+                _maya_bin = _line.split("=", 1)[1].strip()
+                if os.path.isdir(_maya_bin) and hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(_maya_bin)
+                return
+
+
+_add_maya_dll_dir()
+'''
+
 
 # --- Venv Location ------------------------------------------------------------
 
@@ -229,39 +267,30 @@ def ensure_venv():
             shutil.copy2(mayapy_in_venv, python_in_venv)
             logger.debug("Copied mayapy.exe -> python.exe in venv Scripts/")
 
+    # Apply Maya-specific fixes (stdlib junction, DLL copy, sitecustomize).
+    # Must happen before ensurepip since the venv Python needs these
+    # to locate the standard library and runtime DLLs.
+    _fix_maya_venv(venv_dir)
+
     # Verify the venv Python exists after creation.
     venv_python = get_venv_python()
     if venv_python is None or not os.path.isfile(venv_python):
         logger.warning("Venv created but Python not found at expected path")
         return False
 
-    # Bootstrap pip into the venv using the *host* interpreter (not the
-    # venv copy) to avoid issues with Maya-named executables.
+    # Bootstrap pip into the venv.
     try:
         subprocess.run(
-            [python_exe, "-m", "ensurepip", "--upgrade",
-             "--default-pip", "--root", venv_dir],
+            [venv_python, "-m", "ensurepip", "--upgrade", "--default-pip"],
             check=True,
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "VIRTUAL_ENV": venv_dir},
         )
-        logger.debug("Pip bootstrapped via host interpreter.")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        # Fallback: try ensurepip from inside the venv itself.
-        try:
-            subprocess.run(
-                [venv_python, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                check=True,
-                timeout=_SUBPROCESS_TIMEOUT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            logger.debug("Pip bootstrapped via venv interpreter.")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("ensurepip failed — pip install will be unavailable: %s", exc)
-            # Continue anyway — the venv itself is valid, just pip-less.
+        logger.debug("Pip bootstrapped successfully.")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("ensurepip failed — pip install will be unavailable: %s", exc)
+        # Continue anyway — the venv itself is valid, just pip-less.
 
     logger.info("Venv created successfully.")
     return True
@@ -309,6 +338,7 @@ def ensure_packages(package_map=None):
 
     logger.info("Installing missing packages: %s", ", ".join(missing))
 
+    # Try installing with the venv's own Python + pip.
     try:
         subprocess.run(
             [venv_python, "-m", "pip", "install", "--quiet"] + missing,
@@ -319,19 +349,12 @@ def ensure_packages(package_map=None):
         )
         logger.info("Package installation completed.")
         return True
-    except subprocess.CalledProcessError as exc:
-        logger.warning(
-            "pip install failed (exit %d): %s",
-            exc.returncode,
-            exc.stderr.decode(errors="replace").strip() if exc.stderr else "",
-        )
-        return False
-    except subprocess.TimeoutExpired:
-        logger.warning("pip install timed out after %ds.", _SUBPROCESS_TIMEOUT)
-        return False
-    except OSError as exc:
-        logger.warning("pip install OS error: %s", exc)
-        return False
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("pip install via venv failed: %s — trying host interpreter.", exc)
+
+    # Fallback: use the original host interpreter (e.g. mayapy from Maya's
+    # bin directory) with --target pointing to the venv's site-packages.
+    return _pip_install_via_host(missing)
 
 
 # --- sys.path Injection ------------------------------------------------------
@@ -426,6 +449,164 @@ def _is_installed_locally(import_name):
         pass
 
     return False
+
+
+def _get_pyvenv_home(venv_dir):
+    """
+    Parse the ``home`` directory from a venv's ``pyvenv.cfg``.
+
+    The ``home`` key points to the directory containing the Python
+    interpreter that was used to create the venv (e.g. Maya's bin dir).
+
+    :param str venv_dir: Path to the venv root.
+    :return: The ``home`` directory, or *None* if not found.
+    :rtype: str or None
+    """
+    cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
+    if not os.path.isfile(cfg_path):
+        return None
+    with open(cfg_path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("home"):
+                _, _, value = line.partition("=")
+                return value.strip()
+    return None
+
+
+def _fix_maya_venv(venv_dir):
+    """
+    Apply Windows-specific fixes for venvs created from Maya's Python.
+
+    Maya's ``mayapy.exe`` resolves ``PYTHONHOME`` to ``<exe_dir>/../Python/``
+    using hardcoded relative path logic.  When the executable is copied into
+    a venv's ``Scripts/`` directory, this resolves to a nonexistent path and
+    Python cannot find the standard library (``encodings``, ``os``, etc.).
+
+    This function applies three fixes:
+
+    1. **Directory junction** — Creates ``<venv>/Python`` → ``<maya>/Python``
+       so the hardcoded relative path resolves to Maya's real stdlib.
+    2. **DLL copy** — Copies ``pythonXY.dll`` into ``Scripts/`` so the
+       copied executable can find the Python runtime DLL.
+    3. **sitecustomize.py** — Adds ``os.add_dll_directory()`` for Maya's
+       ``bin/`` so compiled extensions like ``_ssl.pyd`` can find their
+       runtime dependencies (``libssl``, ``libcrypto``).
+
+    Does nothing on non-Windows platforms or for non-Maya venvs.
+
+    :param str venv_dir: Path to the venv root directory.
+    """
+    # Only needed on Windows — macOS/Linux venvs use symlinks properly.
+    if platform.system() != "Windows":
+        return
+
+    # Check if this venv was created from Maya's Python.
+    maya_bin = _get_pyvenv_home(venv_dir)
+    if maya_bin is None:
+        return
+    if not os.path.isfile(os.path.join(maya_bin, "mayapy.exe")):
+        # Not a Maya venv — standard Python venvs work fine.
+        return
+
+    maya_root = os.path.dirname(maya_bin)
+    maya_python_dir = os.path.join(maya_root, "Python")
+    if not os.path.isdir(maya_python_dir):
+        logger.warning("Maya Python directory not found: %s", maya_python_dir)
+        return
+
+    scripts_dir = os.path.join(venv_dir, "Scripts")
+
+    # --- Fix 1: Create directory junction for stdlib ---
+    # mayapy.exe resolves PYTHONHOME to <exe>/../Python/ — create a
+    # junction so that path leads to Maya's actual Python directory.
+    # Normalize paths to native backslashes — mklink fails with forward slashes.
+    venv_python_dir = os.path.normpath(os.path.join(venv_dir, "Python"))
+    maya_python_dir = os.path.normpath(maya_python_dir)
+    if not os.path.exists(venv_python_dir):
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", venv_python_dir, maya_python_dir],
+                check=True,
+                capture_output=True,
+            )
+            logger.debug("Created junction: %s -> %s", venv_python_dir, maya_python_dir)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.warning("Failed to create stdlib junction: %s", exc)
+            return
+
+    # --- Fix 2: Copy the Python runtime DLL ---
+    # The copied mayapy.exe dynamically links to pythonXY.dll which
+    # lives in Maya's bin/ — it won't be found from the venv location.
+    scripts_dir = os.path.normpath(scripts_dir)
+    dll_name = "python{}{}.dll".format(sys.version_info.major, sys.version_info.minor)
+    src_dll = os.path.normpath(os.path.join(maya_bin, dll_name))
+    dst_dll = os.path.normpath(os.path.join(scripts_dir, dll_name))
+    if os.path.isfile(src_dll) and not os.path.isfile(dst_dll):
+        shutil.copy2(src_dll, dst_dll)
+        logger.debug("Copied %s to venv Scripts/", dll_name)
+
+    # --- Fix 3: Create sitecustomize.py for DLL loading ---
+    # Compiled extensions like _ssl.pyd depend on DLLs (libssl, libcrypto)
+    # in Maya's bin/.  sitecustomize.py runs at interpreter startup and
+    # registers Maya's bin via os.add_dll_directory().
+    site_pkg_dir = os.path.join(venv_dir, "Lib", "site-packages")
+    os.makedirs(site_pkg_dir, exist_ok=True)
+    sitecustomize_path = os.path.join(site_pkg_dir, "sitecustomize.py")
+    if not os.path.isfile(sitecustomize_path):
+        with open(sitecustomize_path, "w", encoding="utf-8") as f:
+            f.write(_SITECUSTOMIZE_SRC)
+        logger.debug("Created sitecustomize.py for Maya DLL loading.")
+
+
+def _pip_install_via_host(missing):
+    """
+    Fall back to using the original host interpreter for pip install.
+
+    When the venv's Python cannot run pip (e.g. missing DLLs or broken
+    ensurepip), this uses the original interpreter from Maya's bin
+    directory with ``--target`` pointing to the venv's site-packages.
+
+    :param list missing: List of pip requirement specifiers to install.
+    :return: *True* if installation succeeded, *False* otherwise.
+    :rtype: bool
+    """
+    venv_dir = get_venv_dir()
+    maya_bin = _get_pyvenv_home(venv_dir)
+    if maya_bin is None:
+        logger.warning("Cannot determine host interpreter for fallback pip install.")
+        return False
+
+    # Try mayapy first, then plain python — whichever exists in home.
+    host_python = None
+    for exe_name in ("mayapy.exe", "python.exe", "python"):
+        candidate = os.path.join(maya_bin, exe_name)
+        if os.path.isfile(candidate):
+            host_python = candidate
+            break
+
+    if host_python is None:
+        logger.warning("No host Python found in %s for fallback pip install.", maya_bin)
+        return False
+
+    site_pkg = get_venv_site_packages()
+    if site_pkg is None:
+        logger.warning("Venv site-packages not found for fallback pip install.")
+        return False
+
+    logger.info("Falling back to host interpreter for pip: %s", host_python)
+    try:
+        subprocess.run(
+            [host_python, "-m", "pip", "install", "--target", site_pkg, "--quiet"] + missing,
+            check=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        logger.info("Package installation completed via host interpreter.")
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Fallback pip install also failed: %s", exc)
+        return False
 
 
 # --- Convenience: Full Setup --------------------------------------------------
