@@ -67,6 +67,11 @@ REQUIRED_PACKAGES = {
 # Timeout (seconds) for subprocess calls to pip / venv creation.
 _SUBPROCESS_TIMEOUT = 120
 
+# Suppress CMD window popups on Windows.  Every subprocess.run() call
+# flashes a visible console window unless CREATE_NO_WINDOW is set.
+# On non-Windows platforms this flag is zero (no-op).
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+
 # Template for sitecustomize.py placed in the venv's site-packages.
 # Maya's compiled extensions (e.g. _ssl.pyd) depend on runtime DLLs
 # (libssl, libcrypto) that live in Maya's bin directory.  Python 3.8+
@@ -241,6 +246,7 @@ def ensure_venv():
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
     except subprocess.CalledProcessError as exc:
         logger.warning(
@@ -286,6 +292,7 @@ def ensure_venv():
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.debug("Pip bootstrapped successfully.")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
@@ -346,6 +353,7 @@ def ensure_packages(package_map=None):
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.info("Package installation completed.")
         return True
@@ -528,6 +536,7 @@ def _fix_maya_venv(venv_dir):
                 ["cmd", "/c", "mklink", "/J", venv_python_dir, maya_python_dir],
                 check=True,
                 capture_output=True,
+                creationflags=_CREATION_FLAGS,
             )
             logger.debug("Created junction: %s -> %s", venv_python_dir, maya_python_dir)
         except (subprocess.CalledProcessError, OSError) as exc:
@@ -601,6 +610,7 @@ def _pip_install_via_host(missing):
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.info("Package installation completed via host interpreter.")
         return True
@@ -611,7 +621,7 @@ def _pip_install_via_host(missing):
 
 # --- Convenience: Full Setup --------------------------------------------------
 
-def setup_venv(requirements=None):
+def setup_venv(requirements=None, status_callback=None):
     """
     One-call convenience: ensure venv exists, install packages, inject path.
 
@@ -621,19 +631,32 @@ def setup_venv(requirements=None):
     remain available).
 
     :param dict requirements: Package map (defaults to ``REQUIRED_PACKAGES``).
+    :param callable status_callback: Optional ``fn(str)`` to report progress
+        messages (e.g. for a progress dialog during first launch).
     :return: *True* if the venv is ready and injected, *False* if something
              failed (features should gracefully degrade).
     :rtype: bool
     """
+    def _status(msg):
+        """Log and forward progress messages to the callback."""
+        logger.info(msg)
+        if status_callback:
+            try:
+                status_callback(msg)
+            except Exception:
+                pass
+
     all_ok = True
 
     # Step 1: Ensure venv exists.
+    _status("Creating Python environment...")
     if not ensure_venv():
         logger.warning("Venv setup failed — features requiring managed "
                         "packages will be unavailable.")
         all_ok = False
 
     # Step 2: Install missing packages (only if venv exists).
+    _status("Installing dependencies...")
     venv_python = get_venv_python()
     if venv_python is not None:
         if not ensure_packages(requirements):
@@ -645,6 +668,7 @@ def setup_venv(requirements=None):
 
     # Step 3: Inject path (even if package install failed — previously
     # installed packages should still be usable).
+    _status("Configuring environment...")
     if not inject_venv_path():
         logger.warning("Path injection failed — venv packages will not "
                         "be importable.")

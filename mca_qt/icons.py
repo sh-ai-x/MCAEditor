@@ -143,6 +143,46 @@ def _paint_folder_open():
     return QIcon(pix)
 
 
+# --- MCA Logo ----------------------------------------------------------------
+
+def mca_logo(size=None):
+    """
+    MCA Editor logo loaded from ``resources/images/mca.png``.
+
+    Returns a QIcon at the requested *size* (defaults to 20px for title bars).
+
+    :param int size: Desired icon size in pixels.  Defaults to 20.
+    :return: MCA logo icon.
+    :rtype: QIcon
+    """
+    if size is None:
+        size = 20
+    # Cache per size so callers can request different dimensions.
+    cache_key = "mca_logo_{}".format(size)
+    return _cached(cache_key, lambda: _load_mca_logo(size))
+
+
+def _load_mca_logo(size):
+    """
+    Load the MCA logo PNG and scale to the requested size.
+
+    :param int size: Target pixel size (square).
+    :return: Scaled QIcon.
+    :rtype: QIcon
+    """
+    logo_path = os.path.join(_RESOURCES_DIR, "mca.png")
+    pix = QPixmap(logo_path)
+    if pix.isNull():
+        logger.warning("Could not load MCA logo from %s", logo_path)
+        # Fall back to a colored square so the icon isn't blank.
+        pix = QPixmap(size, size)
+        pix.fill(QColor("#E8922A"))
+    else:
+        pix = pix.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    return QIcon(pix)
+
+
 # --- Python Logo -------------------------------------------------------------
 
 def python_logo():

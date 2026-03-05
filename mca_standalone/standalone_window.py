@@ -20,6 +20,7 @@ from mca_qt.qt_compat import (
     QMainWindow, QStatusBar, QLabel, QMessageBox,
 )
 from mca_qt.editor_panel import MCAEditorPanel
+from mca_qt.icons import mca_logo
 from mca_core.config.settings import MCASettings
 
 # Module-level logger.
@@ -49,6 +50,7 @@ class StandaloneWindow(QMainWindow):
         self._settings = settings
 
         self.setWindowTitle("MCA Editor")
+        self.setWindowIcon(mca_logo(size=32))
         self.setMinimumSize(900, 600)
         self.resize(1400, 850)
 

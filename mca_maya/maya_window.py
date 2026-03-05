@@ -38,8 +38,9 @@ except ImportError:
     from PySide2.QtCore import QObject, QEvent
     from PySide2.QtWidgets import QApplication, QWidget as _QWidget
 
-from mca_qt.qt_compat import QWidget, QVBoxLayout, QHBoxLayout, QMenuBar, QLabel, QFrame, QDialog, Qt, QTimer, QKeySequence
+from mca_qt.qt_compat import QWidget, QVBoxLayout, QHBoxLayout, QMenuBar, QLabel, QFrame, QDialog, Qt, QTimer, QKeySequence, QPixmap
 from mca_qt.editor_panel import MCAEditorPanel
+from mca_qt.icons import mca_logo
 from mca_qt.theme import GLOBAL_STYLESHEET
 from mca_core.config.settings import MCASettings
 from mca_core.adapters.adapter_manager import AdapterManager
@@ -382,6 +383,7 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # correct workspace control name (WINDOW_OBJECT_NAME + "WorkspaceControl").
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle("MCA Editor")
+        self.setWindowIcon(mca_logo(size=32))
 
         # Load settings (QSettings-backed inside Maya).
         self._settings = MCASettings()
@@ -402,10 +404,32 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
             parent=self,
         )
 
-        # Build a QMenuBar embedded at the top of the dockable window so
-        # all menu options (File, Edit, View, etc.) are accessible.
+        # Build a title bar with the MCA logo, title text, and menu bar.
+        self._title_bar = QWidget(self)
+        self._title_bar.setFixedHeight(26)
+        self._title_bar.setStyleSheet("background-color: #252526;")
+        title_bar_layout = QHBoxLayout(self._title_bar)
+        title_bar_layout.setContentsMargins(6, 0, 0, 0)
+        title_bar_layout.setSpacing(4)
+
+        # Logo icon (20x20 scaled from mca.png).
+        logo_label = QLabel()
+        logo_pixmap = mca_logo(size=20).pixmap(20, 20)
+        logo_label.setPixmap(logo_pixmap)
+        logo_label.setFixedSize(20, 20)
+        title_bar_layout.addWidget(logo_label)
+
+        # "MCA Editor" title text next to the logo.
+        title_label = QLabel("MCA Editor")
+        title_label.setStyleSheet(
+            "color: #cccccc; font-size: 12px; font-weight: bold; padding-left: 2px;"
+        )
+        title_bar_layout.addWidget(title_label)
+
+        # Menu bar fills the remaining space.
         self._menubar = QMenuBar(self)
         self._panel.build_menus(self._menubar)
+        title_bar_layout.addWidget(self._menubar, 1)
 
         # Apply our dark stylesheet on top of Maya's theme.
         self.setStyleSheet(GLOBAL_STYLESHEET)
@@ -416,12 +440,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Build the blue status bar that mirrors the standalone window.
         self._status_bar = self._build_status_bar()
 
-        # Layout: menu bar on top, panel fills the middle, status bar at bottom.
+        # Layout: title bar on top, panel fills the middle, status bar at bottom.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._menubar, 0)   # 0 stretch — stays at natural height.
-        layout.addWidget(self._panel, 1)     # 1 stretch — expands to fill space.
+        layout.addWidget(self._title_bar, 0)  # 0 stretch — stays at natural height.
+        layout.addWidget(self._panel, 1)       # 1 stretch — expands to fill space.
         layout.addWidget(self._status_bar, 0)  # 0 stretch — stays at natural height.
 
         # Connect panel signals to the status bar labels.

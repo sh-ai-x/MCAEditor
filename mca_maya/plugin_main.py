@@ -29,7 +29,7 @@ import maya.cmds as cmds
 import maya.mel as mel
 import maya.utils
 
-from mca_core.venv_manager import setup_venv
+from mca_core.venv_manager import setup_venv, get_venv_python
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -164,6 +164,70 @@ def _do_auto_open_editor():
         logger.warning("Auto-open editor failed: %s", exc)
 
 
+# --- First-Launch Progress Dialog -------------------------------------------
+
+def _first_launch_setup():
+    """
+    Run full first-launch setup with a progress dialog.
+
+    On the very first launch the venv doesn't exist yet, so venv creation,
+    pip installs, git clone, and MCP registration all run synchronously.
+    Each step takes several seconds and spawns subprocesses.  Without a
+    progress dialog the user sees Maya freeze for 30-60 seconds and thinks
+    it stalled.
+
+    This function shows an indeterminate (pulsing) QProgressDialog that
+    updates its label text as each step completes.  ``processEvents()``
+    is called after every status update so the bar keeps animating even
+    though the blocking subprocess calls are on the main thread.
+
+    MCP setup is run synchronously here (``background=False``) so the
+    user sees all setup steps in the same dialog.  On subsequent launches
+    the venv already exists, so this function is never called and MCP
+    runs in its normal background thread.
+
+    :return: *True* if venv setup succeeded.
+    :rtype: bool
+    """
+    # Maya 2025+ ships PySide6; older versions use PySide2.
+    try:
+        from PySide6 import QtWidgets, QtCore
+    except ImportError:
+        from PySide2 import QtWidgets, QtCore
+
+    # Build the progress dialog — indeterminate (range 0,0 = pulsing bar),
+    # no cancel button, fixed width so the label text doesn't resize it.
+    dlg = QtWidgets.QProgressDialog(
+        "Preparing MCA Editor for first use...",
+        "",       # Empty cancel button text — hides the button.
+        0, 0,     # min=max=0 → indeterminate / pulsing bar.
+    )
+    dlg.setWindowTitle("MCA Editor Setup")
+    dlg.setWindowModality(QtCore.Qt.WindowModal)
+    dlg.setMinimumWidth(400)
+    dlg.setCancelButton(None)  # Remove cancel button entirely.
+    dlg.show()
+    QtWidgets.QApplication.processEvents()
+
+    def _on_status(msg):
+        """Update the dialog label and pump the event loop."""
+        dlg.setLabelText(msg)
+        QtWidgets.QApplication.processEvents()
+
+    # Run venv setup with progress callbacks.
+    venv_ok = setup_venv(status_callback=_on_status)
+
+    # Run MCP setup synchronously so all steps appear in the same dialog.
+    try:
+        from mca_core import mcp_setup
+        mcp_setup.ensure_maya_mcp(background=False, status_callback=_on_status)
+    except Exception as exc:
+        logger.warning("MCP setup during first launch failed: %s", exc)
+
+    dlg.close()
+    return venv_ok
+
+
 # --- Plugin Registration ----------------------------------------------------
 
 def initializePlugin(plugin):
@@ -177,15 +241,36 @@ def initializePlugin(plugin):
 
     :param MObject plugin: Maya's plugin MObject.
     """
-    # Set up the managed venv and install/inject dependencies before any
-    # imports that rely on venv packages (pywinpty, pyflakes, etc.).
-    # This is fast on subsequent launches — just a sys.path.insert().
-    venv_ok = setup_venv()
-    if not venv_ok:
-        logger.warning("Venv setup had issues — some features (terminal, "
-                        "code analysis) may be unavailable. Check Script Editor.")
+    # Detect first launch — if the venv doesn't exist yet, we need to run
+    # the full setup with a progress dialog so the user sees what's happening
+    # instead of staring at a frozen Maya for 30-60 seconds.
+    is_first_launch = get_venv_python() is None
+
+    if is_first_launch:
+        # First launch: show progress dialog, run venv + MCP setup
+        # synchronously so the user sees all steps in one place.
+        venv_ok = _first_launch_setup()
+        if not venv_ok:
+            logger.warning("First-launch setup had issues — some features "
+                            "(terminal, code analysis) may be unavailable.")
+        else:
+            logger.info("First-launch setup OK")
     else:
-        logger.info("Venv setup OK")
+        # Subsequent launches: fast path — just inject sys.path, no dialog.
+        venv_ok = setup_venv()
+        if not venv_ok:
+            logger.warning("Venv setup had issues — some features (terminal, "
+                            "code analysis) may be unavailable. Check Script Editor.")
+        else:
+            logger.info("Venv setup OK")
+
+        # MCP setup runs in a background thread on subsequent launches
+        # since everything is likely already in place (just file checks).
+        try:
+            from mca_core import mcp_setup
+            mcp_setup.ensure_maya_mcp(background=True)
+        except Exception as exc:
+            logger.warning("MCP setup trigger failed: %s", exc)
 
     # Open Maya's command ports so external processes (like the MCP server)
     # can communicate with Maya over TCP.  The MCP server runs as a separate
@@ -206,15 +291,6 @@ def initializePlugin(plugin):
                 logger.debug("Command port %s already open", port_name)
 
     maya.utils.executeDeferred(_open_command_ports)
-
-    # Kick off MCP server deployment in the background.  This clones
-    # MayaMCP (if needed), sets up its venv, and registers with Claude Code.
-    # Runs in a daemon thread so it never blocks Maya startup.
-    try:
-        from mca_core import mcp_setup
-        mcp_setup.ensure_maya_mcp(background=True)
-    except Exception as exc:
-        logger.warning("MCP setup trigger failed: %s", exc)
 
     fn_plugin = om2.MFnPlugin(plugin, PLUGIN_VENDOR, PLUGIN_VERSION)
 

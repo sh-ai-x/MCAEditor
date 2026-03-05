@@ -4087,10 +4087,12 @@ class MCAEditorPanel(QWidget):
 
         Called when a project is opened.  A 500 ms QTimer polls the worker
         for progress and updates the status bar until indexing finishes.
-        """
-        # Cancel any previous indexing run first.
-        self._stop_symbol_indexing()
 
+        If the index is already populated and ready for the same set of
+        workspace folders, it is reused without re-scanning.  This avoids
+        the expensive full re-index when the editor is closed and reopened
+        within the same Maya session.
+        """
         folders = self._get_workspace_folders()
         if not folders:
             return
@@ -4099,6 +4101,25 @@ class MCAEditorPanel(QWidget):
         excluded = set()
         if self._active_project:
             excluded = set(self._active_project.excluded_folders)
+
+        # Reuse the existing index if it is ready and covers the same folders.
+        normalized = sorted(os.path.normpath(f) for f in folders)
+        if (self._symbol_index is not None
+                and self._symbol_index.get_state() == "ready"
+                and getattr(self, "_indexed_folders", None) == normalized):
+            logger.info("Symbol index still valid — skipping re-index")
+            # Re-emit the status so the action bar shows the existing count.
+            file_count = self._symbol_index.get_file_count()
+            self.index_status_changed.emit(
+                "Indexed {} files".format(file_count)
+            )
+            return
+
+        # Cancel any previous indexing run first.
+        self._stop_symbol_indexing()
+
+        # Remember which folders this index covers so we can skip next time.
+        self._indexed_folders = normalized
 
         self._symbol_index = SymbolIndex()
         self._index_worker = IndexWorker(self._symbol_index, folders, excluded)
@@ -4135,10 +4156,11 @@ class MCAEditorPanel(QWidget):
             self._index_worker.join(timeout=2.0)
             self._index_worker = None
 
-        # Clear the index data.
+        # Clear the index data and the cached folder list.
         if self._symbol_index is not None:
             self._symbol_index.clear()
             self._symbol_index = None
+        self._indexed_folders = None
 
         # Clear the action bar indicator.
         self.index_status_changed.emit("")
@@ -4157,9 +4179,9 @@ class MCAEditorPanel(QWidget):
         done, total = self._symbol_index.get_progress()
 
         if state == "indexing" and total > 0:
-            # Show percentage progress during indexing on the status bar.
+            # Update the action bar indicator only — avoid _show_status()
+            # because each log line to the output slows Maya noticeably.
             pct = int(done * 100 / total)
-            self._show_status("Indexing symbols... {}%".format(pct))
             self.index_status_changed.emit("Indexing {}%".format(pct))
 
         elif state == "ready":

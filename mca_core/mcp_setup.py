@@ -99,6 +99,11 @@ _EDITOR_MCP_SERVER_NAME = "MCAEditorMCP"
 # Subprocess timeout for git/pip operations (seconds).
 _SUBPROCESS_TIMEOUT = 120
 
+# Suppress CMD window popups on Windows.  Every subprocess.run() call
+# flashes a visible console window unless CREATE_NO_WINDOW is set.
+# On non-Windows platforms this flag is zero (no-op).
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+
 # Claude config file location.
 _CLAUDE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".claude.json")
 
@@ -214,7 +219,7 @@ def _run_setup(status_callback=None):
                 return
 
         # Step 2: Apply patches (delete bad tools, copy our server).
-        _status("Applying patches...")
+        _status("Configuring MCP tools...")
         _apply_patches()
 
         # Step 3: Create venv and install mcp package.
@@ -234,7 +239,7 @@ def _run_setup(status_callback=None):
             _status("Registering Editor MCP server with Claude Code...")
             _register_server_with_claude_code(_EDITOR_MCP_SERVER_NAME, _EDITOR_SERVER_DEPLOY_PATH)
 
-        _status("MCP servers ready")
+        _status("Setup complete!")
         logger.info("MCP setup complete. Maya: %s, Editor: %s",
                      _SERVER_DEPLOY_PATH, _EDITOR_SERVER_DEPLOY_PATH)
 
@@ -275,6 +280,12 @@ def _clone_maya_mcp():
     # Ensure the parent directory exists.
     os.makedirs(_MCP_DIR, exist_ok=True)
 
+    # If the directory exists but is incomplete (e.g. leftover from a partial
+    # wipe), remove it so the clone can proceed cleanly.
+    if os.path.isdir(_MAYAMCP_DIR):
+        logger.info("Removing incomplete MayaMCP directory before re-clone...")
+        shutil.rmtree(_MAYAMCP_DIR, ignore_errors=True)
+
     logger.info("Cloning MayaMCP from %s to %s ...", _MAYAMCP_REPO_URL, _MAYAMCP_DIR)
 
     try:
@@ -284,6 +295,7 @@ def _clone_maya_mcp():
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.info("MayaMCP clone complete.")
         return True
@@ -399,6 +411,7 @@ def _setup_venv():
                 timeout=_SUBPROCESS_TIMEOUT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                creationflags=_CREATION_FLAGS,
             )
         except subprocess.CalledProcessError as exc:
             logger.warning(
@@ -432,6 +445,7 @@ def _setup_venv():
             timeout=_SUBPROCESS_TIMEOUT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.info("MCP requirements installed successfully.")
         return True
@@ -560,6 +574,7 @@ def _register_server_with_claude_code(server_name, server_script_path):
                 timeout=30,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                creationflags=_CREATION_FLAGS,
             )
             logger.info("Registered MCP server via Claude CLI: %s", server_name)
             return
@@ -625,6 +640,7 @@ def _find_git():
             timeout=10,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
         )
         logger.debug("Found git: %s", result.stdout.decode(errors="replace").strip())
         return "git"
@@ -667,6 +683,7 @@ def _find_system_python():
                 timeout=10,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                creationflags=_CREATION_FLAGS,
             )
             version_str = result.stdout.decode(errors="replace").strip()
 
@@ -701,6 +718,7 @@ def _find_system_python():
                             timeout=10,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
+                            creationflags=_CREATION_FLAGS,
                         )
                         exe = py_result.stdout.decode(errors="replace").strip()
                         if os.path.isfile(exe):
