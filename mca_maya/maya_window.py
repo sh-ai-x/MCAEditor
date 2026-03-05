@@ -1243,7 +1243,7 @@ def _restore_mca_editor():
 
 # --- Plugin Cleanup ---------------------------------------------------------
 
-def cleanup_editor():
+def cleanup_editor(maya_is_exiting=False):
     """
     Clean up the MCA Editor window and all child resources.
 
@@ -1251,11 +1251,25 @@ def cleanup_editor():
     adapters, and callbacks are properly shut down when the plugin is
     unloaded or Maya exits.  Without this, ConPTY shell processes
     survive Maya shutdown and prevent the process from exiting cleanly.
+
+    When *maya_is_exiting* is True, the window widget is explicitly
+    destroyed via ``shiboken6.delete()`` after saving state and
+    terminating child processes.  This is critical: our widget tree is
+    parented to Maya's workspace control.  During Maya's later Qt
+    teardown, the C++ side destroys the workspace control and all
+    children.  If Python shiboken wrappers still reference those
+    freed C++ objects, shiboken's destructor hits an ACCESS_VIOLATION.
+    By deleting the widget through shiboken first, both the C++ and
+    Python sides are cleaned up in sync, leaving no dangling wrappers.
+
+    :param bool maya_is_exiting: True when called during Maya shutdown
+        (kMayaExiting callback fired), False for user-initiated unload.
     """
     global _mca_editor_window
     global _output_callback_id
 
-    # Remove Maya output hook.
+    # Remove Maya output hook — this is an OpenMaya callback, safe
+    # to remove during shutdown (not a Qt operation).
     if _output_callback_id is not None:
         try:
             om2.MMessage.removeCallback(_output_callback_id)
@@ -1277,6 +1291,21 @@ def cleanup_editor():
             logger.info("MCA Editor cleanup completed (terminals terminated)")
         except Exception as exc:
             logger.warning("Error during MCA Editor cleanup: %s", exc)
+
+        # During Maya shutdown, explicitly destroy the widget tree via
+        # shiboken so there are no dangling Python wrappers when Maya's
+        # C++ teardown later destroys the workspace control hierarchy.
+        # Without this, shiboken destructors fire during Python GC/atexit
+        # and dereference freed C++ memory → ACCESS_VIOLATION.
+        if maya_is_exiting:
+            try:
+                import shiboken6
+                if shiboken6.isValid(_mca_editor_window):
+                    shiboken6.delete(_mca_editor_window)
+                    logger.info("Destroyed editor widget via shiboken6.delete()")
+            except Exception as exc:
+                logger.warning("shiboken6.delete() failed: %s", exc)
+
         _mca_editor_window = None
 
     # Delete the workspace control so Maya does NOT save it in the
@@ -1286,9 +1315,15 @@ def cleanup_editor():
     # 'mca_maya'" errors.  Our own editor_was_open setting and
     # _do_auto_open_editor() handle reopening, so we don't need Maya's
     # workspace persistence at all.
-    try:
-        if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
-            cmds.deleteUI(WORKSPACE_CONTROL_NAME)
-            logger.info("Deleted workspace control to prevent stale layout save")
-    except Exception:
-        pass
+    #
+    # SKIP during Maya shutdown — the widget tree was already destroyed
+    # by shiboken6.delete() above, and the workspace control will be
+    # cleaned up by Maya's own shutdown.  Calling deleteUI here during
+    # exit can crash if the control's C++ object is already gone.
+    if not maya_is_exiting:
+        try:
+            if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
+                cmds.deleteUI(WORKSPACE_CONTROL_NAME)
+                logger.info("Deleted workspace control to prevent stale layout save")
+        except Exception:
+            pass

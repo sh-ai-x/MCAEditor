@@ -500,9 +500,12 @@ def uninitializePlugin(plugin):
     # Clean up the editor window first — terminates terminal processes,
     # adapters, and callbacks.  This must happen before the command ports
     # are closed so any in-flight communication can finish.
+    # Pass _maya_is_exiting so cleanup_editor can skip Qt widget
+    # operations during shutdown — Shiboken crashes if we delete UI
+    # elements while Maya is tearing down its own Qt hierarchy.
     try:
         from mca_maya.maya_window import cleanup_editor
-        cleanup_editor()
+        cleanup_editor(maya_is_exiting=_maya_is_exiting)
     except Exception as exc:
         logger.warning("Editor cleanup failed: %s", exc)
 
