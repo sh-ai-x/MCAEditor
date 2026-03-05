@@ -1,0 +1,9 @@
+{
+    "id": "com.mechart.ai-chat",
+    "name": "Orange Slice AI",
+    "version": "1.0.0",
+    "author": "MechArt Studios",
+    "description": "AI assistant with full editor and Maya integration.",
+    "entry_point": "__init__.py",
+    "min_editor_version": "0.1.5"
+}

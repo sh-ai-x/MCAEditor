@@ -165,7 +165,7 @@ class MCASettings:
 
         # --- AI ---
         "ai_enabled": False,
-        "ai_provider": "none",            # none, byok_claude, byok_openai, byok_local, managed
+        "ai_provider": "none",            # none, anthropic, openai, gemini
         "ai_api_key": "",                 # Stored via QSettings (platform-secure)
         "ai_api_endpoint": "",            # For custom/local endpoints
         "ai_model": "",
@@ -188,6 +188,9 @@ class MCASettings:
         "output_visible": True,          # Whether the output panel is shown.
         "terminal_visible": False,       # Whether the terminal panel is shown.
         "sidebar_visible": True,         # Whether the sidebar is shown (Advanced mode).
+
+        # --- Plugins ---
+        "disabled_plugins": ["com.mechart.hello-world"],  # Plugin IDs to skip on load.
 
         # --- Licensing ---
         "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).

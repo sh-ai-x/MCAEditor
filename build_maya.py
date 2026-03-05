@@ -78,6 +78,13 @@ DIST_PYC_FILES = [
     os.path.join("mca_qt", "widgets", "terminal_native.py"),
     os.path.join("mca_qt", "widgets", "terminal_xterm.py"),
     os.path.join("mca_qt", "widgets", "tool_stripe.py"),
+    # Plugin settings dialog has keyPressEvent override -> .pyc
+    os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),
+    # --- AI Chat plugin ---
+    # chat_widget.py has keyPressEvent override -> .pyc
+    os.path.join("mca_core", "plugins", "ai_chat", "chat_widget.py"),
+    # chat_worker.py subclasses QThread with run() override -> .pyc
+    os.path.join("mca_core", "plugins", "ai_chat", "chat_worker.py"),
 ]
 
 # Project root (directory containing this script).
@@ -481,7 +488,15 @@ def create_dist_structure():
                 if os.path.join(rel_root, f) in DIST_PURE_PYTHON
             ]
 
-            files_to_copy = pyd_files + init_files + pure_files
+            # CRITICAL: Copy plugin.json manifests for bundled plugins.
+            # These are not .py files so they would be silently dropped
+            # without this explicit inclusion.
+            json_manifests = [
+                f for f in files
+                if f == "plugin.json"
+            ]
+
+            files_to_copy = pyd_files + init_files + pure_files + json_manifests
 
             # Only create the directory if there are files to put in it.
             if files_to_copy:

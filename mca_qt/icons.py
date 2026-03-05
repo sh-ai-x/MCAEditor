@@ -390,6 +390,58 @@ def _paint_settings_icon():
     return QIcon(pix)
 
 
+# --- Plugin Icon -------------------------------------------------------------
+
+def plugin_icon():
+    """
+    Plugin/puzzle-piece icon for the plugin system.
+
+    :return: Plugin icon.
+    :rtype: QIcon
+    """
+    return _cached("plugin_icon", _paint_plugin_icon)
+
+
+def _paint_plugin_icon():
+    """Paint a puzzle piece icon representing a plugin."""
+    pix = QPixmap(ICON_SIZE, ICON_SIZE)
+    pix.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Draw a simple puzzle piece shape using a path.
+    accent = QColor("#569cd6")
+    pen = QPen(accent, 1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QColor(86, 156, 214, 60))
+
+    # Puzzle piece outline — simplified block with a tab on top and right.
+    path = QPainterPath()
+    path.moveTo(3, 5)
+    # Top edge with tab notch.
+    path.lineTo(6, 5)
+    path.lineTo(6, 3)
+    path.lineTo(9, 3)
+    path.lineTo(9, 5)
+    path.lineTo(13, 5)
+    # Right edge with tab notch.
+    path.lineTo(13, 8)
+    path.lineTo(15, 8)
+    path.lineTo(15, 11)
+    path.lineTo(13, 11)
+    path.lineTo(13, 14)
+    # Bottom and left.
+    path.lineTo(3, 14)
+    path.closeSubpath()
+    p.drawPath(path)
+
+    p.end()
+    return QIcon(pix)
+
+
 def _paint_text_icon():
     """Paint a simple text/document icon."""
     pix = QPixmap(ICON_SIZE, ICON_SIZE)

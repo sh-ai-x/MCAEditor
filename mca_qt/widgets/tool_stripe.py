@@ -237,6 +237,27 @@ class ToolStripe(QWidget):
         btn = self._buttons.get(name)
         return btn.is_active() if btn else False
 
+    def remove_button(self, name):
+        """
+        Remove a button from the stripe by name.
+
+        Removes the button widget from the layout and deletes it.
+        No-op if the button doesn't exist.
+
+        :param str name: The button's registered name.
+        :return: True if the button was removed, False if not found.
+        :rtype: bool
+        """
+        btn = self._buttons.pop(name, None)
+        if btn is None:
+            return False
+
+        # Remove from layout and delete the widget.
+        self._layout.removeWidget(btn)
+        btn.setParent(None)
+        btn.deleteLater()
+        return True
+
     def get_button(self, name):
         """
         Get a button widget by name.

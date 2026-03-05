@@ -125,6 +125,10 @@ def collect_extensions():
         os.path.join("mca_qt", "widgets", "terminal_native.py"),  # eventFilter, resizeEvent
         os.path.join("mca_qt", "widgets", "terminal_xterm.py"),   # eventFilter
         os.path.join("mca_qt", "widgets", "tool_stripe.py"),      # sizeHint
+        os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),  # keyPressEvent
+        # --- AI Chat plugin ---
+        os.path.join("mca_core", "plugins", "ai_chat", "chat_widget.py"),   # keyPressEvent
+        os.path.join("mca_core", "plugins", "ai_chat", "chat_worker.py"),   # QThread.run()
     }
 
     py_files = []

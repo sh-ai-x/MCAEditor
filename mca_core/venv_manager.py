@@ -62,6 +62,7 @@ _VENV_DIR_BASE = ".venv"
 REQUIRED_PACKAGES = {
     "pywinpty>=2.0.0": "winpty",     # Terminal backend (Windows only)
     "pyflakes": "pyflakes",          # Tier 2 code analysis
+    "openai>=1.30.0": "openai",     # AI chat (Anthropic/OpenAI/Gemini via OAI compat)
 }
 
 # Timeout (seconds) for subprocess calls to pip / venv creation.

@@ -33,7 +33,7 @@ from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QToolBar, QLabel, QComboBox, QPushButton, QFileDialog,
     QMessageBox, QDialog, QInputDialog, QSize, QPlainTextEdit,
-    QApplication,
+    QApplication, QStackedWidget,
     Qt, QTimer, Signal, QEvent, QMenu,
     QAction, QActionGroup, QKeySequence, QTextCursor,
 )
@@ -256,6 +256,19 @@ class MCAEditorPanel(QWidget):
         self._api_dispatch_timer.timeout.connect(drain_queue)
         self._api_dispatch_timer.start()
 
+        # --- Plugin System ---------------------------------------------------
+        # Create plugin objects but don't load yet — plugins need the
+        # Plugins menu to exist, which is built by build_menus().
+        # Actual loading happens in _init_plugins(), called at the end
+        # of build_menus() by the host.
+        from mca_core.plugins import PluginManager, MCAPluginAPI
+        from mca_core.editor_api import get_api
+
+        self._plugin_api = MCAPluginAPI(get_api())
+        self._plugin_api._panel_host = self
+        self._plugin_manager = PluginManager()
+        self._plugins_menu = None  # Set by _build_plugins_menu()
+
     # --- Default Workspace Initialization ------------------------------------
 
     def _init_default_workspace(self):
@@ -435,19 +448,34 @@ class MCAEditorPanel(QWidget):
         self._center_layout.addWidget(self._center_splitter)
         self._main_splitter.addWidget(center_widget)
 
-        # --- Right terminal panel (directly in splitter, no wrapper tabs) ---
+        # --- Right panel stack (QStackedWidget holding terminal + plugin panels) ---
+        # The right tool stripe buttons select which widget is visible.
+        # Index 0 is always the terminal panel; plugin panels are added
+        # dynamically via _register_plugin_panel().
+        self._right_panel_stack = QStackedWidget()
+        self._right_panel_stack.setMinimumWidth(250)
+
+        # Terminal is the first (default) widget in the stack.
         self._right_terminal_panel = TerminalTabPanel(
             shell=terminal_shell,
             cwd=self._session_manager.scripts_dir,
             font_size=terminal_font,
             parent=self,
         )
-        self._right_terminal_panel.setMinimumWidth(250)
         self._right_terminal_panel.all_terminals_closed.connect(self._on_right_terminals_closed)
+        self._right_panel_stack.addWidget(self._right_terminal_panel)
+
+        # Track registered plugin panels: panel_id -> {widget, index, title}.
+        self._plugin_panels = {}
+
+        # Keep references to plugin submenus so PySide6 doesn't GC them.
+        # Without this, QMenu objects returned by addMenu() get deleted
+        # between calls, causing "Internal C++ object already deleted".
+        self._plugin_submenus = {}  # menu_path -> QMenu
 
         # Right panel starts hidden.
-        self._right_terminal_panel.setVisible(False)
-        self._main_splitter.addWidget(self._right_terminal_panel)
+        self._right_panel_stack.setVisible(False)
+        self._main_splitter.addWidget(self._right_panel_stack)
 
         # Minimum widths so panels never collapse to invisible.
         center_widget.setMinimumWidth(20)
@@ -647,6 +675,7 @@ class MCAEditorPanel(QWidget):
         self._build_go_menu(menubar)
         self._build_output_menu(menubar)
         self._build_command_menu(menubar)
+        self._build_plugins_menu(menubar)
         # Hide the DCC menu when embedded inside a DCC (already connected).
         if not self._embedded_in_dcc:
             self._build_dcc_menu(menubar)
@@ -664,6 +693,22 @@ class MCAEditorPanel(QWidget):
         # Restore any custom keyboard shortcuts the user saved in settings.
         # Must run after all menus are built so _action_registry is populated.
         self._restore_custom_shortcuts()
+
+        # Load plugins now that the Plugins menu exists and they can
+        # register panels and menu actions safely.
+        self._init_plugins()
+
+    def _init_plugins(self):
+        """
+        Load all enabled plugins.
+
+        Called at the end of ``build_menus()`` so the Plugins menu
+        exists and plugins can register menu actions and panels.
+        """
+        if self._plugin_manager and self._plugin_api:
+            self._plugin_manager.load_all(self._plugin_api)
+            logger.info("Plugin system initialized (%d plugins loaded)",
+                        len(self._plugin_manager._loaded_plugins))
 
     def _restore_custom_shortcuts(self):
         """
@@ -1056,6 +1101,28 @@ class MCAEditorPanel(QWidget):
             # Each env var action uses a lambda with captured variable.
             self._create_action(env_menu, var,
                                 callback=lambda checked, v=var: self._show_env_var(v))
+
+    def _build_plugins_menu(self, menubar):
+        """
+        Build the Plugins menu.
+
+        Contains a "Plugin Settings..." action and a separator.
+        Plugin-registered actions are appended below the separator
+        via ``_register_plugin_menu_action()``.
+        """
+        menu = menubar.addMenu("Pl&ugins")
+        self._plugins_menu = menu
+
+        # "Plugin Settings..." opens the plugin management dialog.
+        self._create_action(menu, "Plugin Settings...",
+                            callback=self._show_plugin_settings)
+        menu.addSeparator()
+
+    def _show_plugin_settings(self):
+        """Open the Plugin Settings dialog."""
+        from mca_qt.widgets.plugin_settings_dialog import PluginSettingsDialog
+        dlg = PluginSettingsDialog(self._plugin_manager, self._settings, parent=self)
+        dlg.exec()
 
     def _build_dcc_menu(self, menubar):
         """Build the DCC menu."""
@@ -1846,7 +1913,9 @@ class MCAEditorPanel(QWidget):
 
         right_term_vis = s.get("right_terminal_visible", False)
         if right_term_vis:
-            self._right_terminal_panel.setVisible(True)
+            # Show the right panel stack and switch to the terminal widget.
+            self._right_panel_stack.setVisible(True)
+            self._right_panel_stack.setCurrentWidget(self._right_terminal_panel)
             sizes = self._main_splitter.sizes()
             last = len(sizes) - 1
             if sizes[last] == 0:
@@ -1857,7 +1926,7 @@ class MCAEditorPanel(QWidget):
             QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
             self._right_stripe.set_button_active("terminal", True)
         else:
-            self._right_terminal_panel.setVisible(False)
+            self._right_panel_stack.setVisible(False)
 
         show_ws = s.get("show_whitespace", False)
         if show_ws:
@@ -1932,11 +2001,29 @@ class MCAEditorPanel(QWidget):
         if not self._terminal_available:
             return
 
-        # Show the panel if hidden.
-        if not self._right_terminal_panel.isVisible():
-            self._right_terminal_panel.setVisible(True)
-            self._right_stripe.set_button_active("terminal", True)
-            self._settings.set("right_terminal_visible", True)
+        # Show the right panel stack and switch to the terminal widget.
+        self._show_right_panel(self._right_terminal_panel)
+        self._right_stripe.set_button_active("terminal", True)
+        self._settings.set("right_terminal_visible", True)
+
+        # Always add a new terminal tab.
+        self._right_terminal_panel.add_terminal()
+        self._right_terminal_panel.focus_current()
+
+    def _show_right_panel(self, widget):
+        """
+        Show the right panel stack and switch to a specific widget.
+
+        Expands the splitter if the right panel is currently collapsed.
+
+        :param QWidget widget: The widget to show in the stack.
+        """
+        # Switch the stack to the requested widget.
+        self._right_panel_stack.setCurrentWidget(widget)
+
+        # Show the stack if it's hidden.
+        if not self._right_panel_stack.isVisible():
+            self._right_panel_stack.setVisible(True)
 
             # Expand the right panel in the main splitter if needed.
             sizes = self._main_splitter.sizes()
@@ -1946,9 +2033,18 @@ class MCAEditorPanel(QWidget):
                 sizes[1] = total - sizes[0] - sizes[-1]
                 self._main_splitter.setSizes(sizes)
 
-        # Always add a new terminal tab.
-        self._right_terminal_panel.add_terminal()
-        self._right_terminal_panel.focus_current()
+    def _hide_right_panel(self):
+        """
+        Hide the right panel stack entirely.
+
+        Deactivates all right stripe buttons related to the panel.
+        """
+        self._right_panel_stack.setVisible(False)
+        self._right_stripe.set_button_active("terminal", False)
+        self._settings.set("right_terminal_visible", False)
+        # Deactivate any plugin panel stripe buttons.
+        for panel_id in self._plugin_panels:
+            self._right_stripe.set_button_active(panel_id, False)
 
     # --- Tool Stripe Callbacks -----------------------------------------------
 
@@ -1969,10 +2065,39 @@ class MCAEditorPanel(QWidget):
         """
         Dispatch right tool stripe button clicks.
 
+        Handles the built-in terminal button as well as dynamically
+        registered plugin panel buttons.  Clicking an active button
+        hides the right panel; clicking an inactive button shows the
+        corresponding panel.
+
         :param str name: The button name that was clicked.
         """
         if name == "terminal":
-            self._open_terminal_right()
+            # Toggle: if terminal is already showing, hide the right panel.
+            if (self._right_panel_stack.isVisible()
+                    and self._right_panel_stack.currentWidget() is self._right_terminal_panel):
+                self._hide_right_panel()
+            else:
+                self._open_terminal_right()
+            return
+
+        # Check if this is a plugin panel button.
+        if name in self._plugin_panels:
+            panel_info = self._plugin_panels[name]
+            widget = panel_info["widget"]
+
+            # Toggle: if already showing this plugin panel, hide the right panel.
+            if (self._right_panel_stack.isVisible()
+                    and self._right_panel_stack.currentWidget() is widget):
+                self._hide_right_panel()
+            else:
+                # Deactivate all other right stripe buttons.
+                self._right_stripe.set_button_active("terminal", False)
+                for pid in self._plugin_panels:
+                    self._right_stripe.set_button_active(pid, False)
+                # Show the plugin panel.
+                self._show_right_panel(widget)
+                self._right_stripe.set_button_active(name, True)
 
     def _on_bottom_terminals_closed(self):
         """Auto-hide the bottom terminal panel when all tabs are closed."""
@@ -1981,10 +2106,127 @@ class MCAEditorPanel(QWidget):
         self._left_stripe.set_button_active("terminal", False)
 
     def _on_right_terminals_closed(self):
-        """Hide the right terminal panel when all tabs are closed."""
-        self._right_terminal_panel.setVisible(False)
+        """Hide the right panel when all terminal tabs are closed."""
         self._right_stripe.set_button_active("terminal", False)
         self._settings.set("right_terminal_visible", False)
+        # Only hide the whole stack if the terminal was the visible panel.
+        if self._right_panel_stack.currentWidget() is self._right_terminal_panel:
+            self._hide_right_panel()
+
+    # =========================================================================
+    # Plugin Panel Registration
+    # =========================================================================
+
+    def _register_plugin_panel(self, panel_id, title, widget, icon, location):
+        """
+        Register a plugin widget as a panel in the right-side stack.
+
+        Called by MCAPluginAPI.add_panel().  Adds the widget to the
+        QStackedWidget and creates a corresponding tool stripe button.
+
+        :param str panel_id: Unique identifier for this panel.
+        :param str title: Display title / tooltip for the stripe button.
+        :param QWidget widget: The panel widget to show.
+        :param QIcon icon: Optional icon for the stripe button.
+        :param str location: Panel location (only "right" supported).
+        """
+        # Guard against calls before UI is fully built.
+        if self._right_panel_stack is None:
+            logger.warning("Cannot register panel '%s' — UI not ready", panel_id)
+            return
+
+        # Don't register the same panel twice.
+        if panel_id in self._plugin_panels:
+            logger.warning("Plugin panel '%s' already registered", panel_id)
+            return
+
+        # Add widget to the stack.
+        index = self._right_panel_stack.addWidget(widget)
+
+        # Create a stripe button for this panel.
+        # Use a default plugin icon if none provided.
+        if icon is None:
+            from mca_qt.icons import plugin_icon
+            icon = plugin_icon()
+        self._right_stripe.add_button(panel_id, icon, title)
+
+        # Track the registration.
+        self._plugin_panels[panel_id] = {
+            "widget": widget,
+            "index": index,
+            "title": title,
+        }
+        logger.info("Registered plugin panel: %s (index %d)", panel_id, index)
+
+    def _unregister_plugin_panel(self, panel_id):
+        """
+        Remove a previously registered plugin panel.
+
+        Removes the widget from the stack, removes the stripe button,
+        and hides the right panel if the removed panel was active.
+
+        :param str panel_id: The panel identifier to remove.
+        """
+        panel_info = self._plugin_panels.pop(panel_id, None)
+        if panel_info is None:
+            logger.warning("Cannot unregister unknown panel: %s", panel_id)
+            return
+
+        widget = panel_info["widget"]
+
+        # If this panel is currently visible, hide the right panel.
+        if (self._right_panel_stack.isVisible()
+                and self._right_panel_stack.currentWidget() is widget):
+            self._hide_right_panel()
+
+        # Remove from the stack and stripe.
+        self._right_panel_stack.removeWidget(widget)
+        widget.setParent(None)
+        self._right_stripe.remove_button(panel_id)
+        logger.info("Unregistered plugin panel: %s", panel_id)
+
+    def _register_plugin_menu_action(self, menu_path, label, callback, shortcut):
+        """
+        Register a plugin menu action under the Plugins menu.
+
+        If ``menu_path`` is provided, a submenu with that name is created
+        (or reused) under the Plugins menu, and the action is added there.
+
+        :param str menu_path: Submenu name (e.g. "Hello World"), or None/empty
+            for a top-level action under Plugins.
+        :param str label: Display label for the action.
+        :param callable callback: Function to call when activated.
+        :param str shortcut: Optional keyboard shortcut string.
+        :return: The created QAction, or None.
+        :rtype: QAction or None
+        """
+        if not hasattr(self, "_plugins_menu") or self._plugins_menu is None:
+            logger.warning("Plugins menu not available — cannot add '%s'", label)
+            return None
+
+        # Determine which menu to add the action to.
+        target_menu = self._plugins_menu
+        if menu_path:
+            # Find or create a submenu with this name.
+            # Use the _plugin_submenus dict to keep a Python reference
+            # alive — PySide6 GC deletes QMenu objects returned by
+            # addMenu() if nothing holds a reference.
+            if menu_path in self._plugin_submenus:
+                target_menu = self._plugin_submenus[menu_path]
+            else:
+                target_menu = self._plugins_menu.addMenu(menu_path)
+                self._plugin_submenus[menu_path] = target_menu
+
+        # Create the action.
+        action = QAction(label, self)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        if callback:
+            action.triggered.connect(callback)
+        target_menu.addAction(action)
+        self.addAction(action)
+        return action
 
     # =========================================================================
     # Tab / Buffer Management
@@ -4691,6 +4933,10 @@ class MCAEditorPanel(QWidget):
         self._sidebar.workspace_panel.save_tree_state_to_settings(
             self._settings, project_root
         )
+
+        # Unload all plugins before shutting down.
+        if hasattr(self, "_plugin_manager") and self._plugin_manager:
+            self._plugin_manager.unload_all()
 
         # Stop background symbol indexing before shutdown.
         self._stop_symbol_indexing()

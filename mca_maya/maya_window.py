@@ -250,14 +250,22 @@ class _MayaHotkeyFilter(QObject):
 
                     # Find the appropriate focus target.
                     focus_target = watched
-                    # Walk down to the actual focusable child if the clicked
-                    # widget doesn't accept focus (e.g. a QFrame layout).
+                    # Walk to a focusable widget if the clicked widget doesn't
+                    # accept focus (e.g. a QFrame layout or a viewport).
+                    # QAbstractScrollArea viewports (QPlainTextEdit, QScrollArea)
+                    # are QWidgets with NoFocus policy — the focusable widget
+                    # is the PARENT scroll area.  Try parent first, then proxy,
+                    # then children.
                     if focus_target.focusPolicy() == Qt.FocusPolicy.NoFocus:
-                        child = focus_target.focusProxy()
-                        if child:
-                            focus_target = child
+                        # Try the parent widget first — handles viewports of
+                        # QPlainTextEdit / QScrollArea / QAbstractScrollArea.
+                        parent_w = focus_target.parentWidget()
+                        if parent_w and parent_w.focusPolicy() != Qt.FocusPolicy.NoFocus:
+                            focus_target = parent_w
+                        elif focus_target.focusProxy():
+                            focus_target = focus_target.focusProxy()
                         else:
-                            # No focus proxy — walk children for the first
+                            # Last resort — walk children for the first
                             # widget that accepts focus (depth-first).
                             for c in focus_target.findChildren(_QWidget):
                                 if c.focusPolicy() != Qt.FocusPolicy.NoFocus:
@@ -268,6 +276,10 @@ class _MayaHotkeyFilter(QObject):
                     # Mark that we own keyboard focus.  Only cleared by
                     # an explicit click OUTSIDE our tree (below).
                     self._focus_forced = True
+                    # Store the widget we set focus on so Phase 2 can
+                    # use it as a fallback if focusWidget() hasn't
+                    # caught up yet (activateWindow is async on Win11).
+                    self._focus_forced_widget = focus_target
                 else:
                     # Click outside our editor — release keyboard ownership.
                     self._focus_forced = False
@@ -325,9 +337,18 @@ class _MayaHotkeyFilter(QObject):
                     # TerminalWidget's eventFilter (not in the
                     # QPlainTextEdit's keyPressEvent), so we need to find
                     # the terminal parent and route through its eventFilter.
-                    # For regular text editors, call keyPressEvent directly
-                    # so built-in shortcuts (Ctrl+Z/C/V/X/A/Y) still work.
+                    # For regular text editors, invoke standard clipboard /
+                    # undo methods directly rather than routing through
+                    # keyPressEvent — this avoids issues where focusWidget()
+                    # hasn't caught up after activateWindow() on Win11.
                     focus = QApplication.instance().focusWidget()
+
+                    # Fallback: if focusWidget() returns None or a widget
+                    # outside our editor (focus hasn't transferred yet),
+                    # use the widget we tried to focus in Phase 0.
+                    if not focus or not self._widget_in_editor(focus):
+                        focus = getattr(self, "_focus_forced_widget", None)
+
                     if focus:
                         # Walk up the parent chain looking for a terminal.
                         terminal = self._find_parent_terminal(focus)
@@ -339,8 +360,35 @@ class _MayaHotkeyFilter(QObject):
                                 # the eventFilter checks `if obj is self._display:`
                                 # and rejects any other object.
                                 terminal.eventFilter(terminal._display, event)
-                            elif hasattr(focus, "keyPressEvent"):
-                                focus.keyPressEvent(event)
+                            else:
+                                # Standard text editing shortcuts — call the
+                                # method directly for maximum reliability.
+                                # Going through keyPressEvent can fail if focus
+                                # hasn't fully transferred on the first click.
+                                method_name = None
+                                ctrl_only = (modifiers == Qt.KeyboardModifier.ControlModifier)
+                                ctrl_shift = (modifiers == (
+                                    Qt.KeyboardModifier.ControlModifier
+                                    | Qt.KeyboardModifier.ShiftModifier
+                                ))
+                                if ctrl_only:
+                                    method_name = {
+                                        Qt.Key.Key_C: "copy",
+                                        Qt.Key.Key_V: "paste",
+                                        Qt.Key.Key_X: "cut",
+                                        Qt.Key.Key_A: "selectAll",
+                                        Qt.Key.Key_Z: "undo",
+                                        Qt.Key.Key_Y: "redo",
+                                    }.get(key)
+                                elif ctrl_shift and key == Qt.Key.Key_Z:
+                                    # Ctrl+Shift+Z = redo on most platforms.
+                                    method_name = "redo"
+                                if method_name and hasattr(focus, method_name):
+                                    getattr(focus, method_name)()
+                                elif hasattr(focus, "keyPressEvent"):
+                                    # Not a standard text op — fall back to
+                                    # keyPressEvent for everything else.
+                                    focus.keyPressEvent(event)
                         except RuntimeError:
                             # The focused widget's C++ object was deleted between
                             # the focusWidget() call and the dispatch.  This
