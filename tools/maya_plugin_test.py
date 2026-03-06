@@ -52,8 +52,8 @@ def _run_test():
     try:
         # Step 1: Load the plugin.
         _log("PLUGIN_LOADING")
-        if not cmds.pluginInfo("mcaEditor", q=True, loaded=True):
-            cmds.loadPlugin("mcaEditor")
+        if not cmds.pluginInfo("mca_editor_plugin", q=True, loaded=True):
+            cmds.loadPlugin("mca_editor_plugin")
         _log("PLUGIN_LOADED")
 
         # Step 2: Open the editor window.

@@ -119,7 +119,7 @@ def _test_plugin_and_window():
 
     # 1.1 Plugin loaded.
     try:
-        loaded = cmds.pluginInfo("mcaEditor", q=True, loaded=True)
+        loaded = cmds.pluginInfo("mca_editor_plugin", q=True, loaded=True)
         if loaded:
             _pass("plugin_loaded")
         else:
@@ -1340,8 +1340,8 @@ def _run_all_tests():
         # --- Setup: load plugin and open editor -------------------------
         _log("SETUP_START")
 
-        if not cmds.pluginInfo("mcaEditor", q=True, loaded=True):
-            cmds.loadPlugin("mcaEditor")
+        if not cmds.pluginInfo("mca_editor_plugin", q=True, loaded=True):
+            cmds.loadPlugin("mca_editor_plugin")
         _log("PLUGIN_LOADED")
 
         from mca_maya.maya_window import show_mca_editor

@@ -682,6 +682,19 @@ class CodeCompleter(QFrame):
 
     def cleanup(self):
         """
-        Clean up timers. Called when the editor tab is closed.
+        Clean up timers and event filters. Called when the editor tab
+        is closed or during panel shutdown.
+
+        Removes the application-level event filter installed in __init__
+        and stops the debounce timer.  Without this, orphaned completers
+        accumulate on QApplication's event filter chain — during Maya
+        shutdown, shiboken destructors fire on these orphaned QWidgets
+        and hit freed C++ memory (ACCESS_VIOLATION).
         """
         self._delay_timer.stop()
+
+        # Remove our app-level event filter so QApplication no longer
+        # holds a reference to this (possibly orphaned) widget.
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)

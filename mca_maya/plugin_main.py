@@ -363,6 +363,17 @@ def initializePlugin(plugin):
         _MARKER = "# MCA_EDITOR_AUTO_LOAD"
         _END_MARKER = "# END_MCA_EDITOR_AUTO_LOAD"
 
+        # Detect the plugin name Maya knows us by.  The module-based
+        # install uses "mca_editor_plugin" (stub file), while the
+        # single-file build uses "mcaEditor".  Maya uses the filename
+        # (sans .py) as the plugin name for pluginInfo queries.
+        _plugin_name = "mca_editor_plugin"
+        try:
+            if cmds.pluginInfo("mcaEditor", q=True, loaded=True):
+                _plugin_name = "mcaEditor"
+        except Exception:
+            pass
+
         # The auto-load block does three things:
         # 1. Checks the pluginInfo autoload flag — respects the user's
         #    choice in the Plug-in Manager.  If they unchecked "Auto load",
@@ -371,14 +382,15 @@ def initializePlugin(plugin):
         #    session.  Maya saves workspace controls in its layout prefs,
         #    and the cached uiScript fires before the plugin is loaded,
         #    causing "No module named 'mca_maya'" errors.
-        # 3. Loads the mcaEditor plugin if it isn't loaded yet.
+        # 3. Loads the plugin if it isn't loaded yet.
         _BLOCK = (
             "{marker}\n"
             "import maya.cmds as _mca_cmds\n"
             "import maya.utils as _mca_utils\n"
             "def _mca_auto_load():\n"
+            "    _pn = '{plugin_name}'\n"
             "    try:\n"
-            "        if not _mca_cmds.pluginInfo('mcaEditor', q=True, autoload=True):\n"
+            "        if not _mca_cmds.pluginInfo(_pn, q=True, autoload=True):\n"
             "            return\n"
             "    except Exception:\n"
             "        return\n"
@@ -389,13 +401,14 @@ def initializePlugin(plugin):
             "    except Exception:\n"
             "        pass\n"
             "    try:\n"
-            "        if not _mca_cmds.pluginInfo('mcaEditor', q=True, loaded=True):\n"
-            "            _mca_cmds.loadPlugin('mcaEditor')\n"
+            "        if not _mca_cmds.pluginInfo(_pn, q=True, loaded=True):\n"
+            "            _mca_cmds.loadPlugin(_pn)\n"
             "    except Exception:\n"
             "        pass\n"
             "_mca_utils.executeDeferred(_mca_auto_load)\n"
             "{end_marker}\n"
-        ).format(marker=_MARKER, end_marker=_END_MARKER)
+        ).format(marker=_MARKER, end_marker=_END_MARKER,
+                 plugin_name=_plugin_name)
 
         try:
             os.makedirs(scripts_dir, exist_ok=True)
@@ -423,7 +436,7 @@ def initializePlugin(plugin):
                 # Only force autoload=True on the FIRST install so that
                 # subsequent user changes in the Plug-in Manager stick.
                 try:
-                    cmds.pluginInfo("mcaEditor", edit=True, autoload=True)
+                    cmds.pluginInfo(_plugin_name, edit=True, autoload=True)
                 except Exception:
                     pass
                 with open(setup_path, "a") as f:

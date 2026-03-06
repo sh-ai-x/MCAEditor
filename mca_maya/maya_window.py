@@ -84,6 +84,90 @@ _mca_editor_window = None
 # handle and could never remove the stale callback.
 _output_callback_id = None
 
+# Module-level reference to the stderr tee wrapper.  Stored at module
+# level so it survives window recreation (same reason as the callback ID).
+_stderr_tee = None
+
+
+class _StderrTee:
+    """
+    Wrapper around sys.stderr that tees writes to the MCA output panel.
+
+    Python's ``logging`` module writes to sys.stderr by default.  Maya's
+    ``MCommandMessage.addCommandOutputCallback`` only captures Maya's own
+    output system (MEL echo, print(), cmds warnings) — it never sees
+    raw stderr writes.  This tee bridges the gap so logging output from
+    other frameworks (e.g. the MCA framework's ``[MCA - Module:...]``
+    lines) appears in our editor's output window alongside Maya's output.
+
+    The original stderr object is preserved and all writes are forwarded
+    to it first, so Maya's Script Editor and console still work normally.
+
+    :param object original: The original sys.stderr object to wrap.
+    :param OutputWindow output_widget: Our output panel widget.
+    """
+
+    def __init__(self, original, output_widget):
+        """
+        Initialize the tee with the original stderr and our output panel.
+
+        :param object original: The original sys.stderr.
+        :param OutputWindow output_widget: MCA Editor output window.
+        """
+        self._original = original
+        self._output = output_widget
+
+    def write(self, text):
+        """
+        Write to both the original stderr and our output panel.
+
+        :param str text: Text to write.
+        """
+        # Always forward to the original so Maya's own stderr handling works.
+        if self._original is not None:
+            try:
+                self._original.write(text)
+            except Exception:
+                pass
+
+        # Skip empty or whitespace-only writes.
+        if not text or not text.strip():
+            return
+
+        # Route to our output panel.
+        try:
+            stripped = text.rstrip()
+            # Detect error/warning patterns from logging output.
+            if "ERROR:" in stripped or "Error:" in stripped:
+                self._output.write_error(stripped)
+            elif "WARNING:" in stripped or "Warning:" in stripped:
+                self._output.write_warning(stripped)
+            else:
+                self._output.write_output(stripped)
+        except (RuntimeError, AttributeError):
+            # Output widget already deleted — ignore silently.
+            pass
+
+    def flush(self):
+        """Flush the original stderr."""
+        if self._original is not None:
+            try:
+                self._original.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        """
+        Forward any attribute access to the original stderr.
+
+        Ensures compatibility with code that checks stderr attributes
+        (e.g. ``encoding``, ``fileno()``, ``isatty()``).
+
+        :param str name: Attribute name.
+        :return: The attribute from the original stderr.
+        """
+        return getattr(self._original, name)
+
 
 # --- Hotkey Suppression Filter ----------------------------------------------
 
@@ -602,17 +686,23 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
     def _install_output_hook(self):
         """
-        Register a callback with Maya's MCommandMessage system to capture
-        all output that would normally appear in Maya's Script Editor.
+        Register callbacks to capture ALL Maya output — both Maya's native
+        command output system and Python's stderr (used by the logging module).
 
-        This includes startup logs, plugin load messages, warnings, errors,
-        and command results — everything Maya routes to its output window.
+        1. ``MCommandMessage.addCommandOutputCallback`` captures everything
+           Maya routes through its own output system: MEL echo, print(),
+           cmds.warning(), cmds.error(), and command results.
 
-        Uses the module-level ``_output_callback_id`` so the handle survives
-        window recreation.  Any previous callback is removed first to prevent
-        stale callbacks pointing at dead widget instances.
+        2. A tee wrapper on ``sys.stderr`` captures Python logging output
+           (e.g. ``[MCA - Module:...]`` lines from other frameworks).
+           Without this, logging output only appears in Maya's Script
+           Editor but not in our output panel.
+
+        Uses the module-level ``_output_callback_id`` and ``_stderr_tee``
+        so handles survive window recreation.  Any previous callback/tee
+        is removed first to prevent stale references.
         """
-        global _output_callback_id
+        global _output_callback_id, _stderr_tee
 
         # Remove any stale callback from a previous window instance before
         # registering a new one.  Without this, Maya keeps calling the old
@@ -632,6 +722,19 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
             logger.info("Maya output hook installed")
         except Exception as exc:
             logger.warning("Could not install Maya output hook: %s", exc)
+
+        # Install stderr tee to capture Python logging output.
+        # Restore original stderr first if a previous tee is still in place.
+        if _stderr_tee is not None:
+            sys.stderr = _stderr_tee._original
+            _stderr_tee = None
+
+        try:
+            _stderr_tee = _StderrTee(sys.stderr, self._panel._output)
+            sys.stderr = _stderr_tee
+            logger.info("Stderr tee installed for logging capture")
+        except Exception as exc:
+            logger.warning("Could not install stderr tee: %s", exc)
 
     def _load_maya_history(self):
         """
@@ -956,11 +1059,11 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         """
         Called by Maya when the dockable window is closed.
 
-        Removes the output hook, hotkey filter, saves state, and cleans up.
-        Sets ``editor_was_open`` to False so the editor stays closed on next
-        Maya launch (user explicitly closed it).
+        Removes the output hook, stderr tee, hotkey filter, saves state,
+        and cleans up.  Sets ``editor_was_open`` to False so the editor
+        stays closed on next Maya launch (user explicitly closed it).
         """
-        global _output_callback_id
+        global _output_callback_id, _stderr_tee
 
         # Record that the user explicitly closed the editor — don't auto-open
         # on next Maya launch.
@@ -975,10 +1078,21 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 pass
             _output_callback_id = None
 
-        # Remove the hotkey filter so Maya's shortcuts work normally again.
+        # Restore original stderr (remove the tee).
+        if _stderr_tee is not None:
+            sys.stderr = _stderr_tee._original
+            _stderr_tee = None
+
+        # Remove the hotkey filter and disconnect focusChanged so no
+        # dangling callbacks remain on QApplication after the window closes.
         app = QApplication.instance()
-        if app and self._hotkey_filter:
-            app.removeEventFilter(self._hotkey_filter)
+        if app:
+            if self._hotkey_filter:
+                app.removeEventFilter(self._hotkey_filter)
+            try:
+                app.focusChanged.disconnect(self._on_app_focus_changed)
+            except (TypeError, RuntimeError):
+                pass
 
         self._panel.save_window_state(self._settings)
         self._panel.cleanup()
@@ -1267,6 +1381,7 @@ def cleanup_editor(maya_is_exiting=False):
     """
     global _mca_editor_window
     global _output_callback_id
+    global _stderr_tee
 
     # Remove Maya output hook — this is an OpenMaya callback, safe
     # to remove during shutdown (not a Qt operation).
@@ -1277,13 +1392,30 @@ def cleanup_editor(maya_is_exiting=False):
             pass
         _output_callback_id = None
 
+    # Restore original stderr (remove the tee wrapper).
+    if _stderr_tee is not None:
+        sys.stderr = _stderr_tee._original
+        _stderr_tee = None
+
     # Clean up the editor window if it exists.
     if _mca_editor_window is not None:
         try:
-            # Remove hotkey filter.
+            # Remove hotkey filter and disconnect focusChanged signal.
+            # The focusChanged connection survives widget destruction and
+            # leaves a dangling callback on QApplication — during Python's
+            # atexit phase, shiboken tries to destruct the callback wrapper
+            # which references the freed window → ACCESS_VIOLATION.
             app = QApplication.instance()
-            if app and hasattr(_mca_editor_window, '_hotkey_filter') and _mca_editor_window._hotkey_filter:
-                app.removeEventFilter(_mca_editor_window._hotkey_filter)
+            if app:
+                if hasattr(_mca_editor_window, '_hotkey_filter') and _mca_editor_window._hotkey_filter:
+                    app.removeEventFilter(_mca_editor_window._hotkey_filter)
+
+                # Disconnect focusChanged — connected in __init__ at line 524.
+                try:
+                    app.focusChanged.disconnect(_mca_editor_window._on_app_focus_changed)
+                except (TypeError, RuntimeError):
+                    # Already disconnected or object invalidated — safe to ignore.
+                    pass
 
             # Save state and terminate terminals/adapters.
             _mca_editor_window._panel.save_window_state(_mca_editor_window._settings)
