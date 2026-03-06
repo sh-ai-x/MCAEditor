@@ -10,11 +10,14 @@ auto-marshaling signal-slot mechanism.
 
 Dependencies:
     - json (stdlib) — for argument parsing and result serialization
+    - urllib (stdlib) — for search_maya_docs web requests
 """
 
 import json
 import logging
 import traceback
+import urllib.parse
+import urllib.request
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -128,8 +131,15 @@ def _dispatch(api, tool_name, args):
             language=args.get("language", "python"),
         )
 
+    if tool_name == "get_maya_command_help":
+        return _handle_maya_command_help(api, args)
+
     if tool_name == "execute_locally":
         return api.execute_locally(args["code"])
+
+    # --- Search Tools ---
+    if tool_name == "search_maya_docs":
+        return _handle_search_maya_docs(args)
 
     # --- Output Tools ---
     if tool_name == "write_output":
@@ -140,3 +150,129 @@ def _dispatch(api, tool_name, args):
 
     # Unknown tool — should not happen if TOOLS and handler are in sync.
     raise ValueError("Unknown tool: '{}'".format(tool_name))
+
+
+# --- Maya Command Help Handler -----------------------------------------------
+
+def _handle_maya_command_help(api, args):
+    """
+    Look up Maya command documentation via ``cmds.help()`` in the live session.
+
+    Builds a small Python script that captures the ``cmds.help()`` output
+    (which prints to stdout) via a StringIO redirect, then sends it to Maya
+    through the existing ``execute_in_dcc`` pipeline.
+
+    :param MCAPluginAPI api: The plugin API instance.
+    :param dict args: Parsed tool arguments (expects ``command`` key).
+    :return: Dict with ``command`` and ``help`` keys, or ``error``.
+    :rtype: dict
+    """
+    command = args.get("command", "").strip()
+    if not command:
+        return {"error": "No command name provided."}
+
+    # Build a script that captures cmds.help() output through StringIO.
+    # Uses repr() to safely quote the command name and prevent injection.
+    script = (
+        "import sys, io, maya.cmds as cmds\n"
+        "_buf = io.StringIO()\n"
+        "_old = sys.stdout\n"
+        "sys.stdout = _buf\n"
+        "try:\n"
+        "    cmds.help({cmd})\n"
+        "finally:\n"
+        "    sys.stdout = _old\n"
+        "print(_buf.getvalue())\n"
+    ).format(cmd=repr(command))
+
+    # Execute inside the live Maya session via the existing DCC adapter.
+    result = api.execute_in_dcc(script)
+
+    # The result is a dict with 'output' and possibly 'error' keys.
+    output = ""
+    if isinstance(result, dict):
+        output = result.get("output", "")
+    elif isinstance(result, str):
+        output = result
+
+    # Check for meaningful output.
+    if not output or not output.strip():
+        return {
+            "error": (
+                "No help found for '{}'. Check the spelling — "
+                "Maya command names are case-sensitive (e.g. 'polyCube' "
+                "not 'PolyCube')."
+            ).format(command)
+        }
+
+    return {"command": command, "help": output.strip()}
+
+
+# --- Maya Docs Search Handler ------------------------------------------------
+
+def _handle_search_maya_docs(args):
+    """
+    Search Autodesk Maya documentation via DuckDuckGo Instant Answer API.
+
+    Uses the zero-dependency ``urllib`` approach with no API key.  Scopes
+    the query to ``help.autodesk.com`` and ``area.autodesk.com`` to bias
+    results toward official Autodesk content.
+
+    :param dict args: Parsed tool arguments (expects ``query`` key).
+    :return: Dict with ``query`` and ``results`` keys, or ``error``.
+    :rtype: dict
+    """
+    query = args.get("query", "").strip()
+    if not query:
+        return {"error": "No search query provided."}
+
+    # Scope the search to Autodesk help and community to reduce noise.
+    scoped_query = "{} site:help.autodesk.com OR site:area.autodesk.com".format(query)
+
+    try:
+        # DuckDuckGo Instant Answer API — no key required, no scraping.
+        encoded = urllib.parse.quote(scoped_query)
+        url = "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1".format(encoded)
+
+        req = urllib.request.Request(url, headers={"User-Agent": "MCAEditor/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        results = []
+
+        # AbstractText is a direct answer summary if one exists.
+        if data.get("AbstractText"):
+            results.append({
+                "title": data.get("Heading", ""),
+                "summary": data["AbstractText"],
+                "url": data.get("AbstractURL", ""),
+            })
+
+        # RelatedTopics are search result links — take the top 5.
+        for topic in data.get("RelatedTopics", [])[:5]:
+            if isinstance(topic, dict) and topic.get("Text"):
+                results.append({
+                    "title": topic.get("Text", "")[:120],
+                    "url": topic.get("FirstURL", ""),
+                })
+
+        if not results:
+            return {
+                "query": query,
+                "message": (
+                    "No results found. Try rephrasing the query or being more "
+                    "specific about the Maya version and feature name."
+                ),
+            }
+
+        return {"query": query, "results": results}
+
+    except Exception as exc:
+        logger.warning("Maya docs search failed: %s", exc)
+        return {
+            "error": "Search failed: {}".format(str(exc)),
+            "suggestion": (
+                "Try asking the question directly — the answer may be in "
+                "Orange Slice's built-in Maya knowledge."
+            ),
+        }

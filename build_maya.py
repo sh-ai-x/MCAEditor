@@ -40,7 +40,7 @@ DEFAULT_MAYAPY = "C:/Program Files/Autodesk/Maya2025/bin/mayapy.exe"
 DIST_PACKAGES = ["mca_core", "mca_qt", "mca_maya"]
 
 # Resource directories to bundle alongside the compiled packages.
-RESOURCE_DIRS = ["resources/images"]
+RESOURCE_DIRS = ["resources/images", "resources/gifs"]
 
 # Pure-Python files that must ship uncompiled in the Maya distribution.
 # venv_manager.py runs at plugin init before the venv exists, so it

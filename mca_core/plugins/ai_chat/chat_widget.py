@@ -29,12 +29,13 @@ Dependencies:
 import json
 import logging
 import os
+import random
 import re
 
 from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QPlainTextEdit, QScrollArea, QFrame, QComboBox, QLineEdit,
-    Qt, Signal, QTimer, QSize,
+    Qt, Signal, QTimer, QSize, QMovie, QPixmap,
 )
 
 from mca_core.plugins.ai_chat.provider import (
@@ -56,29 +57,245 @@ ORANGE_SLICE_COLOR = "#E8922A"
 USER_COLOR = "#569cd6"
 
 # Tool result background.
-TOOL_BG = "#1e1e2e"
+TOOL_BG = "#252526"
 
 # Code block background.
-CODE_BG = "#1a1a2e"
+CODE_BG = "#252526"
+
+# --- Thinking GIF Paths ------------------------------------------------------
+# Use mca_core's pre-computed package root — more reliable than __file__
+# which can be wrong for .pyc files loaded from the extraction cache.
+import mca_core
+_GIFS_DIR = os.path.join(mca_core._package_root, "resources", "gifs")
+
+# The two mascot GIFs — one is randomly chosen each time the AI starts thinking.
+_THINKING_GIFS = [
+    os.path.join(_GIFS_DIR, "Logo_InAndOut.gif"),
+    os.path.join(_GIFS_DIR, "Logo_TailWaggle.gif"),
+]
+
+# Size for the thinking GIF (pixels).
+_THINKING_GIF_SIZE = 48
+
+# --- Bubble Style Constants --------------------------------------------------
+
+# User bubble background — subtle dark blue tint.
+USER_BUBBLE_BG = "#1a2332"
+
+# Assistant bubble background — slightly lighter than main bg.
+ASSISTANT_BUBBLE_BG = "#252526"
+
+# Bubble border radius.
+BUBBLE_RADIUS = 12
+
+# Chat font — friendly and rounded, with fallbacks for all platforms.
+CHAT_FONT = "Segoe UI, Helvetica Neue, Arial, sans-serif"
+
+# Chat font size for prose text (px).
+CHAT_FONT_SIZE = 13
+
+
+# --- Markdown-to-HTML Helper ------------------------------------------------
+
+def _markdown_to_html(text):
+    """
+    Convert lightweight Markdown to HTML for display in QLabel rich text.
+
+    Handles the most common patterns the AI produces:
+        - ``**bold**`` and ``__bold__``
+        - ``*italic*`` and ``_italic_``
+        - `` `inline code` ``
+        - Unordered lists (``- item`` or ``* item``)
+        - Numbered lists (``1. item``)
+        - ``### headings``
+        - Line breaks (double newline → paragraph, single → ``<br>``)
+
+    Does NOT handle fenced code blocks — those are split out before
+    this function is called.
+
+    :param str text: Markdown-formatted prose text.
+    :return: HTML string safe for QLabel rich text rendering.
+    :rtype: str
+    """
+    import html as html_mod
+
+    # Escape HTML entities first so user text can't inject tags.
+    text = html_mod.escape(text)
+
+    # --- Block-level processing (line by line) ---
+    lines = text.split("\n")
+    html_lines = []
+    in_list = False  # Track whether we're inside a <ul> or <ol>.
+    list_tag = ""
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Headings: ### Heading → <b style="...">Heading</b>
+        heading_match = re.match(r"^(#{1,4})\s+(.*)", stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            heading_text = heading_match.group(2)
+            # Scale size by heading level.
+            sizes = {1: 16, 2: 15, 3: 14, 4: 13}
+            size = sizes.get(level, 13)
+            # Close any open list before a heading.
+            if in_list:
+                html_lines.append("</{}>".format(list_tag))
+                in_list = False
+            html_lines.append(
+                '<b style="font-size: {}px; color: #e0e0e0;">{}</b><br>'.format(
+                    size, heading_text
+                )
+            )
+            continue
+
+        # Unordered list items: - item  or  * item
+        ul_match = re.match(r"^[-*]\s+(.*)", stripped)
+        if ul_match:
+            if not in_list or list_tag != "ul":
+                if in_list:
+                    html_lines.append("</{}>".format(list_tag))
+                html_lines.append("<ul style='margin: 2px 0; padding-left: 18px;'>")
+                in_list = True
+                list_tag = "ul"
+            html_lines.append("<li>{}</li>".format(ul_match.group(1)))
+            continue
+
+        # Ordered list items: 1. item
+        ol_match = re.match(r"^\d+\.\s+(.*)", stripped)
+        if ol_match:
+            if not in_list or list_tag != "ol":
+                if in_list:
+                    html_lines.append("</{}>".format(list_tag))
+                html_lines.append("<ol style='margin: 2px 0; padding-left: 18px;'>")
+                in_list = True
+                list_tag = "ol"
+            html_lines.append("<li>{}</li>".format(ol_match.group(1)))
+            continue
+
+        # Non-list line — close any open list.
+        if in_list:
+            html_lines.append("</{}>".format(list_tag))
+            in_list = False
+
+        # Empty line → paragraph break.
+        if not stripped:
+            html_lines.append("<br>")
+        else:
+            html_lines.append(stripped)
+
+    # Close any trailing open list.
+    if in_list:
+        html_lines.append("</{}>".format(list_tag))
+
+    result = "<br>".join(
+        l for l in html_lines
+        if not l.startswith(("<ul", "<ol", "<li", "</ul", "</ol"))
+    )
+    # Re-insert list blocks without <br> joining (they have their own spacing).
+    # Simpler approach: just join all lines, lists already have block tags.
+    result = "\n".join(html_lines)
+
+    # --- Inline processing ---
+    # Bold: **text** or __text__
+    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
+    result = re.sub(r"__(.+?)__", r"<b>\1</b>", result)
+
+    # Italic: *text* or _text_ (but not inside words like file_name).
+    result = re.sub(r"(?<!\w)\*([^*]+?)\*(?!\w)", r"<i>\1</i>", result)
+    result = re.sub(r"(?<!\w)_([^_]+?)_(?!\w)", r"<i>\1</i>", result)
+
+    # Inline code: `code`
+    result = re.sub(
+        r"`([^`]+?)`",
+        r'<span style="background-color: #1e1e1e; color: #ce9178;'
+        r' font-family: Consolas, monospace; font-size: 12px;'
+        r' padding: 1px 4px; border-radius: 3px;">\1</span>',
+        result,
+    )
+
+    return result
+
+
+def _streaming_to_html(text):
+    """
+    Convert streaming text to HTML, handling partial code blocks.
+
+    During streaming, a code block may be incomplete (opening ``` but no
+    closing ```).  This function splits completed code blocks into styled
+    ``<pre>`` tags and converts prose sections through ``_markdown_to_html``.
+    An in-progress code block is rendered as a ``<pre>`` with a "..." hint.
+
+    :param str text: The accumulated streaming text so far.
+    :return: HTML string for QLabel rich text rendering.
+    :rtype: str
+    """
+    # Split on complete fenced code blocks.
+    parts = re.split(r"(```[\s\S]*?```)", text)
+
+    # Check if there's an unclosed code block at the end.
+    # If the number of ``` occurrences is odd, the last block is incomplete.
+    fence_count = text.count("```")
+    has_partial = (fence_count % 2 == 1)
+
+    html_parts = []
+    for i, part in enumerate(parts):
+        if not part.strip():
+            continue
+
+        if part.startswith("```") and part.endswith("```") and len(part) > 6:
+            # Complete fenced code block — render as styled <pre>.
+            inner = part[3:-3]
+            lines = inner.split("\n", 1)
+            if len(lines) > 1 and lines[0].strip().isalpha():
+                code = lines[1]
+            else:
+                code = inner
+
+            import html as html_mod
+            escaped = html_mod.escape(code.strip())
+            html_parts.append(
+                '<pre style="background-color: #1e1e1e; color: #d4d4d4;'
+                ' font-family: Consolas, monospace; font-size: 12px;'
+                ' padding: 8px; border-radius: 6px;'
+                ' border: 1px solid #333333;">{}</pre>'.format(escaped)
+            )
+        elif has_partial and i == len(parts) - 1 and "```" in part:
+            # Partial (unclosed) code block — show what we have so far.
+            inner = part.split("```", 1)[1] if "```" in part else part
+            import html as html_mod
+            escaped = html_mod.escape(inner.strip())
+            html_parts.append(
+                '<pre style="background-color: #1e1e1e; color: #d4d4d4;'
+                ' font-family: Consolas, monospace; font-size: 12px;'
+                ' padding: 8px; border-radius: 6px;'
+                ' border: 1px solid #333333;">{}</pre>'.format(escaped)
+            )
+        else:
+            # Prose text — convert markdown to HTML.
+            html_parts.append(_markdown_to_html(part.strip()))
+
+    return "".join(html_parts)
 
 
 # --- Stylesheet Fragments ---------------------------------------------------
 
 _CHAT_AREA_STYLE = """
     QScrollArea {
-        background: transparent;
+        background-color: #1e1e1e;
         border: none;
     }
     QWidget#chatContainer {
-        background: transparent;
+        background-color: #1e1e1e;
     }
 """
 
 _INPUT_STYLE = """
     QPlainTextEdit {{
-        background-color: #252530;
+        background-color: #252526;
         color: #cccccc;
-        border: 1px solid #3e3e50;
+        border: 1px solid #3e3e42;
         border-radius: 6px;
         padding: 8px;
         font-family: {font_family};
@@ -106,15 +323,15 @@ _SEND_BUTTON_STYLE = """
         background-color: #c07018;
     }}
     QPushButton:disabled {{
-        background-color: #3e3e50;
+        background-color: #3e3e42;
         color: #666666;
     }}
 """
 
 _SETTINGS_OVERLAY_STYLE = """
     QWidget#settingsOverlay {
-        background-color: #1e1e2e;
-        border: 1px solid #3e3e50;
+        background-color: #1e1e1e;
+        border: 1px solid #3e3e42;
         border-radius: 8px;
     }
     QLabel {
@@ -122,9 +339,9 @@ _SETTINGS_OVERLAY_STYLE = """
         font-size: 12px;
     }
     QComboBox {
-        background-color: #252530;
+        background-color: #252526;
         color: #cccccc;
-        border: 1px solid #3e3e50;
+        border: 1px solid #3e3e42;
         border-radius: 4px;
         padding: 4px 8px;
         min-height: 24px;
@@ -133,37 +350,57 @@ _SETTINGS_OVERLAY_STYLE = """
         border: none;
     }
     QLineEdit {
-        background-color: #252530;
+        background-color: #252526;
         color: #cccccc;
-        border: 1px solid #3e3e50;
+        border: 1px solid #3e3e42;
         border-radius: 4px;
         padding: 4px 8px;
         min-height: 24px;
     }
     QPushButton {
-        background-color: #333345;
+        background-color: #333333;
         color: #cccccc;
-        border: 1px solid #3e3e50;
+        border: 1px solid #3e3e42;
         border-radius: 4px;
         padding: 6px 16px;
     }
     QPushButton:hover {
-        background-color: #3e3e50;
+        background-color: #3e3e42;
     }
 """
 
+# --- Suggestion Chip Lists ---------------------------------------------------
+# Default chips shown when no Maya DCC is connected.
+_DEFAULT_CHIPS = [
+    "How do I select all meshes in Maya?",
+    "Explain the current file",
+    "Fix the error in the output panel",
+]
+
+# Maya helpdesk chips — 4 random picks shown when Maya is connected.
+_MAYA_HELPDESK_CHIPS = [
+    "How do I bind skin to a skeleton?",
+    "Where is Paint Skin Weights?",
+    "How do I set up an IK spine rig?",
+    "What does the skinCluster node do?",
+    "How do I bake animation to keyframes?",
+    "Where are blend shape controls?",
+]
+
+
 _SUGGESTION_STYLE = """
     QPushButton {{
-        background-color: #252530;
+        background-color: #252526;
         color: #aaaaaa;
-        border: 1px solid #3e3e50;
+        border: 1px solid #3e3e42;
         border-radius: 12px;
         padding: 6px 14px;
+        font-family: {font};
         font-size: 12px;
         text-align: left;
     }}
     QPushButton:hover {{
-        background-color: #2a2a3a;
+        background-color: #2d2d30;
         border-color: {accent};
         color: #cccccc;
     }}
@@ -176,11 +413,11 @@ _SUGGESTION_STYLE = """
 
 class MessageBubble(QFrame):
     """
-    A single chat message displayed in the message area.
+    A messenger-style chat bubble for user or assistant messages.
 
-    Renders the sender label and message content with appropriate
-    styling for user vs. assistant messages.  Code blocks get
-    monospace styling with a subtle background.
+    User bubbles are right-aligned with a blue tint.  Assistant bubbles
+    are left-aligned with a neutral dark background.  Code blocks get
+    monospace styling inside the bubble.
 
     :param str sender: Display name ("You" or "Orange Slice").
     :param str text: The message text (may contain ``` code blocks).
@@ -198,39 +435,74 @@ class MessageBubble(QFrame):
         """
         super().__init__(parent)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(4)
+        # Transparent outer frame — the bubble background is on the inner widget.
+        self.setStyleSheet("MessageBubble { background: transparent; border: none; }")
+
+        # Outer layout provides horizontal padding and alignment.
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(8, 4, 8, 4)
+        outer_layout.setSpacing(0)
+
+        # Choose alignment and colors based on role.
+        if role == "user":
+            bubble_bg = USER_BUBBLE_BG
+            sender_color = USER_COLOR
+            # Push bubble to the right with a left spacer.
+            outer_layout.addSpacing(40)
+        else:
+            bubble_bg = ASSISTANT_BUBBLE_BG
+            sender_color = ORANGE_SLICE_COLOR
+
+        # The actual bubble container with rounded corners.
+        bubble = QFrame()
+        bubble.setStyleSheet(
+            "QFrame {{"
+            "  background-color: {bg};"
+            "  border-radius: {r}px;"
+            "  border: 1px solid #2d2d30;"
+            "}}".format(bg=bubble_bg, r=BUBBLE_RADIUS)
+        )
+
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(12, 8, 12, 8)
+        bubble_layout.setSpacing(4)
 
         # Sender label with role-specific color.
-        color = USER_COLOR if role == "user" else ORANGE_SLICE_COLOR
         sender_label = QLabel(sender)
         sender_label.setStyleSheet(
-            "QLabel {{ color: {}; font-weight: bold; font-size: 12px; }}".format(color)
+            "QLabel {{ color: {c}; font-weight: bold; font-size: 11px;"
+            " font-family: {font};"
+            " background: transparent; border: none; }}".format(
+                c=sender_color, font=CHAT_FONT
+            )
         )
-        layout.addWidget(sender_label)
+        bubble_layout.addWidget(sender_label)
 
         # Message content — parse code blocks for special styling.
         content_widget = self._build_content(text)
-        layout.addWidget(content_widget)
+        bubble_layout.addWidget(content_widget)
 
-        # Subtle bottom border to separate messages.
-        self.setStyleSheet(
-            "MessageBubble {{ border-bottom: 1px solid #2a2a3a; }}"
-        )
+        outer_layout.addWidget(bubble, 1)
+
+        # User messages get right alignment via a spacer on the left (added above).
+        # Assistant messages get a right spacer to push bubble left.
+        if role != "user":
+            outer_layout.addSpacing(40)
 
     def _build_content(self, text):
         """
         Build the content widget, splitting code blocks from prose.
 
         Fenced code blocks (```) get monospace styling with a dark
-        background.  Everything else is rendered as plain text.
+        background.  Prose text is converted from Markdown to HTML
+        so bold, italic, inline code, and lists render properly.
 
-        :param str text: Raw message text.
+        :param str text: Raw message text (may contain Markdown).
         :return: Widget containing the formatted message.
         :rtype: QWidget
         """
         container = QWidget()
+        container.setStyleSheet("QWidget { background: transparent; border: none; }")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
@@ -259,25 +531,31 @@ class MessageBubble(QFrame):
                 )
                 code_label.setStyleSheet(
                     "QLabel {{"
-                    "  background-color: %s;"
+                    "  background-color: #1e1e1e;"
                     "  color: #d4d4d4;"
                     "  font-family: Consolas, monospace;"
                     "  font-size: 12px;"
                     "  padding: 8px;"
-                    "  border-radius: 4px;"
-                    "  border: 1px solid #2a2a3a;"
-                    "}}" % CODE_BG
+                    "  border-radius: 6px;"
+                    "  border: 1px solid #333333;"
+                    "}}"
                 )
                 layout.addWidget(code_label)
             else:
-                # Regular text.
-                text_label = QLabel(part.strip())
+                # Prose text — convert Markdown to HTML for rich rendering.
+                html_content = _markdown_to_html(part.strip())
+                text_label = QLabel(html_content)
+                text_label.setTextFormat(Qt.TextFormat.RichText)
                 text_label.setWordWrap(True)
                 text_label.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
                 text_label.setStyleSheet(
-                    "QLabel { color: #cccccc; font-size: 13px; }"
+                    "QLabel {{ color: #cccccc; font-size: {sz}px;"
+                    " font-family: {font};"
+                    " background: transparent; border: none; }}".format(
+                        sz=CHAT_FONT_SIZE, font=CHAT_FONT
+                    )
                 )
                 layout.addWidget(text_label)
 
@@ -382,9 +660,12 @@ class ChatInput(QPlainTextEdit):
         """
         super().__init__(parent)
         self.setPlaceholderText("Type a message...")
-        self.setMaximumHeight(100)
-        # Start with a single line height.
-        self.setFixedHeight(36)
+        # Enable word wrap so long lines don't scroll horizontally.
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        # Start at a single-line height, grow up to ~8 lines as the user types.
+        self._min_height = 36
+        self._max_height = 200
+        self.setFixedHeight(self._min_height)
         self.textChanged.connect(self._adjust_height)
 
     def keyPressEvent(self, event):
@@ -402,7 +683,7 @@ class ChatInput(QPlainTextEdit):
             if text:
                 self.send_requested.emit(text)
                 self.clear()
-                self.setFixedHeight(36)
+                self.setFixedHeight(self._min_height)
             return
 
         # All other keys (including Shift+Enter) go through normal handling.
@@ -412,7 +693,7 @@ class ChatInput(QPlainTextEdit):
         """Auto-resize height based on content, up to max."""
         doc_height = self.document().size().height()
         # Add padding for the widget frame.
-        new_height = int(min(max(doc_height + 16, 36), 100))
+        new_height = int(min(max(doc_height + 16, self._min_height), self._max_height))
         self.setFixedHeight(new_height)
 
 
@@ -569,6 +850,8 @@ class AIChatWidget(QWidget):
         self._current_text = ""   # Accumulator for streaming response.
         self._streaming_label = None  # Label being updated during streaming.
         self._pending_tool_calls = {}  # call_id -> (tool_name, args_json)
+        self._thinking_gif_widget = None  # QLabel showing the animated mascot.
+        self._thinking_movie = None       # QMovie driving the thinking GIF.
 
         self._setup_ui()
 
@@ -603,7 +886,7 @@ class AIChatWidget(QWidget):
         """
         header = QFrame()
         header.setStyleSheet(
-            "QFrame {{ background-color: #1a1a28; border-bottom: 1px solid #2a2a3a; }}"
+            "QFrame {{ background-color: #1e1e1e; border-bottom: 1px solid #2d2d30; }}"
         )
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(12, 8, 12, 8)
@@ -636,11 +919,11 @@ class AIChatWidget(QWidget):
         new_chat_btn.setFixedSize(QSize(40, 28))
         new_chat_btn.setStyleSheet(
             "QPushButton {"
-            "  background-color: #333345; color: #aaaaaa;"
-            "  border: 1px solid #3e3e50; border-radius: 4px;"
+            "  background-color: #333333; color: #aaaaaa;"
+            "  border: 1px solid #3e3e42; border-radius: 4px;"
             "  font-size: 11px;"
             "}"
-            "QPushButton:hover { background-color: #3e3e50; }"
+            "QPushButton:hover { background-color: #3e3e42; }"
         )
         new_chat_btn.clicked.connect(self.new_chat)
         header_layout.addWidget(new_chat_btn)
@@ -699,9 +982,8 @@ class AIChatWidget(QWidget):
         )
         greeting.setAlignment(Qt.AlignmentFlag.AlignCenter)
         greeting.setStyleSheet(
-            "QLabel {{ color: {}; font-size: 16px; font-weight: bold; }}".format(
-                ORANGE_SLICE_COLOR
-            )
+            "QLabel {{ color: {}; font-size: 16px; font-weight: bold;"
+            " font-family: {}; }}".format(ORANGE_SLICE_COLOR, CHAT_FONT)
         )
         welcome_layout.addWidget(greeting)
 
@@ -710,22 +992,20 @@ class AIChatWidget(QWidget):
             "and interacting with Maya."
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("QLabel { color: #888888; font-size: 12px; }")
+        subtitle.setStyleSheet(
+            "QLabel {{ color: #888888; font-size: 12px; font-family: {}; }}".format(CHAT_FONT)
+        )
         welcome_layout.addWidget(subtitle)
 
         welcome_layout.addSpacing(16)
 
-        # Suggestion chips.
-        suggestions = [
-            "How do I select all meshes in Maya?",
-            "Explain the current file",
-            "Fix the error in the output panel",
-        ]
+        # Suggestion chips — pick helpdesk-flavored chips when Maya is connected.
+        suggestions = self._pick_suggestion_chips()
 
         for suggestion in suggestions:
             btn = QPushButton(suggestion)
             btn.setStyleSheet(
-                _SUGGESTION_STYLE.format(accent=ORANGE_SLICE_COLOR)
+                _SUGGESTION_STYLE.format(accent=ORANGE_SLICE_COLOR, font=CHAT_FONT)
             )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             # Capture suggestion text in the lambda closure.
@@ -739,6 +1019,39 @@ class AIChatWidget(QWidget):
         # Insert welcome screen before the stretch in the chat layout.
         self._chat_layout.insertWidget(0, self._welcome_widget)
 
+    def _pick_suggestion_chips(self):
+        """
+        Choose suggestion chips based on the current DCC connection.
+
+        When Maya is the connected DCC, picks 4 random helpdesk chips
+        plus 2 default chips for variety.  Otherwise returns the 3
+        default scripting-focused chips.
+
+        :return: List of suggestion strings.
+        :rtype: list
+        """
+        try:
+            state = self._api.get_state()
+            dcc_info = state.get("dcc", {}) or {}
+            is_maya = (
+                dcc_info.get("connected")
+                and dcc_info.get("type", "").lower() == "maya"
+            )
+        except Exception:
+            is_maya = False
+
+        if is_maya:
+            # Pick 4 random helpdesk chips + 2 random defaults for variety.
+            helpdesk = random.sample(
+                _MAYA_HELPDESK_CHIPS, min(4, len(_MAYA_HELPDESK_CHIPS))
+            )
+            defaults = random.sample(
+                _DEFAULT_CHIPS, min(2, len(_DEFAULT_CHIPS))
+            )
+            return helpdesk + defaults
+
+        return list(_DEFAULT_CHIPS)
+
     def _build_input_bar(self, parent_layout):
         """
         Build the input bar with text input and send button.
@@ -747,7 +1060,7 @@ class AIChatWidget(QWidget):
         """
         input_bar = QFrame()
         input_bar.setStyleSheet(
-            "QFrame { background-color: #1a1a28; border-top: 1px solid #2a2a3a; }"
+            "QFrame { background-color: #1e1e1e; border-top: 1px solid #2d2d30; }"
         )
         input_layout = QHBoxLayout(input_bar)
         input_layout.setContentsMargins(8, 8, 8, 8)
@@ -757,8 +1070,8 @@ class AIChatWidget(QWidget):
         self._input = ChatInput()
         self._input.setStyleSheet(
             _INPUT_STYLE.format(
-                font_family="Consolas",
-                font_size=13,
+                font_family=CHAT_FONT,
+                font_size=CHAT_FONT_SIZE,
                 accent=ORANGE_SLICE_COLOR,
             )
         )
@@ -787,11 +1100,15 @@ class AIChatWidget(QWidget):
             self._worker.request_stop()
             self._worker = None
 
-        # Clear conversation history.
+        # Clear conversation history and thinking state.
         self._messages = []
         self._current_text = ""
         self._streaming_label = None
         self._pending_tool_calls = {}
+        self._thinking_gif_widget = None
+        if self._thinking_movie is not None:
+            self._thinking_movie.stop()
+            self._thinking_movie = None
 
         # Clear all message widgets from the chat layout.
         # Keep the stretch at the end.
@@ -907,13 +1224,29 @@ class AIChatWidget(QWidget):
         """
         Handle a streaming text token from the worker.
 
+        On the first token, hides the thinking GIF and reveals the
+        streaming text label.  Converts accumulated text through the
+        markdown-to-HTML pipeline so formatting renders live.
+
         :param str token: The text token to append.
         """
         self._current_text += token
 
-        # Update the streaming label with the accumulated text.
+        # On first token, swap the thinking GIF for the text label.
+        if self._thinking_gif_widget is not None and self._thinking_gif_widget.isVisible():
+            self._thinking_gif_widget.setVisible(False)
+            # Stop the movie to free resources.
+            if self._thinking_movie is not None:
+                self._thinking_movie.stop()
+                self._thinking_movie = None
+            # Reveal the streaming text label.
+            if self._streaming_label is not None:
+                self._streaming_label.setVisible(True)
+
+        # Update the streaming label with formatted HTML.
         if self._streaming_label is not None:
-            self._streaming_label.setText(self._current_text)
+            html = _streaming_to_html(self._current_text)
+            self._streaming_label.setText(html)
             self._streaming_label.adjustSize()
 
         # Auto-scroll to the bottom.
@@ -959,12 +1292,21 @@ class AIChatWidget(QWidget):
 
         :param str final_text: The complete assistant message text.
         """
+        # Stop the thinking GIF if it's still running.
+        if self._thinking_movie is not None:
+            self._thinking_movie.stop()
+            self._thinking_movie = None
+        self._thinking_gif_widget = None
+
         # Replace the streaming label with a proper message bubble.
         if self._streaming_label is not None:
-            # Remove the streaming container.
-            parent = self._streaming_label.parent()
-            if parent:
-                idx = self._chat_layout.indexOf(parent)
+            # Remove the streaming container (walk up to the outermost frame).
+            # The streaming label is inside bubble -> outer container.
+            widget = self._streaming_label
+            while widget and widget.parent() != self._chat_container:
+                widget = widget.parent()
+            if widget:
+                idx = self._chat_layout.indexOf(widget)
                 if idx >= 0:
                     item = self._chat_layout.takeAt(idx)
                     if item and item.widget():
@@ -993,6 +1335,25 @@ class AIChatWidget(QWidget):
         :param str error_msg: The error message.
         """
         logger.error("AI chat error: %s", error_msg)
+
+        # Stop the thinking GIF if still running.
+        if self._thinking_movie is not None:
+            self._thinking_movie.stop()
+            self._thinking_movie = None
+        self._thinking_gif_widget = None
+
+        # Remove the streaming bubble (it has the thinking GIF in it).
+        if self._streaming_label is not None:
+            widget = self._streaming_label
+            while widget and widget.parent() != self._chat_container:
+                widget = widget.parent()
+            if widget:
+                idx = self._chat_layout.indexOf(widget)
+                if idx >= 0:
+                    item = self._chat_layout.takeAt(idx)
+                    if item and item.widget():
+                        item.widget().deleteLater()
+            self._streaming_label = None
 
         # Show the error in the chat.
         self._add_message_bubble(
@@ -1028,41 +1389,95 @@ class AIChatWidget(QWidget):
 
     def _add_streaming_bubble(self):
         """
-        Add a streaming response placeholder to the chat area.
+        Add a streaming response placeholder with a thinking GIF.
 
-        Returns the QLabel that will be updated with streaming tokens.
+        Shows an animated mascot GIF while waiting for the first token,
+        then hides it once text starts arriving.  Returns the QLabel
+        that will be updated with streaming tokens.
 
         :return: The label widget for streaming text updates.
         :rtype: QLabel
         """
+        # Outer frame — transparent, provides alignment spacing.
         container = QFrame(parent=self._chat_container)
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(4)
+        container.setStyleSheet("QFrame { background: transparent; border: none; }")
+        outer_layout = QHBoxLayout(container)
+        outer_layout.setContentsMargins(8, 4, 8, 4)
+        outer_layout.setSpacing(0)
+
+        # Inner bubble with rounded corners (assistant style).
+        bubble = QFrame()
+        bubble.setStyleSheet(
+            "QFrame {{"
+            "  background-color: {bg};"
+            "  border-radius: {r}px;"
+            "  border: 1px solid #2d2d30;"
+            "}}".format(bg=ASSISTANT_BUBBLE_BG, r=BUBBLE_RADIUS)
+        )
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(12, 8, 12, 8)
+        bubble_layout.setSpacing(4)
 
         # Sender label.
         sender_label = QLabel("Orange Slice")
         sender_label.setStyleSheet(
-            "QLabel {{ color: {}; font-weight: bold; font-size: 12px; }}".format(
-                ORANGE_SLICE_COLOR
+            "QLabel {{ color: {c}; font-weight: bold; font-size: 11px;"
+            " font-family: {font};"
+            " background: transparent; border: none; }}".format(
+                c=ORANGE_SLICE_COLOR, font=CHAT_FONT
             )
         )
-        layout.addWidget(sender_label)
+        bubble_layout.addWidget(sender_label)
 
-        # Streaming text label (updated incrementally).
+        # --- Thinking GIF indicator ---
+        # Pick a random mascot GIF and display it while waiting for tokens.
+        gif_widget = QLabel()
+        gif_widget.setFixedSize(QSize(_THINKING_GIF_SIZE, _THINKING_GIF_SIZE))
+        gif_widget.setStyleSheet("QLabel { background: transparent; border: none; }")
+
+        # Try to load a random thinking GIF.
+        gif_path = random.choice(_THINKING_GIFS)
+        logger.debug("Thinking GIF path: %s (exists=%s)", gif_path, os.path.exists(gif_path))
+        self._thinking_movie = None
+        if os.path.exists(gif_path):
+            movie = QMovie(gif_path)
+            movie.setScaledSize(QSize(_THINKING_GIF_SIZE, _THINKING_GIF_SIZE))
+            gif_widget.setMovie(movie)
+            movie.start()
+            # Keep a reference so we can stop it later.
+            self._thinking_movie = movie
+        else:
+            # Fallback — just show a text indicator.
+            gif_widget.setText("...")
+            gif_widget.setStyleSheet(
+                "QLabel {{ color: {}; font-size: 18px;"
+                " background: transparent; border: none; }}".format(ORANGE_SLICE_COLOR)
+            )
+
+        bubble_layout.addWidget(gif_widget)
+        self._thinking_gif_widget = gif_widget
+
+        # Streaming text label (updated incrementally, hidden until first token).
+        # Uses RichText so markdown formatting renders live during streaming.
         text_label = QLabel("")
+        text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setWordWrap(True)
         text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         text_label.setStyleSheet(
-            "QLabel { color: #cccccc; font-size: 13px; }"
+            "QLabel {{ color: #cccccc; font-size: {sz}px;"
+            " font-family: {font};"
+            " background: transparent; border: none; }}".format(
+                sz=CHAT_FONT_SIZE, font=CHAT_FONT
+            )
         )
-        layout.addWidget(text_label)
+        text_label.setVisible(False)
+        bubble_layout.addWidget(text_label)
 
-        container.setStyleSheet(
-            "QFrame { border-bottom: 1px solid #2a2a3a; }"
-        )
+        outer_layout.addWidget(bubble, 1)
+        # Right spacer to push bubble left (assistant alignment).
+        outer_layout.addSpacing(40)
 
         # Insert before the stretch.
         self._chat_layout.insertWidget(
@@ -1123,10 +1538,15 @@ class AIChatWidget(QWidget):
 
     def cleanup(self):
         """
-        Stop any active worker thread.
+        Stop any active worker thread and release GIF resources.
 
         Called during plugin deactivation.
         """
+        # Stop the thinking GIF animation.
+        if self._thinking_movie is not None:
+            self._thinking_movie.stop()
+            self._thinking_movie = None
+
         if self._worker is not None:
             self._worker.request_stop()
             self._worker.wait(3000)  # Wait up to 3 seconds.

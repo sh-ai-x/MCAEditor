@@ -73,7 +73,7 @@ if PYSIDE_VERSION == 6:
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor, QAction, QActionGroup,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,
-        QDrag,
+        QDrag, QMovie,
     )
 
     # Additional QtCore imports for drag-and-drop support.
@@ -110,7 +110,7 @@ else:
         QPainter, QTextFormat, QSyntaxHighlighter, QTextCharFormat,
         QTextCursor,
         QIcon, QPixmap, QPen, QPainterPath, QTextOption,
-        QDrag,
+        QDrag, QMovie,
     )
 
     # Additional QtCore imports for drag-and-drop support.
@@ -219,6 +219,9 @@ else:
         ])
         _patch_enum_group(Qt, "TextElideMode", [
             "ElideLeft", "ElideRight", "ElideMiddle", "ElideNone",
+        ])
+        _patch_enum_group(Qt, "TextFormat", [
+            "PlainText", "RichText", "AutoText", "MarkdownText",
         ])
         _patch_enum_group(Qt, "Corner", [
             "TopLeftCorner", "TopRightCorner",

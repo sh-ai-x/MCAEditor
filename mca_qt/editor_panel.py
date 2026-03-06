@@ -2192,6 +2192,10 @@ class MCAEditorPanel(QWidget):
         If ``menu_path`` is provided, a submenu with that name is created
         (or reused) under the Plugins menu, and the action is added there.
 
+        Guards against dead C++ objects — Maya's workspace control system
+        can destroy QMenu objects when reparenting the editor panel, leaving
+        Python references pointing at freed memory.
+
         :param str menu_path: Submenu name (e.g. "Hello World"), or None/empty
             for a top-level action under Plugins.
         :param str label: Display label for the action.
@@ -2204,6 +2208,17 @@ class MCAEditorPanel(QWidget):
             logger.warning("Plugins menu not available — cannot add '%s'", label)
             return None
 
+        # Verify the C++ backing of _plugins_menu is still alive.
+        # Maya's workspace control reparenting can destroy QMenu objects
+        # while Python references still exist, causing RuntimeError on access.
+        if not self._is_menu_alive(self._plugins_menu):
+            logger.warning(
+                "Plugins menu C++ object was deleted — rebuilding for '%s'", label
+            )
+            self._rebuild_plugins_menu()
+            if self._plugins_menu is None:
+                return None
+
         # Determine which menu to add the action to.
         target_menu = self._plugins_menu
         if menu_path:
@@ -2212,7 +2227,14 @@ class MCAEditorPanel(QWidget):
             # alive — PySide6 GC deletes QMenu objects returned by
             # addMenu() if nothing holds a reference.
             if menu_path in self._plugin_submenus:
-                target_menu = self._plugin_submenus[menu_path]
+                # Verify the cached submenu is still alive.
+                if self._is_menu_alive(self._plugin_submenus[menu_path]):
+                    target_menu = self._plugin_submenus[menu_path]
+                else:
+                    # Stale reference — recreate the submenu.
+                    del self._plugin_submenus[menu_path]
+                    target_menu = self._plugins_menu.addMenu(menu_path)
+                    self._plugin_submenus[menu_path] = target_menu
             else:
                 target_menu = self._plugins_menu.addMenu(menu_path)
                 self._plugin_submenus[menu_path] = target_menu
@@ -2227,6 +2249,69 @@ class MCAEditorPanel(QWidget):
         target_menu.addAction(action)
         self.addAction(action)
         return action
+
+    @staticmethod
+    def _is_menu_alive(menu):
+        """
+        Check whether a QMenu's C++ backing object is still alive.
+
+        PySide6 does not invalidate Python references when Qt deletes the
+        underlying C++ widget (e.g. during reparenting).  Accessing a dead
+        wrapper raises ``RuntimeError``.
+
+        :param QMenu menu: The menu to check.
+        :return: True if the C++ object is valid.
+        :rtype: bool
+        """
+        try:
+            # Any property access will raise if the C++ object is deleted.
+            menu.objectName()
+            return True
+        except RuntimeError:
+            return False
+
+    def _rebuild_plugins_menu(self):
+        """
+        Rebuild the Plugins menu after its C++ object was destroyed.
+
+        Finds the current menu bar (walking up the widget tree) and
+        re-adds the Plugins menu.  Clears stale submenu references.
+        """
+        # Clear stale submenu references.
+        self._plugin_submenus.clear()
+
+        # Walk up the parent chain to find a valid QMenuBar.
+        menubar = None
+        parent = self.parent()
+        while parent is not None:
+            # Look for the menubar attribute set by the host window.
+            if hasattr(parent, "_menubar"):
+                candidate = parent._menubar
+                if self._is_menu_alive(candidate):
+                    menubar = candidate
+                    break
+            # Also try QMainWindow's built-in menuBar().
+            if hasattr(parent, "menuBar"):
+                try:
+                    candidate = parent.menuBar()
+                    if candidate and self._is_menu_alive(candidate):
+                        menubar = candidate
+                        break
+                except RuntimeError:
+                    pass
+            parent = parent.parent() if hasattr(parent, "parent") else None
+
+        if menubar is None:
+            logger.warning("Cannot rebuild Plugins menu — no valid menu bar found")
+            self._plugins_menu = None
+            return
+
+        # Create a fresh Plugins menu on the existing menu bar.
+        self._plugins_menu = menubar.addMenu("Pl&ugins")
+        self._create_action(self._plugins_menu, "Plugin Settings...",
+                            callback=self._show_plugin_settings)
+        self._plugins_menu.addSeparator()
+        logger.info("Rebuilt Plugins menu on recovered menu bar")
 
     # =========================================================================
     # Tab / Buffer Management

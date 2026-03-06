@@ -1194,20 +1194,17 @@ def show_mca_editor():
     # the MCP server (a separate process) can never connect to Maya.
     _ensure_command_ports()
 
-    # If the workspace control already exists from a previous session,
-    # delete it so we can create a fresh one. Maya keeps the control
-    # alive even after the widget is closed, which causes a "name not
-    # unique" error if we try to create another one.
+    # If the workspace control already exists (Maya restored it from
+    # saved layout, or it was left over), just bring it to front.
+    # Maya's workspace system remembers docked/floating, position, size.
     if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
-        # If the control is still visible, just bring it to front.
         if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, query=True, visible=True):
             cmds.workspaceControl(WORKSPACE_CONTROL_NAME, edit=True, restore=True)
             logger.info("MCA Editor workspace control restored (already visible)")
             return
 
-        # Clean up the old panel before destroying the workspace control.
-        # deleteUI does NOT trigger dockCloseEventTriggered, so output
-        # and session data would be lost without this explicit save.
+        # Control exists but is not visible — clean up and delete so
+        # we can recreate it fresh.
         if _mca_editor_window is not None:
             try:
                 _mca_editor_window._panel.save_window_state(
@@ -1219,9 +1216,6 @@ def show_mca_editor():
                 logger.warning("Pre-reload cleanup failed: %s", exc)
             _mca_editor_window = None
 
-        # Remove the stale output callback so the new window gets a
-        # clean hook.  _install_output_hook() also does this, but
-        # being explicit here avoids any gap.
         if _output_callback_id is not None:
             try:
                 om2.MMessage.removeCallback(_output_callback_id)
@@ -1229,8 +1223,6 @@ def show_mca_editor():
                 pass
             _output_callback_id = None
 
-        # Control exists but is not visible — delete it so we can
-        # recreate cleanly with a new widget instance.
         cmds.deleteUI(WORKSPACE_CONTROL_NAME)
         logger.info("Deleted stale workspace control: %s", WORKSPACE_CONTROL_NAME)
 
@@ -1279,18 +1271,25 @@ def show_mca_editor():
         logger.exception("MCA Editor failed to create window")
         return
 
-    # Show as a dockable workspace control with persistence.
-    # The uiScript is called by Maya when it needs to recreate the UI
-    # (e.g., loading a saved layout).
+    # Show as a dockable workspace control with full Maya persistence.
+    # retain=True (default) lets Maya remember position/size/dock state.
+    # The uiScript lets Maya recreate the widget when restoring layouts.
+    #
+    # We don't pass area= or floating= — the mixin defaults to floating
+    # when area is None.  On subsequent opens, Maya's retain system
+    # restores whatever state the user left it in (docked, floating, etc).
     try:
         _mca_editor_window.show(
             dockable=True,
-            area="right",
-            floating=True,
             width=1200,
             height=800,
             label="MCA Editor",
-            uiScript="exec('try:\\n from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()\\nexcept: pass')",
+            uiScript=(
+                "exec('try:\\n"
+                " from mca_maya.maya_window import _restore_mca_editor;"
+                " _restore_mca_editor()\\n"
+                "except: pass')"
+            ),
         )
     except Exception as exc:
         om2.MGlobal.displayError("MCA Editor failed to show window: {}".format(exc))
@@ -1312,44 +1311,37 @@ def _restore_mca_editor():
     Restore the MCA Editor panel inside an existing workspace control.
 
     Called by Maya's workspace control ``uiScript`` when restoring a
-    saved layout.  Maya may call this multiple times during a single
-    layout restore cycle, so we guard against redundant recreation.
+    saved layout.  Maya already created the workspace control in
+    whatever state the user left it (docked, floating, position, size).
+    We just need to populate it with our widget.
 
-    If a live window already exists (valid C++ object, not deleted),
-    we skip re-creation entirely.  Otherwise we clean up the old
-    window's resources and create a fresh one.
+    Maya may call this multiple times during a single layout restore
+    cycle, so we guard against redundant recreation.
     """
     global _mca_editor_window
 
     # Ensure command ports are open so the MCP server can connect.
-    # This is the layout-restore path — show_mca_editor() may never
-    # run if Maya restores the editor from a saved workspace layout.
     _ensure_command_ports()
 
     # Guard: if a valid window already exists, skip recreation.
-    # Maya's uiScript can fire many times during a single layout
-    # restore (10-20 calls is common).  Without this guard, each
-    # call creates a new MCAMayaWindow, loads Maya history, and
-    # the previous instance leaks callbacks and resources.
     if _mca_editor_window is not None:
         try:
-            # Test if the C++ object is still alive.
             _mca_editor_window.objectName()
             logger.info("MCA Editor already exists — skipping uiScript re-creation")
             return
         except RuntimeError:
-            # C++ object deleted — fall through to recreate.
             _mca_editor_window = None
 
-    # Create a fresh window widget.
+    # Create a fresh window widget and parent it into the workspace control.
     _mca_editor_window = MCAMayaWindow()
-
-    # Use the mixin's helper to parent into the workspace control.
-    # Maya already created the workspace control from the saved layout;
-    # we just need to populate it with our widget.
     _mca_editor_window.show(
         dockable=True,
-        uiScript="exec('try:\\n from mca_maya.maya_window import _restore_mca_editor; _restore_mca_editor()\\nexcept: pass')",
+        uiScript=(
+            "exec('try:\\n"
+            " from mca_maya.maya_window import _restore_mca_editor;"
+            " _restore_mca_editor()\\n"
+            "except: pass')"
+        ),
     )
 
     logger.info("MCA Editor workspace control restored via uiScript")
@@ -1424,12 +1416,18 @@ def cleanup_editor(maya_is_exiting=False):
         except Exception as exc:
             logger.warning("Error during MCA Editor cleanup: %s", exc)
 
-        # During Maya shutdown, explicitly destroy the widget tree via
-        # shiboken so there are no dangling Python wrappers when Maya's
-        # C++ teardown later destroys the workspace control hierarchy.
-        # Without this, shiboken destructors fire during Python GC/atexit
-        # and dereference freed C++ memory → ACCESS_VIOLATION.
         if maya_is_exiting:
+            # Maya is shutting down.  Hide the workspace control to prevent
+            # the close flash, then destroy the widget via shiboken so no
+            # dangling Python wrappers exist during Maya's C++ teardown.
+            # Do NOT deleteUI — let Maya save the workspace state so the
+            # editor remembers its position/dock state on next launch.
+            try:
+                if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, q=True, exists=True):
+                    cmds.workspaceControl(WORKSPACE_CONTROL_NAME, e=True, visible=False)
+            except Exception:
+                pass
+
             try:
                 import shiboken6
                 if shiboken6.isValid(_mca_editor_window):
@@ -1437,25 +1435,14 @@ def cleanup_editor(maya_is_exiting=False):
                     logger.info("Destroyed editor widget via shiboken6.delete()")
             except Exception as exc:
                 logger.warning("shiboken6.delete() failed: %s", exc)
+        else:
+            # Manual plugin unload — delete the workspace control so it
+            # doesn't linger as an empty shell.
+            try:
+                if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
+                    cmds.deleteUI(WORKSPACE_CONTROL_NAME)
+                    logger.info("Deleted workspace control (manual unload)")
+            except Exception:
+                pass
 
         _mca_editor_window = None
-
-    # Delete the workspace control so Maya does NOT save it in the
-    # workspace layout.  Without this, Maya caches our uiScript in its
-    # preferences — on next startup, workspace restore fires the stale
-    # uiScript before the plugin is loaded, causing "No module named
-    # 'mca_maya'" errors.  Our own editor_was_open setting and
-    # _do_auto_open_editor() handle reopening, so we don't need Maya's
-    # workspace persistence at all.
-    #
-    # SKIP during Maya shutdown — the widget tree was already destroyed
-    # by shiboken6.delete() above, and the workspace control will be
-    # cleaned up by Maya's own shutdown.  Calling deleteUI here during
-    # exit can crash if the control's C++ object is already gone.
-    if not maya_is_exiting:
-        try:
-            if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
-                cmds.deleteUI(WORKSPACE_CONTROL_NAME)
-                logger.info("Deleted workspace control to prevent stale layout save")
-        except Exception:
-            pass

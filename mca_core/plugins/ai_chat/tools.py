@@ -1,7 +1,7 @@
 """
 MCA Core - AI Chat Tool Definitions.
 
-OpenAI function-calling schema for 16 tools that map to MCAPluginAPI
+OpenAI function-calling schema for 18 tools that map to MCAPluginAPI
 methods.  These definitions are passed to the chat completions API
 so the AI assistant can interact with the editor and connected DCC.
 
@@ -333,6 +333,33 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_maya_command_help",
+            "description": (
+                "Returns the official help documentation for a Maya Python command "
+                "from the live Maya session. Use this for any scripting question to "
+                "get exact flag names, types, and descriptions for the user's "
+                "installed Maya version. Examples: 'polyCube', 'skinCluster', "
+                "'parentConstraint', 'keyframe', 'joint'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "The Maya Python command name to look up. "
+                            "Use the maya.cmds form (e.g. 'polyCube', not "
+                            "'maya.cmds.polyCube'). Case-sensitive."
+                        ),
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "execute_locally",
             "description": (
                 "Execute Python code locally in the editor's process with "
@@ -348,6 +375,39 @@ TOOLS = [
                     },
                 },
                 "required": ["code"],
+            },
+        },
+    },
+
+    # --- Search Tools ---
+    {
+        "type": "function",
+        "function": {
+            "name": "search_maya_docs",
+            "description": (
+                "Searches Autodesk's Maya documentation and community forums for "
+                "answers about Maya workflows, UI locations, rigging techniques, "
+                "animation methods, rendering, and any other Maya topic. Use this "
+                "when the question requires finding specific documentation, is "
+                "version-specific, involves a complex workflow not covered by "
+                "get_maya_command_help, or when you want to verify UI locations "
+                "in a specific Maya version."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "The search query. Be specific. Include Maya version "
+                            "if relevant (e.g. 'Maya 2025 paint skin weights UI'). "
+                            "Good examples: 'Maya 2024 IK spline handle setup', "
+                            "'Maya bind skin options proximity', "
+                            "'Maya nCloth collision thickness attribute'."
+                        ),
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
