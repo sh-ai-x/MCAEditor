@@ -96,6 +96,14 @@ _stderr_tee = None
 # is the sole capture mechanism for Python stdout.
 _stdout_tee = None
 
+# Module-level output target — the OutputWindow widget that all three
+# capture mechanisms (MCommandMessage, _StdoutTee, _StderrTee) write to.
+# Updated by _install_output_hook() when a new window is created, and
+# cleared by dockCloseEventTriggered() / cleanup_editor() when the window
+# is destroyed.  When None, the tees silently no-op instead of crashing
+# on a dead C++ widget reference.
+_output_target = None
+
 class _StderrTee:
     """
     Wrapper around sys.stderr that tees writes to the MCA output panel.
@@ -111,18 +119,19 @@ class _StderrTee:
     to it first, so Maya's Script Editor and console still work normally.
 
     :param object original: The original sys.stderr object to wrap.
-    :param OutputWindow output_widget: Our output panel widget.
     """
 
-    def __init__(self, original, output_widget):
+    def __init__(self, original):
         """
-        Initialize the tee with the original stderr and our output panel.
+        Initialize the tee with the original stderr.
+
+        The output target is read from the module-level ``_output_target``
+        on each write, so the tee survives window recreation without
+        needing to be reinstalled.
 
         :param object original: The original sys.stderr.
-        :param OutputWindow output_widget: MCA Editor output window.
         """
         self._original = original
-        self._output = output_widget
 
     def write(self, text):
         """
@@ -141,16 +150,21 @@ class _StderrTee:
         if not text or not text.strip():
             return
 
-        # Route to our output panel.
+        # Route to our output panel via the module-level target.
+        # When the target is None (editor closed but tee still installed),
+        # the write silently no-ops instead of crashing on a dead widget.
+        target = _output_target
+        if target is None:
+            return
         try:
             stripped = text.rstrip()
             # Detect error/warning patterns from logging output.
             if "ERROR:" in stripped or "Error:" in stripped:
-                self._output.write_error(stripped)
+                target.write_error(stripped)
             elif "WARNING:" in stripped or "Warning:" in stripped:
-                self._output.write_warning(stripped)
+                target.write_warning(stripped)
             else:
-                self._output.write_output(stripped)
+                target.write_output(stripped)
         except (RuntimeError, AttributeError):
             # Output widget already deleted — ignore silently.
             pass
@@ -192,18 +206,19 @@ class _StdoutTee:
     and console still work normally.
 
     :param object original: The original sys.stdout object to wrap.
-    :param OutputWindow output_widget: Our output panel widget.
     """
 
-    def __init__(self, original, output_widget):
+    def __init__(self, original):
         """
-        Initialize the tee with the original stdout and our output panel.
+        Initialize the tee with the original stdout.
+
+        The output target is read from the module-level ``_output_target``
+        on each write, so the tee survives window recreation without
+        needing to be reinstalled.
 
         :param object original: The original sys.stdout.
-        :param OutputWindow output_widget: MCA Editor output window.
         """
         self._original = original
-        self._output = output_widget
 
     def write(self, text):
         """
@@ -222,15 +237,20 @@ class _StdoutTee:
         if not text or not text.strip():
             return
 
-        # Route to our output panel.
+        # Route to our output panel via the module-level target.
+        # When the target is None (editor closed but tee still installed),
+        # the write silently no-ops instead of crashing on a dead widget.
+        target = _output_target
+        if target is None:
+            return
         try:
             stripped = text.rstrip()
             # Detect result-formatted output from the internal adapter.
             # "# Result: <value> #" is printed for eval'd expressions.
             if stripped.startswith("# Result:") and stripped.endswith("#"):
-                self._output.write_result(stripped)
+                target.write_result(stripped)
             else:
-                self._output.write_output(stripped)
+                target.write_output(stripped)
         except (RuntimeError, AttributeError):
             # Output widget already deleted — ignore silently.
             pass
@@ -254,6 +274,105 @@ class _StdoutTee:
         :return: The attribute from the original stdout.
         """
         return getattr(self._original, name)
+
+
+# --- Maya Output Callback (module-level) ------------------------------------
+
+def _on_maya_output(message, message_type, client_data):
+    """
+    Callback fired by Maya for every line of command output.
+
+    Registered via ``MCommandMessage.addCommandOutputCallback`` and called
+    at module level (not as an instance method) so it survives window
+    recreation.  Writes to the module-level ``_output_target`` which is
+    updated whenever a new editor window is created.
+
+    Routes messages to the appropriate output window method based
+    on the message type, with color coding for errors, warnings,
+    results, and info.
+
+    NO content filtering is applied — every message that appears
+    in Maya's Script Editor also appears here.  The only exception
+    is the ``cutCopyPaste.mel`` artifact which is caused by MCA
+    Editor's hotkey handling, not by user code.
+
+    :param str message: The output text from Maya.
+    :param int message_type: MCommandMessage message type constant.
+    :param object client_data: Unused client data from Maya.
+    """
+    # Skip empty messages.
+    if not message or not message.strip():
+        return
+
+    # Bail early if there's no output target (editor closed).
+    target = _output_target
+    if target is None:
+        return
+
+    # Suppress the harmless "Nothing is selected" error from Maya's
+    # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
+    # during focus transitions and nothing is selected in the viewport.
+    # This is an MCA Editor artifact, not real Maya output.
+    if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
+        return
+
+    # Guard against the output widget being destroyed (C++ side)
+    # while this callback is still registered.  Happens when the
+    # editor window is torn down but Maya output keeps firing.
+    # An unhandled RuntimeError here cascades through Maya's callback
+    # dispatch and can crash the entire session.
+    try:
+        text = message.rstrip()
+
+        # Route to the appropriate output method based on message type.
+        # Color coding: red for errors, orange for warnings, yellow for
+        # results, blue for info, white for display (print output).
+        if message_type == om2.MCommandMessage.kError:
+            target.write_error(text)
+
+        elif message_type == om2.MCommandMessage.kWarning:
+            target.write_warning(text)
+
+        elif message_type == om2.MCommandMessage.kResult:
+            target.write_result(text)
+
+        elif message_type == om2.MCommandMessage.kInfo:
+            target.write_info(text)
+
+        else:
+            # kDisplay — MEL echo and Maya C++ output.
+            #
+            # Python print() output is captured separately by the
+            # permanent _StdoutTee (MCommandMessage does NOT fire
+            # kDisplay for print() from exec'd Python code).  So
+            # kDisplay here only contains MEL echo, command output,
+            # and other Maya C++ system messages — no dedup needed.
+            #
+            # Detect result-formatted output from our internal adapter.
+            # Maya's C++ displayResult (kResult) is not exposed in
+            # Python API 2.0, so the adapter prints results as
+            # "# Result: <value> #" via print().  Detect that pattern
+            # and route to write_result() for proper result coloring.
+            stripped = text.strip()
+            if stripped.startswith("# Result:") and stripped.endswith("#"):
+                target.write_result(text)
+            else:
+                target.write_output(text)
+
+        # Force-flush and repaint immediately so output appears in
+        # real-time during code execution.  Without this, the 16ms
+        # QTimer can't fire while exec() blocks the event loop, and
+        # all output would dump at once when execution finishes.
+        target.flush()
+
+    except Exception:
+        # Widget already deleted or other error — silently ignore.
+        # Must catch broadly: RuntimeError from shiboken (dead C++ object),
+        # AttributeError if panel is partially torn down, etc.
+        # An unhandled exception here cascades through Maya's callback
+        # dispatcher and can crash the session or silently remove
+        # the callback, killing all future output capture.
+        pass
 
 
 # --- Hotkey Suppression Filter ----------------------------------------------
@@ -794,10 +913,21 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
            output (e.g. ``[MCA - Module:...]`` lines from other
            frameworks) which writes to stderr by default.
 
+        The output target (``_output_target``) is always updated to
+        this window's output widget.  The tees and MCommandMessage
+        callback all read from ``_output_target``, so switching
+        windows is just a pointer swap — no tee reinstallation needed.
+        Tees are installed once and stay until ``cleanup_editor()``
+        (plugin unload).  On dock close they just no-op via the
+        ``_output_target is None`` guard.
+
         Uses module-level references so handles survive window recreation.
-        Any previous callback/tee is removed first to prevent stale refs.
         """
-        global _output_callback_id, _stderr_tee, _stdout_tee
+        global _output_callback_id, _stderr_tee, _stdout_tee, _output_target
+
+        # Point all capture mechanisms at this window's output widget.
+        # This is the ONLY per-window update — everything else is once-only.
+        _output_target = self._panel._output
 
         # Remove any stale callback from a previous window instance before
         # registering a new one.  Without this, Maya keeps calling the old
@@ -810,41 +940,34 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 pass
             _output_callback_id = None
 
+        # Register the module-level _on_maya_output function (not an
+        # instance method) so the callback survives window recreation.
         try:
             _output_callback_id = om2.MCommandMessage.addCommandOutputCallback(
-                self._on_maya_output
+                _on_maya_output
             )
             logger.info("Maya output hook installed")
         except Exception as exc:
             logger.warning("Could not install Maya output hook: %s", exc)
 
-        # Install stdout tee to capture Python print() output.
-        # MCommandMessage does NOT fire kDisplay for print() from exec'd
-        # Python code, so this tee is the sole capture mechanism for
-        # stdout.  Restore original stdout first if a previous tee exists.
-        if _stdout_tee is not None:
-            sys.stdout = _stdout_tee._original
-            _stdout_tee = None
+        # Install stdout tee ONCE — it reads _output_target on each write,
+        # so it doesn't need to be recreated when windows change.
+        if _stdout_tee is None:
+            try:
+                _stdout_tee = _StdoutTee(sys.stdout)
+                sys.stdout = _stdout_tee
+                logger.info("Stdout tee installed for print() capture")
+            except Exception as exc:
+                logger.warning("Could not install stdout tee: %s", exc)
 
-        try:
-            _stdout_tee = _StdoutTee(sys.stdout, self._panel._output)
-            sys.stdout = _stdout_tee
-            logger.info("Stdout tee installed for print() capture")
-        except Exception as exc:
-            logger.warning("Could not install stdout tee: %s", exc)
-
-        # Install stderr tee to capture Python logging output.
-        # Restore original stderr first if a previous tee is still in place.
-        if _stderr_tee is not None:
-            sys.stderr = _stderr_tee._original
-            _stderr_tee = None
-
-        try:
-            _stderr_tee = _StderrTee(sys.stderr, self._panel._output)
-            sys.stderr = _stderr_tee
-            logger.info("Stderr tee installed for logging capture")
-        except Exception as exc:
-            logger.warning("Could not install stderr tee: %s", exc)
+        # Install stderr tee ONCE — same pattern as stdout.
+        if _stderr_tee is None:
+            try:
+                _stderr_tee = _StderrTee(sys.stderr)
+                sys.stderr = _stderr_tee
+                logger.info("Stderr tee installed for logging capture")
+            except Exception as exc:
+                logger.warning("Could not install stderr tee: %s", exc)
 
     def _load_maya_history(self):
         """
@@ -915,99 +1038,6 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 output.write_output(line)
 
         logger.info("Loaded %d lines of Maya session history", len(lines))
-
-    def _on_maya_output(self, message, message_type, client_data):
-        """
-        Callback fired by Maya for every line of command output.
-
-        This is the sole source of stdout-related output for the MCA
-        Editor output panel.  ``MCommandMessage.addCommandOutputCallback``
-        captures everything Maya's Script Editor shows: ``print()``
-        output, MEL echo, ``cmds.warning()``, ``cmds.error()``, command
-        results, and ``MGlobal.displayInfo()``.
-
-        Routes messages to the appropriate output window method based
-        on the message type, with color coding for errors, warnings,
-        results, and info.
-
-        NO content filtering is applied — every message that appears
-        in Maya's Script Editor also appears here.  The only exception
-        is the ``cutCopyPaste.mel`` artifact which is caused by MCA
-        Editor's hotkey handling, not by user code.
-
-        :param str message: The output text from Maya.
-        :param int message_type: MCommandMessage message type constant.
-        :param object client_data: Unused client data from Maya.
-        """
-        # Skip empty messages.
-        if not message or not message.strip():
-            return
-
-        # Suppress the harmless "Nothing is selected" error from Maya's
-        # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
-        # during focus transitions and nothing is selected in the viewport.
-        # This is an MCA Editor artifact, not real Maya output.
-        if "cutCopyPaste.mel" in message and "Nothing is selected" in message:
-            return
-
-        # Guard against the output widget being destroyed (C++ side)
-        # while this callback is still registered.  Happens when the
-        # editor window is torn down but Maya output keeps firing.
-        # An unhandled RuntimeError here cascades through Maya's callback
-        # dispatch and can crash the entire session.
-        try:
-            text = message.rstrip()
-            output = self._panel._output
-
-            # Route to the appropriate output method based on message type.
-            # Color coding: red for errors, orange for warnings, yellow for
-            # results, blue for info, white for display (print output).
-            if message_type == om2.MCommandMessage.kError:
-                output.write_error(text)
-
-            elif message_type == om2.MCommandMessage.kWarning:
-                output.write_warning(text)
-
-            elif message_type == om2.MCommandMessage.kResult:
-                output.write_result(text)
-
-            elif message_type == om2.MCommandMessage.kInfo:
-                output.write_info(text)
-
-            else:
-                # kDisplay — MEL echo and Maya C++ output.
-                #
-                # Python print() output is captured separately by the
-                # permanent _StdoutTee (MCommandMessage does NOT fire
-                # kDisplay for print() from exec'd Python code).  So
-                # kDisplay here only contains MEL echo, command output,
-                # and other Maya C++ system messages — no dedup needed.
-                #
-                # Detect result-formatted output from our internal adapter.
-                # Maya's C++ displayResult (kResult) is not exposed in
-                # Python API 2.0, so the adapter prints results as
-                # "# Result: <value> #" via print().  Detect that pattern
-                # and route to write_result() for proper result coloring.
-                stripped = text.strip()
-                if stripped.startswith("# Result:") and stripped.endswith("#"):
-                    output.write_result(text)
-                else:
-                    output.write_output(text)
-
-            # Force-flush and repaint immediately so output appears in
-            # real-time during code execution.  Without this, the 16ms
-            # QTimer can't fire while exec() blocks the event loop, and
-            # all output would dump at once when execution finishes.
-            output.flush()
-
-        except Exception:
-            # Widget already deleted or other error — silently ignore.
-            # Must catch broadly: RuntimeError from shiboken (dead C++ object),
-            # AttributeError if panel is partially torn down, etc.
-            # An unhandled exception here cascades through Maya's callback
-            # dispatcher and can crash the session or silently remove
-            # the callback, killing all future output capture.
-            pass
 
     # --- Status Bar ----------------------------------------------------------
 
@@ -1175,15 +1205,23 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         """
         Called by Maya when the dockable window is closed.
 
-        Removes the output hook, stderr tee, hotkey filter, saves state,
-        and cleans up.  Sets ``editor_was_open`` to False so the editor
-        stays closed on next Maya launch (user explicitly closed it).
+        Clears the output target (tees and MCommandMessage no-op when
+        it's None), removes the MCommandMessage callback, hotkey filter,
+        saves state, and cleans up.  Tees stay installed — they just
+        silently discard writes until a new window sets ``_output_target``.
+
+        Sets ``editor_was_open`` to False so the editor stays closed on
+        next Maya launch (user explicitly closed it).
         """
-        global _output_callback_id, _stderr_tee, _stdout_tee
+        global _output_callback_id, _output_target
 
         # Record that the user explicitly closed the editor — don't auto-open
         # on next Maya launch.
         self._settings.set("editor_was_open", False)
+
+        # Disconnect the output target FIRST so any output that fires
+        # during cleanup below doesn't hit a partially-torn-down widget.
+        _output_target = None
 
         # Remove the Maya output hook so we stop receiving messages.
         if _output_callback_id is not None:
@@ -1194,15 +1232,11 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 pass
             _output_callback_id = None
 
-        # Restore original stdout (remove the tee).
-        if _stdout_tee is not None:
-            sys.stdout = _stdout_tee._original
-            _stdout_tee = None
-
-        # Restore original stderr (remove the tee).
-        if _stderr_tee is not None:
-            sys.stderr = _stderr_tee._original
-            _stderr_tee = None
+        # NOTE: Tees (_stdout_tee / _stderr_tee) are NOT removed here.
+        # They stay installed and silently no-op when _output_target is
+        # None.  This avoids breaking the stdout/stderr chain on
+        # close/reopen — _install_output_hook() just sets _output_target
+        # on the next window creation and everything resumes.
 
         # Remove the hotkey filter and disconnect focusChanged so no
         # dangling callbacks remain on QApplication after the window closes.
@@ -1324,6 +1358,7 @@ def show_mca_editor():
     """
     global _mca_editor_window
     global _output_callback_id
+    global _output_target
 
     # Ensure command ports are open FIRST — before any early return.
     # When Maya restores a saved layout, the workspace control is already
@@ -1342,6 +1377,7 @@ def show_mca_editor():
 
         # Control exists but is not visible — clean up and delete so
         # we can recreate it fresh.
+        _output_target = None
         if _mca_editor_window is not None:
             try:
                 _mca_editor_window._panel.save_window_state(
@@ -1560,8 +1596,15 @@ def cleanup_editor(maya_is_exiting=False):
     """
     global _mca_editor_window
     global _output_callback_id
+    global _output_target
     global _stderr_tee
     global _stdout_tee
+
+    # Clear the output target FIRST — all three capture mechanisms
+    # (MCommandMessage, _StdoutTee, _StderrTee) check this before
+    # writing, so any output that fires during cleanup below is
+    # silently discarded instead of hitting a dead widget.
+    _output_target = None
 
     # Remove Maya output hook — this is an OpenMaya callback, safe
     # to remove during shutdown (not a Qt operation).
@@ -1573,6 +1616,7 @@ def cleanup_editor(maya_is_exiting=False):
         _output_callback_id = None
 
     # Restore original stdout (remove the tee wrapper).
+    # Full teardown — this is plugin unload, not just dock close.
     if _stdout_tee is not None:
         sys.stdout = _stdout_tee._original
         _stdout_tee = None
