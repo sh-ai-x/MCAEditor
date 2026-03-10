@@ -120,10 +120,14 @@ def _do_auto_open_editor():
     Called via executeDeferred from initializePlugin.  Checks the
     ``editor_was_open`` setting and opens the editor if True.
 
-    If Maya's workspace restore created a stale empty workspace control
-    (from the saved layout), we clean up the old window's resources and
-    delete the control so show_mca_editor() creates a fresh one with
-    the actual widget inside.
+    If the uiScript restoration already created a healthy window (from
+    the workspace control's saved layout), we just refresh the output
+    hooks and bail — no need to tear down and recreate.  This avoids
+    the startup race where userSetup.py deletes the workspace control
+    between uiScript restoration and this deferred call.
+
+    If the window is missing or dead, we fall back to the original
+    behavior: clean up stale resources and call show_mca_editor().
     """
     try:
         # Check setting — bail early if the editor wasn't open last session.
@@ -131,11 +135,29 @@ def _do_auto_open_editor():
         if not MCASettings().get("editor_was_open", False):
             return
 
+        from mca_maya import maya_window as _mw
+
+        # If a healthy window already exists (from uiScript restoration
+        # that wasn't killed by userSetup), refresh hooks and bail.
+        # This is the common case when plugin auto-load is enabled —
+        # uiScript fires first and creates Window A, then this deferred
+        # call fires and just needs to ensure hooks point at the right
+        # output widget.
+        if _mw._mca_editor_window is not None:
+            try:
+                # Alive check — will raise RuntimeError if C++ is dead.
+                _mw._mca_editor_window.objectName()
+                _mw._mca_editor_window._install_output_hook()
+                logger.info("Auto-open: existing window is healthy, refreshed hooks")
+                return
+            except RuntimeError:
+                # C++ object already deleted — fall through to recreate.
+                _mw._mca_editor_window = None
+
         _ctrl = "MCAEditorWorkspaceControl"
         if cmds.workspaceControl(_ctrl, exists=True):
             # Clean up any window created by the uiScript restoration
             # (may have failed or produced a blank window).
-            from mca_maya import maya_window as _mw
             if _mw._mca_editor_window is not None:
                 try:
                     _mw._mca_editor_window._panel.save_window_state(
@@ -154,6 +176,9 @@ def _do_auto_open_editor():
                 except Exception:
                     pass
                 _mw._output_callback_id = None
+
+            # Clear stale output target so tees don't write to dead widget.
+            _mw._output_target = None
 
             cmds.deleteUI(_ctrl)
             logger.info("Deleted stale workspace control before auto-open")
@@ -374,15 +399,18 @@ def initializePlugin(plugin):
         except Exception:
             pass
 
-        # The auto-load block does three things:
+        # The auto-load block does four things:
         # 1. Checks the pluginInfo autoload flag — respects the user's
         #    choice in the Plug-in Manager.  If they unchecked "Auto load",
         #    we do NOT force the plugin back on.
-        # 2. Deletes any stale workspace control left over from a previous
+        # 2. If the plugin is ALREADY loaded (Plug-in Manager auto-load
+        #    beat us to it), skip workspace control deletion — uiScript
+        #    restoration already created a working editor window.
+        # 3. Deletes any stale workspace control left over from a previous
         #    session.  Maya saves workspace controls in its layout prefs,
         #    and the cached uiScript fires before the plugin is loaded,
         #    causing "No module named 'mca_maya'" errors.
-        # 3. Loads the plugin if it isn't loaded yet.
+        # 4. Loads the plugin if it isn't loaded yet.
         _BLOCK = (
             "{marker}\n"
             "import maya.cmds as _mca_cmds\n"
@@ -394,6 +422,14 @@ def initializePlugin(plugin):
             "            return\n"
             "    except Exception:\n"
             "        return\n"
+            "    # If plugin is already loaded (Plug-in Manager auto-load),\n"
+            "    # uiScript restoration already created the editor. Skip\n"
+            "    # workspace deletion so we don't destroy a working window.\n"
+            "    try:\n"
+            "        if _mca_cmds.pluginInfo(_pn, q=True, loaded=True):\n"
+            "            return\n"
+            "    except Exception:\n"
+            "        pass\n"
             "    try:\n"
             "        _ctrl = 'MCAEditorWorkspaceControl'\n"
             "        if _mca_cmds.workspaceControl(_ctrl, exists=True):\n"
