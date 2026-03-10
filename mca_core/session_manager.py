@@ -86,8 +86,9 @@ class SessionManager:
         (lazy creation via ``_ensure_dirs``).
         """
         # Base preferences directory under the user's Documents folder.
-        documents = os.path.expanduser("~/Documents")
-        self._prefs_dir = os.path.join(documents, "mca_preferences")
+        # Centralized in mca_core.__init__.get_prefs_dir().
+        from mca_core import get_prefs_dir
+        self._prefs_dir = get_prefs_dir()
 
         # Default workspace directories inside mca_preferences.
         # "scripts" is for user scripts AND buffer storage (unified).

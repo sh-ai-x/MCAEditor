@@ -53,7 +53,9 @@ PORT_RANGE = 10
 METHOD_TIMEOUT = 10
 
 # Discovery file path — MCP tools read this to find the editor.
-_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences")
+# Uses inline path construction to avoid import failures during
+# early startup when mca_core.__init__ may not be fully loaded yet.
+_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences", "MCAEditor")
 _DISCOVERY_FILE = os.path.join(_PREFS_DIR, "api_port.json")
 
 

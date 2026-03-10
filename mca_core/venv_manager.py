@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 # --- Constants ----------------------------------------------------------------
 
 # Base preferences directory under the user's Documents folder.
-# Matches the path used by session_manager.py.
-_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences")
+# Centralized in mca_core.__init__.get_prefs_dir().
+from mca_core import get_prefs_dir
+_PREFS_DIR = get_prefs_dir()
 
 # Base name of the venv directory. The actual directory is versioned by
 # Python major.minor to avoid ABI conflicts when multiple Maya versions

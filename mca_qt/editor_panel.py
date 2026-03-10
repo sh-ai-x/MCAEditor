@@ -2621,6 +2621,16 @@ class MCAEditorPanel(QWidget):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        # Clean up the completer's app-level event filter before
+        # removing the editor.  Without this, orphaned completers
+        # (parent=None) accumulate on QApplication and cause
+        # shiboken crashes during shutdown.
+        if hasattr(editor, "_completer") and editor._completer is not None:
+            try:
+                editor._completer.cleanup()
+            except Exception as exc:
+                logger.warning("Completer cleanup on tab close failed: %s", exc)
+
         # Clean up the buffer file if this was a temp buffer.
         if editor._buffer_filename:
             self._session_manager.remove_buffer(editor._buffer_filename)
@@ -3405,6 +3415,36 @@ class MCAEditorPanel(QWidget):
             except Exception as exc:
                 logger.warning("Failed to auto-reload %s in DCC: %s", module_name, exc)
 
+    def _write_adapter_output(self, text):
+        """
+        Write captured adapter output to the output panel.
+
+        The internal Maya adapter captures stdout during exec via a
+        temporary tee and returns the captured text.  This method routes
+        each line to the appropriate output method based on content:
+          - ``# Result: ... #`` → ``write_result()`` (yellow)
+          - Everything else → ``write_output()`` (white)
+
+        Warnings and errors from Maya commands (``cmds.warning()``,
+        ``cmds.error()``, etc.) arrive via MCommandMessage and are NOT
+        included in the adapter's return value — they're handled by
+        ``_on_maya_output()`` in ``maya_window.py``.
+
+        :param str text: Captured stdout text from adapter execution.
+        """
+        if not text or not text.strip():
+            return
+
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            stripped = line.strip()
+            # Route result-formatted lines to write_result for coloring.
+            if stripped.startswith("# Result:") and stripped.endswith("#"):
+                self._output.write_result(line)
+            else:
+                self._output.write_output(line)
+
     def _execute_all(self):
         """Execute the entire script."""
         editor = self._current_editor()
@@ -3418,7 +3458,10 @@ class MCAEditorPanel(QWidget):
         self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
-            adapter.execute(code, editor.language)
+            # The adapter captures stdout via a temporary tee during
+            # exec and returns the captured text.  Write it to the panel.
+            result = adapter.execute(code, editor.language)
+            self._write_adapter_output(result)
         else:
             if editor.language == "python":
                 self._execute_locally(code)
@@ -3438,7 +3481,8 @@ class MCAEditorPanel(QWidget):
         self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
-            adapter.execute(code, editor.language)
+            result = adapter.execute(code, editor.language)
+            self._write_adapter_output(result)
         else:
             if editor.language == "python":
                 self._execute_locally(code)
@@ -3458,7 +3502,8 @@ class MCAEditorPanel(QWidget):
         self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
-            adapter.execute(code, editor.language)
+            result = adapter.execute(code, editor.language)
+            self._write_adapter_output(result)
         else:
             if editor.language == "python":
                 self._execute_locally(code)
@@ -3515,6 +3560,9 @@ class MCAEditorPanel(QWidget):
         if adapter and adapter.is_connected:
             try:
                 result = adapter.execute(code, language)
+                # Write captured stdout to the panel and pass through
+                # for API callers who need a return value.
+                self._write_adapter_output(result)
                 return {"success": True, "output": result or "", "error": None}
             except Exception as exc:
                 return {"success": False, "output": "", "error": str(exc)}
@@ -5018,6 +5066,20 @@ class MCAEditorPanel(QWidget):
         self._sidebar.workspace_panel.save_tree_state_to_settings(
             self._settings, project_root
         )
+
+        # Clean up all CodeCompleter instances before the widget tree is
+        # destroyed.  Completers are created with parent=None (so they
+        # float as tooltips) and install an app-level event filter on
+        # QApplication.  If not removed here, the orphaned completers
+        # survive shiboken6.delete() and cause ACCESS_VIOLATION during
+        # Maya's atexit phase when Qt dispatches events through the
+        # dangling filter references.
+        for editor, _name, _path in self._group_container.all_editors():
+            if hasattr(editor, "_completer") and editor._completer is not None:
+                try:
+                    editor._completer.cleanup()
+                except Exception as exc:
+                    logger.warning("Completer cleanup failed: %s", exc)
 
         # Unload all plugins before shutting down.
         if hasattr(self, "_plugin_manager") and self._plugin_manager:

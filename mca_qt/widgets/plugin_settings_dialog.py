@@ -362,9 +362,8 @@ class PluginSettingsDialog(QDialog):
 
     def _open_plugins_folder(self):
         """Open the user plugins directory in the system file explorer."""
-        user_dir = os.path.join(
-            os.path.expanduser("~"), "Documents", "mca_preferences", "plugins"
-        )
+        from mca_core import get_prefs_dir
+        user_dir = os.path.join(get_prefs_dir(), "plugins")
         # Create the directory if it doesn't exist yet.
         os.makedirs(user_dir, exist_ok=True)
 

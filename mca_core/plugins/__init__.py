@@ -761,9 +761,9 @@ class PluginManager:
         :return: Absolute path to the user plugins directory.
         :rtype: str
         """
-        # User plugins live alongside other MCA preferences.
-        prefs_dir = os.path.join(os.path.expanduser("~"), "Documents", "mca_preferences")
-        user_dir = os.path.join(prefs_dir, "plugins")
+        # User plugins live inside the MCA Editor preferences directory.
+        from mca_core import get_prefs_dir
+        user_dir = os.path.join(get_prefs_dir(), "plugins")
 
         if not os.path.isdir(user_dir):
             try:

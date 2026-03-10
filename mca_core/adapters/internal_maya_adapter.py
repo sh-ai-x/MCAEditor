@@ -28,6 +28,62 @@ from .base_adapter import DCCAdapter, DCCType, ConnectionState
 logger = logging.getLogger(__name__)
 
 
+# --- Stdout Tee Writer (exec-time capture) ----------------------------------
+
+class _TeeWriter:
+    """
+    Temporary tee writer used ONLY during ``_execute_python()`` to capture
+    ``print()`` output from exec'd code.
+
+    Writes pass through to Maya's original stdout (so the Script Editor
+    still shows them) and simultaneously buffer to a StringIO for the
+    output panel.  This is installed for the duration of a single exec()
+    call, then removed.
+
+    The permanent ``_StdoutTee`` in ``maya_window.py`` handles output
+    that occurs OUTSIDE of exec (deferred callbacks, framework startup).
+    During exec, the permanent tee is temporarily bypassed so output
+    doesn't appear twice in the panel.
+
+    :param object original: Maya's original stdout (NOT the permanent tee).
+    :param io.StringIO capture: Buffer to capture a copy of all writes.
+    """
+
+    def __init__(self, original, capture):
+        """
+        Initialize the tee with both output targets.
+
+        :param object original: The original stdout to pass through to.
+        :param io.StringIO capture: StringIO buffer for our output panel.
+        """
+        self._original = original
+        self._capture = capture
+
+    def write(self, text):
+        """
+        Write to both the original stdout and the capture buffer.
+
+        :param str text: Text to write.
+        """
+        self._original.write(text)
+        self._capture.write(text)
+
+    def flush(self):
+        """Flush the original stdout."""
+        self._original.flush()
+
+    def __getattr__(self, name):
+        """
+        Forward unknown attributes to the original stdout.
+
+        Preserves compatibility with Maya's OutputRedirector attributes.
+
+        :param str name: Attribute name.
+        :return: The attribute from the original stdout.
+        """
+        return getattr(self._original, name)
+
+
 # --- Internal Maya Adapter --------------------------------------------------
 
 class InternalMayaAdapter(DCCAdapter):
@@ -187,14 +243,19 @@ class InternalMayaAdapter(DCCAdapter):
         """
         Execute code directly in Maya's interpreter.
 
-        For Python, uses the eval-first-then-exec pattern. Output flows
-        through Maya's native output system (no stdout capture).
+        For Python, uses the eval-first-then-exec pattern.  Stdout is
+        NOT redirected — all ``print()`` output flows through Maya's
+        native ``sys.stdout`` (OutputRedirector), which fires
+        ``MCommandMessage`` with kDisplay type.  The ``_on_maya_output``
+        callback in ``maya_window.py`` picks it up and writes it to the
+        output panel.  This is the same pipeline Maya's Script Editor
+        uses, ensuring complete content parity.
 
         For MEL, calls ``maya.mel.eval()`` directly.
 
         :param str code: Source code to execute.
         :param str language: 'python' or 'mel' (defaults to 'python').
-        :return: Empty string (output arrives via MCommandMessage callback).
+        :return: Empty string (output arrives via MCommandMessage).
         :rtype: str
         """
         # Default to Python if no language specified.
@@ -212,30 +273,41 @@ class InternalMayaAdapter(DCCAdapter):
 
         Uses the eval-first-then-exec pattern:
         1. Try to compile as "eval" — single expressions show their result
-           via ``MGlobal.displayResult()`` so it appears in Maya's output
-           system (Script Editor, MCA output panel, Charcoal, etc.).
+           via a formatted ``print("# Result: <value> #")`` call.
         2. Fall back to "exec" for statements (imports, assignments, etc.).
 
-        Stdout is NOT redirected.  All ``print()`` output flows through
-        Maya's normal stdout hook, which routes it to the Script Editor
-        and fires the ``MCommandMessage`` callback.  This ensures MCA
-        Editor's output is identical to Maya's Script Editor — the
-        ``MCommandMessage`` callback in ``maya_window.py`` is the sole
-        route into MCA Editor's output panel.
-
-        Errors are routed through ``MGlobal.displayError()`` so they
-        appear in Maya's Script Editor too (matching Charcoal's behavior).
-        Maya commands that raise exceptions (e.g. ``cmds.error()``)
-        already display their error via Maya's output system before the
-        exception propagates — we skip re-display for those to avoid
-        duplicate error messages.
+        During execution, a temporary ``_TeeWriter`` captures stdout
+        to a StringIO buffer while passing through to Maya's original
+        stdout (Script Editor).  The temporary tee bypasses the permanent
+        ``_StdoutTee`` installed by ``maya_window.py`` to avoid double
+        writes.  After execution, the permanent tee is restored so it
+        can capture deferred callback output.
 
         :param str code: Python source code to execute.
-        :return: Empty string (output arrives via MCommandMessage callback).
+        :return: Captured stdout text from execution.
         :rtype: str
         """
         import __main__
+        import io
         import maya.api.OpenMaya as om2
+
+        # Save current stdout — this is typically the permanent _StdoutTee
+        # from maya_window.py (or Maya's raw stdout if no tee installed).
+        saved_stdout = sys.stdout
+
+        # Get Maya's ORIGINAL stdout, bypassing any tee wrappers.
+        # The permanent _StdoutTee stores the original as _original.
+        # We bypass it during exec so output doesn't appear twice in
+        # the panel (once from the temporary tee's return value, once
+        # from the permanent tee's live write).
+        maya_stdout = saved_stdout
+        while hasattr(maya_stdout, '_original'):
+            maya_stdout = maya_stdout._original
+
+        # Install temporary tee: captures to StringIO while passing
+        # through to Maya's original stdout (Script Editor still works).
+        captured = io.StringIO()
+        sys.stdout = _TeeWriter(maya_stdout, captured)
 
         try:
             # Try eval mode first — expressions like variable names,
@@ -246,20 +318,13 @@ class InternalMayaAdapter(DCCAdapter):
 
                 # Display the result in Maya's exact format:
                 #   # Result: <value> #
-                # Maya's Script Editor uses an internal C++ displayResult
-                # that produces kResult-type MCommandMessage output, but
-                # this is NOT exposed in Python API 2.0.  Instead we
-                # print() the formatted result, which goes through Maya's
-                # stdout hook and fires MCommandMessage with kDisplay type.
-                # Our _on_maya_output callback detects the "# Result:"
-                # prefix and routes it to write_result() for proper color.
+                # Goes through the temp tee → Maya stdout + captured.
                 if result is not None:
                     print("# Result: {} #".format(repr(result)))
 
             except SyntaxError:
                 # Not a single expression — execute as statements.
-                # print() calls inside the code go to Maya's hooked
-                # stdout, which triggers MCommandMessage callbacks.
+                # print() calls flow through the temporary tee.
                 exec(compile(code, "<mca_editor>", "exec"), __main__.__dict__)
 
         except Exception as exc:
@@ -283,8 +348,14 @@ class InternalMayaAdapter(DCCAdapter):
                 error_display = self._format_error_for_maya(exc)
                 om2.MGlobal.displayError(error_display)
 
-        # All output arrives through MCommandMessage — return empty.
-        return ""
+        finally:
+            # Restore the saved stdout (permanent tee or original).
+            # This re-enables the permanent tee for deferred callback
+            # output that fires after exec() returns.
+            sys.stdout = saved_stdout
+
+        # Return captured output so the caller can write it to the panel.
+        return captured.getvalue()
 
     def _format_error_for_maya(self, exc):
         """
@@ -325,10 +396,10 @@ class InternalMayaAdapter(DCCAdapter):
 
         Output, results, and errors all flow through Maya's normal
         output system, which fires the ``MCommandMessage`` callback.
-        We do NOT call ``_on_output`` or ``_on_error`` manually — Maya
-        already displayed the error via its output system before the
-        exception propagates to Python, so the ``MCommandMessage``
-        callback has already routed it to our output panel.
+        MEL command return values do NOT fire ``kResult`` when called
+        via ``maya.mel.eval()``, so we print them in the ``# Result:``
+        format.  The ``_on_maya_output`` callback detects this prefix
+        and routes to ``write_result()`` for proper coloring.
 
         :param str code: MEL source code to execute.
         :return: Empty string (output arrives via MCommandMessage callback).
@@ -336,7 +407,15 @@ class InternalMayaAdapter(DCCAdapter):
         """
         try:
             import maya.mel
-            maya.mel.eval(code)
+            result = maya.mel.eval(code)
+
+            # Display the return value — mel.eval() returns the result
+            # as a Python value but does NOT fire kResult via
+            # MCommandMessage.  print() goes through Maya's stdout →
+            # MCommandMessage kDisplay → _on_maya_output.
+            if result is not None and result != "" and result != 0:
+                print("# Result: {} #".format(result))
+
         except Exception as exc:
             # Maya already displayed the error through its output system
             # (MCommandMessage kError fired before the exception reached

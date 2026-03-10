@@ -56,8 +56,9 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ----------------------------------------------------------------
 
-# Base preferences directory (matches venv_manager.py).
-_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences")
+# Base preferences directory — centralized in mca_core.__init__.
+from mca_core import get_prefs_dir
+_PREFS_DIR = get_prefs_dir()
 
 # MCP server deployment directory.
 _MCP_DIR = os.path.join(_PREFS_DIR, "mcp_servers")

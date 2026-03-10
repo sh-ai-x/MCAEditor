@@ -66,7 +66,9 @@ from mcp.types import TextContent, Tool
 __version__ = "1.0.0"
 
 # Discovery file written by the editor's JSON-RPC server.
-_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences")
+# Path is inlined here (not imported from mca_core) because this module
+# runs as a standalone MCP server process where mca_core is not on sys.path.
+_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences", "MCAEditor")
 _DISCOVERY_FILE = os.path.join(_PREFS_DIR, "api_port.json")
 
 # TCP connection timeout to the editor's JSON-RPC server (seconds).
