@@ -1567,6 +1567,11 @@ def _restore_mca_editor():
             pass
     QTimer.singleShot(0, _reveal)
 
+    # Record that the editor is open so it auto-opens on next Maya launch.
+    # Without this, the uiScript path never sets the flag, so a previous
+    # plugin reload (which clears it) permanently breaks auto-open.
+    MCASettings().set("editor_was_open", True)
+
     logger.info("MCA Editor workspace control restored via uiScript")
 
 

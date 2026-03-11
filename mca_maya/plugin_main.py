@@ -117,17 +117,14 @@ def _do_auto_open_editor():
     """
     Re-open the editor if it was open when Maya last shut down.
 
-    Called via executeDeferred from initializePlugin.  Checks the
-    ``editor_was_open`` setting and opens the editor if True.
+    Called via evalDeferred(lowestPriority) from initializePlugin.
+    Checks the ``editor_was_open`` setting and opens the editor if True.
 
-    If the uiScript restoration already created a healthy window (from
-    the workspace control's saved layout), we just refresh the output
-    hooks and bail — no need to tear down and recreate.  This avoids
-    the startup race where userSetup.py deletes the workspace control
-    between uiScript restoration and this deferred call.
-
-    If the window is missing or dead, we fall back to the original
-    behavior: clean up stale resources and call show_mca_editor().
+    Always creates a fresh window via ``show_mca_editor()`` rather than
+    reusing a window from the uiScript restoration path.  The uiScript
+    path (``_restore_mca_editor``) can produce blank windows where the
+    widget is parented correctly but nothing renders — so we discard
+    whatever it created and start clean.
     """
     try:
         # Check setting — bail early if the editor wasn't open last session.
@@ -137,51 +134,15 @@ def _do_auto_open_editor():
 
         from mca_maya import maya_window as _mw
 
-        # If a healthy window already exists (from uiScript restoration
-        # that wasn't killed by userSetup), refresh hooks and bail.
-        # This is the common case when plugin auto-load is enabled —
-        # uiScript fires first and creates Window A, then this deferred
-        # call fires and just needs to ensure hooks point at the right
-        # output widget.
-        if _mw._mca_editor_window is not None:
-            try:
-                # Alive check — will raise RuntimeError if C++ is dead.
-                _mw._mca_editor_window.objectName()
-                _mw._mca_editor_window._install_output_hook()
-                logger.info("Auto-open: existing window is healthy, refreshed hooks")
-                return
-            except RuntimeError:
-                # C++ object already deleted — fall through to recreate.
-                _mw._mca_editor_window = None
+        # Discard any window created by uiScript — the _restore_mca_editor
+        # path can produce blank windows where the widget is parented but
+        # nothing renders.  Always create fresh via show_mca_editor().
+        _mw._mca_editor_window = None
+        _mw._output_target = None
 
         _ctrl = "MCAEditorWorkspaceControl"
         if cmds.workspaceControl(_ctrl, exists=True):
-            # Clean up any window created by the uiScript restoration
-            # (may have failed or produced a blank window).
-            if _mw._mca_editor_window is not None:
-                try:
-                    _mw._mca_editor_window._panel.save_window_state(
-                        _mw._mca_editor_window._settings
-                    )
-                    _mw._mca_editor_window._panel.cleanup()
-                except Exception:
-                    pass
-                _mw._mca_editor_window = None
-
-            # Remove stale output callback so the new window gets a clean one.
-            if _mw._output_callback_id is not None:
-                try:
-                    import maya.api.OpenMaya as _om2
-                    _om2.MMessage.removeCallback(_mw._output_callback_id)
-                except Exception:
-                    pass
-                _mw._output_callback_id = None
-
-            # Clear stale output target so tees don't write to dead widget.
-            _mw._output_target = None
-
             cmds.deleteUI(_ctrl)
-            logger.info("Deleted stale workspace control before auto-open")
 
         from mca_maya.maya_window import show_mca_editor
         show_mca_editor()
@@ -516,27 +477,16 @@ def uninitializePlugin(plugin):
     Deregisters the ``mcaEditor`` command and restores Maya's default
     ``ScriptEditor`` MEL procedure.
 
-    If the user is unloading the plugin (not a Maya shutdown), clears the
-    ``editor_was_open`` setting so the editor doesn't force itself back
-    open on next launch.
-
     :param MObject plugin: Maya's plugin MObject.
     """
     global _exit_callback_id
 
     fn_plugin = om2.MFnPlugin(plugin)
 
-    # If this is a user-initiated unload (not Maya shutting down), clear
-    # editor_was_open so the editor doesn't auto-open next launch.
-    # During Maya shutdown, _maya_is_exiting is True, so we leave the
-    # setting alone — the editor should reopen when Maya starts again.
-    if not _maya_is_exiting:
-        try:
-            from mca_core.config.settings import MCASettings
-            MCASettings().set("editor_was_open", False)
-            logger.info("Cleared editor_was_open (user-initiated unload)")
-        except Exception:
-            pass
+    # NOTE: editor_was_open is NOT cleared here.  It is only set to False
+    # when the user explicitly closes the editor (dockCloseEventTriggered).
+    # Clearing it on plugin unload/reload would permanently break auto-open
+    # because the flag persists in QSettings across Maya restarts.
 
     # Remove the kMayaExiting callback.
     if _exit_callback_id is not None:
