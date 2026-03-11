@@ -100,14 +100,19 @@ def _get_extract_dir():
     """
     Get the directory where packages are extracted.
 
-    Uses %LOCALAPPDATA%/MCAEditor on Windows.
+    Uses %LOCALAPPDATA%/MCAEditor-py3.XX on Windows.  The Python
+    major.minor version is included so Maya 2024 (3.10) and Maya
+    2025/2026 (3.11) don't collide — .pyd files are ABI-specific.
 
     :rtype: str
     """
+    # Include Python version to prevent ABI conflicts between Maya versions.
+    py_ver = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
+    dir_name = "{}-py{}".format(_EXTRACT_DIR_NAME, py_ver)
     local = os.environ.get("LOCALAPPDATA")
     if local:
-        return os.path.join(local, _EXTRACT_DIR_NAME)
-    return os.path.join(os.path.expanduser("~"), _EXTRACT_DIR_NAME)
+        return os.path.join(local, dir_name)
+    return os.path.join(os.path.expanduser("~"), dir_name)
 
 
 def _needs_extraction(extract_dir):
