@@ -47,6 +47,7 @@ except ImportError:
 
 # Placeholders replaced at pack time:
 #   __MCA_VERSION__     → version string
+#   __MCA_BUILD_HASH__  → short hash of payload (forces re-extract on rebuild)
 #   __MCA_PAYLOAD__     → base64-encoded zip data
 #   __MCA_BUILD_DATE__  → ISO date of build
 #   __MCA_FILE_COUNT__  → number of files in payload
@@ -84,6 +85,7 @@ import logging
 maya_useNewAPI = True
 
 _VERSION = "__MCA_VERSION__"
+_BUILD_HASH = "__MCA_BUILD_HASH__"
 _EXTRACT_DIR_NAME = "MCAEditor"
 _VERSION_FILENAME = ".mca_version"
 
@@ -117,7 +119,11 @@ def _get_extract_dir():
 
 def _needs_extraction(extract_dir):
     """
-    Check if extraction is needed (first run or version mismatch).
+    Check if extraction is needed (first run, version mismatch, or build hash mismatch).
+
+    Compares both version and build hash so that same-version rebuilds
+    (e.g. bug fix at v0.3.9 without bumping version) still trigger
+    re-extraction instead of silently running stale cached code.
 
     :param str extract_dir: Target extraction directory.
     :rtype: bool
@@ -128,7 +134,9 @@ def _needs_extraction(extract_dir):
     try:
         with open(version_file, "r") as f:
             installed = f.read().strip()
-        return installed != _VERSION
+        # The stamp is "version:hash" — both must match.
+        expected = "{}:{}".format(_VERSION, _BUILD_HASH)
+        return installed != expected
     except (IOError, OSError):
         return True
 
@@ -156,10 +164,11 @@ def _extract_payload(extract_dir):
         with zipfile.ZipFile(io.BytesIO(payload_bytes), "r") as zf:
             zf.extractall(temp_dir)
 
-        # Write version marker to temp dir
+        # Write version+hash marker to temp dir so _needs_extraction()
+        # can detect both version bumps AND same-version rebuilds.
         version_file = os.path.join(temp_dir, _VERSION_FILENAME)
         with open(version_file, "w") as f:
-            f.write(_VERSION)
+            f.write("{}:{}".format(_VERSION, _BUILD_HASH))
 
         # Remove old install if it exists
         if os.path.isdir(extract_dir):
@@ -324,8 +333,15 @@ def pack(dist_dir, output_path):
     # --- Fill the template ---
     build_date = datetime.date.today().isoformat()
 
+    # Compute a short hash of the zip payload so same-version rebuilds
+    # still trigger re-extraction (prevents stale cache bugs).
+    import hashlib
+    build_hash = hashlib.sha256(zip_bytes).hexdigest()[:12]
+    print("  Build hash: {}".format(build_hash))
+
     output = TEMPLATE
     output = output.replace("__MCA_VERSION__", VERSION)
+    output = output.replace("__MCA_BUILD_HASH__", build_hash)
     output = output.replace("__MCA_PAYLOAD__", payload_str)
     output = output.replace("__MCA_BUILD_DATE__", build_date)
     output = output.replace("__MCA_FILE_COUNT__", str(file_count))

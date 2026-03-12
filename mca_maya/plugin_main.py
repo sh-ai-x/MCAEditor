@@ -65,6 +65,10 @@ PLUGIN_NAME = "MCA Editor"
 PLUGIN_VENDOR = "MCA Tools"
 from mca_core import __version__ as PLUGIN_VERSION
 
+# Maya version string (e.g. "2024", "2025").  Set once in initializePlugin()
+# and used by maya_window.py to create version-specific settings and sessions.
+_maya_version = None
+
 
 # --- MCA Editor Command (for mel: mcaEditor) --------------------------------
 
@@ -128,8 +132,10 @@ def _do_auto_open_editor():
     """
     try:
         # Check setting — bail early if the editor wasn't open last session.
+        # Use version-specific settings so Maya 2024/2025 have independent state.
         from mca_core.config.settings import MCASettings
-        if not MCASettings().get("editor_was_open", False):
+        _app = "MCAEditor-Maya{}".format(_maya_version) if _maya_version else "MCAEditor"
+        if not MCASettings(app_name=_app).get("editor_was_open", False):
             return
 
         from mca_maya import maya_window as _mw
@@ -223,12 +229,25 @@ def _first_launch_setup():
     except ImportError:
         from PySide2 import QtWidgets, QtCore
 
+    # Get Maya's main window as the parent so the dialog stays on top.
+    maya_main = None
+    try:
+        from maya.OpenMayaUI import MQtUtil
+        import shiboken2
+        ptr = MQtUtil.mainWindow()
+        if ptr:
+            maya_main = shiboken2.wrapInstance(int(ptr), QtWidgets.QWidget)
+    except Exception:
+        pass
+
     # Build the progress dialog — indeterminate (range 0,0 = pulsing bar),
     # no cancel button, fixed width so the label text doesn't resize it.
+    # Parented to Maya's main window so it stays on top.
     dlg = QtWidgets.QProgressDialog(
         "Preparing MCA Editor for first use...",
         "",       # Empty cancel button text — hides the button.
         0, 0,     # min=max=0 → indeterminate / pulsing bar.
+        maya_main,
     )
     dlg.setWindowTitle("MCA Editor Setup")
     dlg.setWindowModality(QtCore.Qt.WindowModal)
@@ -269,6 +288,12 @@ def initializePlugin(plugin):
 
     :param MObject plugin: Maya's plugin MObject.
     """
+    # Capture the Maya version early — used by maya_window.py to create
+    # version-specific settings and session directories.
+    global _maya_version
+    _maya_version = cmds.about(version=True)  # e.g. "2024", "2025"
+    logger.info("Maya version: %s", _maya_version)
+
     # Detect first launch — if the venv doesn't exist yet, we need to run
     # the full setup with a progress dialog so the user sees what's happening
     # instead of staring at a frozen Maya for 30-60 seconds.
@@ -499,7 +524,8 @@ def initializePlugin(plugin):
     def _queue_auto_open():
         """Check setting, then queue the actual open at lowest priority."""
         from mca_core.config.settings import MCASettings
-        if MCASettings().get("editor_was_open", False):
+        _app = "MCAEditor-Maya{}".format(_maya_version) if _maya_version else "MCAEditor"
+        if MCASettings(app_name=_app).get("editor_was_open", False):
             cmds.evalDeferred(
                 "from mca_maya.plugin_main import _do_auto_open_editor; "
                 "_do_auto_open_editor()",

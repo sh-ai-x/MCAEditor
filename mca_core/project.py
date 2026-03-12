@@ -5,16 +5,30 @@ Pure data model for ``.mca-project`` project files. Handles loading,
 saving, validation, and auto-detection of Python source paths within
 a project folder.
 
-A project file is a simple JSON document that tracks:
-    - Project name (display label)
-    - Python source paths (relative to project root, added to sys.path)
-    - Excluded folders (hidden in the workspace tree)
-    - Startup script (relative path to a .py file run on project open)
-    - Startup inline code (Python code run after the script file)
-    - Shutdown script (relative path to a .py file run on project close)
-    - Shutdown inline code (Python code run before teardown on close)
-    - Environment variables (key-value pairs set in os.environ on open)
-    - Schema version (for future migration)
+A project file is a JSON document with two layers:
+
+    **Shared settings** (top-level, same across all DCC/versions):
+        - Project name (display label)
+        - Python source paths (relative to project root, added to sys.path)
+        - Excluded folders (hidden in the workspace tree)
+        - Open on editor open flag
+        - Auto-reload modules flag
+
+    **Profile-specific settings** (under ``"profiles"`` key, per DCC/version):
+        - Startup script (relative path to a .py file run on project open)
+        - Startup inline code (Python code run after the script file)
+        - Shutdown script (relative path to a .py file run on project close)
+        - Shutdown inline code (Python code run before teardown on close)
+        - Environment variables (key-value pairs set in os.environ)
+        - Load immediately flag (skip startup scripts on open)
+
+    Profiles are keyed by DCC tag (e.g. ``"Maya2025"``, ``"Maya2024"``,
+    ``"Unreal"``).  A ``"default"`` profile is used as fallback when no
+    DCC-specific profile matches.
+
+    Schema version 3 (flat) is auto-migrated to version 4 (profiles)
+    on load — the flat DCC-specific fields are moved into a ``"default"``
+    profile.
 
 Dependencies:
     - json (stdlib)
@@ -34,7 +48,27 @@ logger = logging.getLogger(__name__)
 
 PROJECT_FILENAME = ".mca-project"              # Name of the project config file.
 SESSION_FILENAME = ".mca-session.json"          # Per-project session manifest file.
-CURRENT_SCHEMA_VERSION = 3                      # Bump when the JSON schema changes.
+CURRENT_SCHEMA_VERSION = 4                      # Bump when the JSON schema changes.
+
+# Keys that live inside each profile (DCC-specific settings).
+PROFILE_KEYS = (
+    "startup_script",
+    "startup_code",
+    "shutdown_script",
+    "shutdown_code",
+    "env_vars",
+    "load_immediately",
+)
+
+# Default values for profile-specific keys (used when a key is missing).
+PROFILE_DEFAULTS = {
+    "startup_script": "",
+    "startup_code": "",
+    "shutdown_script": "",
+    "shutdown_code": "",
+    "env_vars": {},
+    "load_immediately": False,
+}
 
 # Folders excluded from the workspace tree by default.
 DEFAULT_EXCLUDED_FOLDERS = {
@@ -75,10 +109,16 @@ class MCAProject:
     stored in the file are relative to the project root; resolved paths
     are computed on the fly via ``resolved_python_paths``.
 
+    DCC-specific settings (startup/shutdown code, env vars, load_immediately)
+    are stored in **profiles** keyed by DCC tag (e.g. ``"Maya2025"``).
+    When a ``dcc_tag`` is provided, that profile's values are used.
+    Falls back to ``"default"`` when the exact tag has no profile.
+
     :param str project_root: Absolute path to the project root directory.
+    :param str dcc_tag: Optional DCC version tag (e.g. ``"Maya2025"``).
     """
 
-    def __init__(self, project_root):
+    def __init__(self, project_root, dcc_tag=None):
         """
         Initialize from a project root directory.
 
@@ -87,26 +127,83 @@ class MCAProject:
         saved explicitly via ``save()``.
 
         :param str project_root: Absolute path to the project root.
+        :param str dcc_tag: Optional DCC version tag for profile selection.
         """
         self._project_root = os.path.normpath(project_root)
         self._name = os.path.basename(self._project_root)
+
+        # --- Shared settings (not profile-specific) ---
         self._python_paths = []          # Relative paths (e.g. ["src", "lib"]).
         self._excluded_folders = list(DEFAULT_EXCLUDED_FOLDERS)
-        self._startup_script = ""        # Relative path to a .py startup script.
-        self._startup_code = ""          # Inline Python code run after the script.
-        self._shutdown_script = ""       # Relative path to a .py shutdown script.
-        self._shutdown_code = ""         # Inline Python code run before teardown.
-        self._env_vars = {}              # Key-value pairs set in os.environ.
-        self._load_immediately = False   # Skip startup scripts on project open.
         self._open_on_editor_open = False  # Auto-open this project when editor launches.
         self._auto_reload_modules = True   # Auto-reload modules on save/execute.
         self._schema_version = CURRENT_SCHEMA_VERSION
+
+        # --- Profile system ---
+        # Profiles dict: {"Maya2025": {...}, "Maya2024": {...}, "default": {...}}
+        # Each profile contains the keys listed in PROFILE_KEYS.
+        self._dcc_tag = dcc_tag          # e.g. "Maya2025", "Unreal", or None.
+        self._profiles = {}              # All profiles loaded from the file.
+        self._active_profile_name = "default"  # Resolved after load.
 
         # Auto-load if the project file already exists.
         if os.path.isfile(self.project_file_path):
             self.load()
 
-    # --- Properties -----------------------------------------------------------
+        # Resolve which profile is active (even if load() wasn't called,
+        # so new projects get a sensible active profile).
+        self._resolve_active_profile()
+
+    # --- Profile Helpers (private) --------------------------------------------
+
+    def _resolve_active_profile(self):
+        """
+        Determine which profile is active based on ``_dcc_tag``.
+
+        Resolution order:
+            1. Exact match on ``_dcc_tag`` (e.g. ``"Maya2025"``)
+            2. ``"default"`` profile
+            3. Use ``_dcc_tag`` as name (will be created on first write),
+               or ``"default"`` if no dcc_tag was provided.
+        """
+        if self._dcc_tag and self._dcc_tag in self._profiles:
+            # Exact match — use the DCC-specific profile.
+            self._active_profile_name = self._dcc_tag
+        elif "default" in self._profiles:
+            # No DCC-specific profile — fall back to default.
+            self._active_profile_name = "default"
+        else:
+            # No matching profile exists yet — use dcc_tag name so it
+            # gets created when the user saves, or "default" if standalone.
+            self._active_profile_name = self._dcc_tag or "default"
+
+    def _get_profile_value(self, key):
+        """
+        Read a value from the active profile.
+
+        Falls back to ``PROFILE_DEFAULTS`` if the key is missing.
+
+        :param str key: Profile key (must be one of ``PROFILE_KEYS``).
+        :return: The value from the active profile.
+        """
+        profile = self._profiles.get(self._active_profile_name, {})
+        return profile.get(key, PROFILE_DEFAULTS.get(key))
+
+    def _set_profile_value(self, key, value):
+        """
+        Write a value to the active profile.
+
+        Creates the profile dict if it doesn't exist yet.
+
+        :param str key: Profile key (must be one of ``PROFILE_KEYS``).
+        :param value: The value to store.
+        """
+        if self._active_profile_name not in self._profiles:
+            # Lazy-create the profile with all defaults.
+            self._profiles[self._active_profile_name] = dict(PROFILE_DEFAULTS)
+        self._profiles[self._active_profile_name][key] = value
+
+    # --- Shared Properties (not profile-specific) ----------------------------
 
     @property
     def name(self):
@@ -208,157 +305,6 @@ class MCAProject:
         self._excluded_folders = list(folders)
 
     @property
-    def startup_script(self):
-        """
-        Relative path to a Python script that runs when the project opens.
-
-        Empty string means no startup script.
-
-        :rtype: str
-        """
-        return self._startup_script
-
-    @startup_script.setter
-    def startup_script(self, path):
-        """
-        Set the startup script path (relative to project root).
-
-        :param str path: Relative path to a .py file, or empty string.
-        """
-        self._startup_script = path
-
-    @property
-    def startup_code(self):
-        """
-        Inline Python code that runs when the project opens.
-
-        Executed after the startup script file (if any). Empty string
-        means no inline code.
-
-        :rtype: str
-        """
-        return self._startup_code
-
-    @startup_code.setter
-    def startup_code(self, code):
-        """
-        Set the inline startup code.
-
-        :param str code: Python code string, or empty string.
-        """
-        self._startup_code = code
-
-    @property
-    def resolved_startup_script(self):
-        """
-        Absolute path to the startup script, or empty string if not set.
-
-        :rtype: str
-        """
-        if not self._startup_script:
-            return ""
-        return os.path.normpath(
-            os.path.join(self._project_root, self._startup_script)
-        )
-
-    @property
-    def shutdown_script(self):
-        """
-        Relative path to a Python script that runs when the project closes.
-
-        Empty string means no shutdown script.
-
-        :rtype: str
-        """
-        return self._shutdown_script
-
-    @shutdown_script.setter
-    def shutdown_script(self, path):
-        """
-        Set the shutdown script path (relative to project root).
-
-        :param str path: Relative path to a .py file, or empty string.
-        """
-        self._shutdown_script = path
-
-    @property
-    def shutdown_code(self):
-        """
-        Inline Python code that runs when the project closes.
-
-        Executed after the shutdown script file (if any), but before
-        environment variables and paths are torn down. Empty string
-        means no inline code.
-
-        :rtype: str
-        """
-        return self._shutdown_code
-
-    @shutdown_code.setter
-    def shutdown_code(self, code):
-        """
-        Set the inline shutdown code.
-
-        :param str code: Python code string, or empty string.
-        """
-        self._shutdown_code = code
-
-    @property
-    def resolved_shutdown_script(self):
-        """
-        Absolute path to the shutdown script, or empty string if not set.
-
-        :rtype: str
-        """
-        if not self._shutdown_script:
-            return ""
-        return os.path.normpath(
-            os.path.join(self._project_root, self._shutdown_script)
-        )
-
-    @property
-    def env_vars(self):
-        """
-        Environment variables to set when the project is opened.
-
-        Returns a copy of the internal dict.
-
-        :rtype: dict
-        """
-        return dict(self._env_vars)
-
-    @env_vars.setter
-    def env_vars(self, variables):
-        """
-        Set the environment variables dictionary.
-
-        :param dict variables: Key-value string pairs.
-        """
-        self._env_vars = dict(variables)
-
-    @property
-    def load_immediately(self):
-        """
-        Whether to skip startup scripts when the project is opened.
-
-        When True, opening the project only sets up paths, env vars,
-        and UI — startup scripts are deferred until the user clicks
-        the Load button.
-
-        :rtype: bool
-        """
-        return self._load_immediately
-
-    @load_immediately.setter
-    def load_immediately(self, value):
-        """
-        Set the load_immediately flag.
-
-        :param bool value: True to skip startup on open.
-        """
-        self._load_immediately = bool(value)
-
-    @property
     def open_on_editor_open(self):
         """
         Whether this project should auto-open when the editor launches.
@@ -398,11 +344,270 @@ class MCAProject:
         """
         self._auto_reload_modules = bool(value)
 
+    # --- Profile-Specific Properties -----------------------------------------
+    # These read/write from the active profile (selected by dcc_tag).
+
+    @property
+    def startup_script(self):
+        """
+        Relative path to a Python script that runs when the project opens.
+
+        Empty string means no startup script. Reads from the active profile.
+
+        :rtype: str
+        """
+        return self._get_profile_value("startup_script")
+
+    @startup_script.setter
+    def startup_script(self, path):
+        """
+        Set the startup script path (relative to project root).
+
+        :param str path: Relative path to a .py file, or empty string.
+        """
+        self._set_profile_value("startup_script", path)
+
+    @property
+    def startup_code(self):
+        """
+        Inline Python code that runs when the project opens.
+
+        Executed after the startup script file (if any). Empty string
+        means no inline code. Reads from the active profile.
+
+        :rtype: str
+        """
+        return self._get_profile_value("startup_code")
+
+    @startup_code.setter
+    def startup_code(self, code):
+        """
+        Set the inline startup code.
+
+        :param str code: Python code string, or empty string.
+        """
+        self._set_profile_value("startup_code", code)
+
+    @property
+    def resolved_startup_script(self):
+        """
+        Absolute path to the startup script, or empty string if not set.
+
+        :rtype: str
+        """
+        script = self.startup_script
+        if not script:
+            return ""
+        return os.path.normpath(
+            os.path.join(self._project_root, script)
+        )
+
+    @property
+    def shutdown_script(self):
+        """
+        Relative path to a Python script that runs when the project closes.
+
+        Empty string means no shutdown script. Reads from the active profile.
+
+        :rtype: str
+        """
+        return self._get_profile_value("shutdown_script")
+
+    @shutdown_script.setter
+    def shutdown_script(self, path):
+        """
+        Set the shutdown script path (relative to project root).
+
+        :param str path: Relative path to a .py file, or empty string.
+        """
+        self._set_profile_value("shutdown_script", path)
+
+    @property
+    def shutdown_code(self):
+        """
+        Inline Python code that runs when the project closes.
+
+        Executed after the shutdown script file (if any), but before
+        environment variables and paths are torn down. Empty string
+        means no inline code. Reads from the active profile.
+
+        :rtype: str
+        """
+        return self._get_profile_value("shutdown_code")
+
+    @shutdown_code.setter
+    def shutdown_code(self, code):
+        """
+        Set the inline shutdown code.
+
+        :param str code: Python code string, or empty string.
+        """
+        self._set_profile_value("shutdown_code", code)
+
+    @property
+    def resolved_shutdown_script(self):
+        """
+        Absolute path to the shutdown script, or empty string if not set.
+
+        :rtype: str
+        """
+        script = self.shutdown_script
+        if not script:
+            return ""
+        return os.path.normpath(
+            os.path.join(self._project_root, script)
+        )
+
+    @property
+    def env_vars(self):
+        """
+        Environment variables to set when the project is opened.
+
+        Returns a copy of the active profile's env vars dict.
+
+        :rtype: dict
+        """
+        return dict(self._get_profile_value("env_vars") or {})
+
+    @env_vars.setter
+    def env_vars(self, variables):
+        """
+        Set the environment variables dictionary on the active profile.
+
+        :param dict variables: Key-value string pairs.
+        """
+        self._set_profile_value("env_vars", dict(variables))
+
+    @property
+    def load_immediately(self):
+        """
+        Whether to skip startup scripts when the project is opened.
+
+        When True, opening the project only sets up paths, env vars,
+        and UI — startup scripts are deferred until the user clicks
+        the Load button. Reads from the active profile.
+
+        :rtype: bool
+        """
+        return self._get_profile_value("load_immediately")
+
+    @load_immediately.setter
+    def load_immediately(self, value):
+        """
+        Set the load_immediately flag on the active profile.
+
+        :param bool value: True to skip startup on open.
+        """
+        self._set_profile_value("load_immediately", bool(value))
+
+    # --- Profile Management (public) -----------------------------------------
+
+    @property
+    def dcc_tag(self):
+        """
+        The DCC version tag used to select the active profile.
+
+        :rtype: str or None
+        """
+        return self._dcc_tag
+
+    @property
+    def active_profile_name(self):
+        """
+        Name of the currently active profile.
+
+        :rtype: str
+        """
+        return self._active_profile_name
+
+    @property
+    def profile_names(self):
+        """
+        Sorted list of all profile names in this project.
+
+        :rtype: list
+        """
+        return sorted(self._profiles.keys())
+
+    @property
+    def profiles(self):
+        """
+        All profiles as a dict of dicts (deep copy).
+
+        :rtype: dict
+        """
+        import copy
+        return copy.deepcopy(self._profiles)
+
+    def set_profiles(self, profiles):
+        """
+        Replace all profiles with a new dict.
+
+        Used by the settings dialog to apply edits across all profiles
+        at once. Re-resolves the active profile after replacement.
+
+        :param dict profiles: Dict of profile dicts keyed by name.
+        """
+        import copy
+        self._profiles = copy.deepcopy(profiles)
+        self._resolve_active_profile()
+
+    def get_profile_data(self, profile_name):
+        """
+        Return a copy of a specific profile's data.
+
+        Returns ``PROFILE_DEFAULTS`` if the profile doesn't exist.
+
+        :param str profile_name: Profile name (e.g. ``"Maya2025"``).
+        :return: Profile settings dict.
+        :rtype: dict
+        """
+        if profile_name in self._profiles:
+            return dict(self._profiles[profile_name])
+        return dict(PROFILE_DEFAULTS)
+
+    def add_profile(self, profile_name, data=None):
+        """
+        Add a new profile with default values (or provided data).
+
+        :param str profile_name: Profile name to create.
+        :param dict data: Optional initial data (merged over defaults).
+        """
+        new_profile = dict(PROFILE_DEFAULTS)
+        if data:
+            new_profile.update(data)
+        self._profiles[profile_name] = new_profile
+        logger.info("Added profile '%s' to project '%s'", profile_name, self._name)
+
+    def remove_profile(self, profile_name):
+        """
+        Remove a profile by name.
+
+        Cannot remove the active profile — switch to a different one first.
+
+        :param str profile_name: Profile name to remove.
+        :return: True if removed, False if not found or is active.
+        :rtype: bool
+        """
+        if profile_name == self._active_profile_name:
+            logger.warning("Cannot remove the active profile '%s'", profile_name)
+            return False
+        if profile_name in self._profiles:
+            del self._profiles[profile_name]
+            logger.info("Removed profile '%s' from project '%s'",
+                        profile_name, self._name)
+            return True
+        return False
+
     # --- Load / Save ----------------------------------------------------------
 
     def load(self):
         """
         Load project settings from the ``.mca-project`` JSON file.
+
+        Handles both schema v3 (flat format) and v4+ (profiles).
+        v3 files are auto-migrated: DCC-specific fields are moved into
+        a ``"default"`` profile.
 
         Silently falls back to defaults if the file is missing or corrupt.
 
@@ -417,27 +622,44 @@ class MCAProject:
                            self.project_file_path, exc)
             return False
 
-        # Extract fields with safe defaults.
+        # --- Shared fields (same in v3 and v4) ---
         self._name = data.get("name", os.path.basename(self._project_root))
         self._python_paths = data.get("python_paths", [])
         self._excluded_folders = data.get("excluded_folders",
                                           list(DEFAULT_EXCLUDED_FOLDERS))
-        self._startup_script = data.get("startup_script", "")
-        self._startup_code = data.get("startup_code", "")
-        self._shutdown_script = data.get("shutdown_script", "")
-        self._shutdown_code = data.get("shutdown_code", "")
-        self._env_vars = data.get("env_vars", {})
-        self._load_immediately = data.get("load_immediately", False)
         self._open_on_editor_open = data.get("open_on_editor_open", False)
         self._auto_reload_modules = data.get("auto_reload_modules", True)
-        self._schema_version = data.get("schema_version", CURRENT_SCHEMA_VERSION)
+        self._schema_version = data.get("schema_version", 3)
 
-        logger.info("Loaded project '%s' from %s", self._name, self.project_file_path)
+        # --- Profile-specific fields ---
+        if "profiles" in data:
+            # v4+ format: profiles dict already present.
+            self._profiles = data["profiles"]
+        else:
+            # v3 migration: move flat DCC-specific fields into a "default" profile.
+            default_profile = {}
+            for key in PROFILE_KEYS:
+                if key in data:
+                    default_profile[key] = data[key]
+                else:
+                    default_profile[key] = PROFILE_DEFAULTS[key]
+            self._profiles = {"default": default_profile}
+            logger.info("Migrated v3 project '%s' to v4 profile format", self._name)
+
+        # Resolve which profile is active after loading.
+        self._resolve_active_profile()
+
+        logger.info("Loaded project '%s' from %s (profile: %s)",
+                     self._name, self.project_file_path,
+                     self._active_profile_name)
         return True
 
     def save(self):
         """
         Write the current project settings to the ``.mca-project`` JSON file.
+
+        Always writes v4 format with profiles, even if the file was
+        originally v3.
 
         :return: True if the file was written successfully.
         :rtype: bool
@@ -457,28 +679,25 @@ class MCAProject:
         """
         Serialize project settings to a plain dictionary.
 
+        Always outputs v4 format with ``"profiles"`` dict.
+
         :return: Dictionary suitable for JSON serialization.
         :rtype: dict
         """
         return {
-            "schema_version": self._schema_version,
+            "schema_version": CURRENT_SCHEMA_VERSION,
             "name": self._name,
             "python_paths": self._python_paths,
             "excluded_folders": self._excluded_folders,
-            "startup_script": self._startup_script,
-            "startup_code": self._startup_code,
-            "shutdown_script": self._shutdown_script,
-            "shutdown_code": self._shutdown_code,
-            "env_vars": self._env_vars,
-            "load_immediately": self._load_immediately,
             "open_on_editor_open": self._open_on_editor_open,
             "auto_reload_modules": self._auto_reload_modules,
+            "profiles": self._profiles,
         }
 
     def validate(self):
         """
-        Check that the project root exists and all Python paths resolve
-        to real directories.
+        Check that the project root exists, all Python paths resolve
+        to real directories, and the active profile's scripts exist.
 
         :return: List of warning strings (empty if everything is valid).
         :rtype: list
@@ -493,19 +712,21 @@ class MCAProject:
             if not os.path.isdir(abs_path):
                 warnings.append("Python path does not exist: {}".format(rel_path))
 
-        # Validate startup script exists if specified.
-        if self._startup_script:
+        # Validate startup script exists if specified (active profile).
+        startup_script = self.startup_script
+        if startup_script:
             script_path = self.resolved_startup_script
             if not os.path.isfile(script_path):
-                warnings.append("Startup script not found: {}".format(
-                    self._startup_script))
+                warnings.append("[{}] Startup script not found: {}".format(
+                    self._active_profile_name, startup_script))
 
-        # Validate shutdown script exists if specified.
-        if self._shutdown_script:
+        # Validate shutdown script exists if specified (active profile).
+        shutdown_script = self.shutdown_script
+        if shutdown_script:
             script_path = self.resolved_shutdown_script
             if not os.path.isfile(script_path):
-                warnings.append("Shutdown script not found: {}".format(
-                    self._shutdown_script))
+                warnings.append("[{}] Shutdown script not found: {}".format(
+                    self._active_profile_name, shutdown_script))
 
         return warnings
 
@@ -577,7 +798,7 @@ def detect_python_paths(folder_path):
 
 
 def create_default_project(folder_path, name=None, python_paths=None,
-                           excluded_folders=None):
+                           excluded_folders=None, dcc_tag=None):
     """
     Create a new ``.mca-project`` file with sensible defaults.
 
@@ -585,10 +806,11 @@ def create_default_project(folder_path, name=None, python_paths=None,
     :param str name: Project display name (defaults to folder basename).
     :param list python_paths: Relative Python paths (auto-detected if None).
     :param list excluded_folders: Excluded folder names (uses defaults if None).
+    :param str dcc_tag: Optional DCC version tag (e.g. ``"Maya2025"``).
     :return: The newly created MCAProject instance.
     :rtype: MCAProject
     """
-    project = MCAProject(folder_path)
+    project = MCAProject(folder_path, dcc_tag=dcc_tag)
 
     if name:
         project.name = name

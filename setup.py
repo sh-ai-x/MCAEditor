@@ -126,6 +126,15 @@ def collect_extensions():
         os.path.join("mca_qt", "widgets", "terminal_xterm.py"),   # eventFilter
         os.path.join("mca_qt", "widgets", "tool_stripe.py"),      # sizeHint
         os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),  # keyPressEvent
+        os.path.join("mca_qt", "widgets", "editor_group_container.py"),   # QWidget + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "terminal_tab_panel.py"),       # QWidget + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "terminal_backend.py"),         # QThread + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "ai_panel.py"),                 # QFrame/QWidget + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "connection_dialog.py"),        # QDialog + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "create_project_dialog.py"),    # QDialog + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "license_dialog.py"),           # QDialog + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "new_tab_dialog.py"),           # QDialog + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "project_settings_dialog.py"),  # QDialog + PySide2 Shiboken2
         # --- AI Chat plugin ---
         os.path.join("mca_core", "plugins", "ai_chat", "chat_widget.py"),   # keyPressEvent
         os.path.join("mca_core", "plugins", "ai_chat", "chat_worker.py"),   # QThread.run()

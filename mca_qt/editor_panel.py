@@ -119,12 +119,14 @@ class MCAEditorPanel(QWidget):
     # Signal emitted when the user toggles the activity bar (bottom status bar).
     activity_bar_toggled = Signal()
 
-    def __init__(self, settings, adapter_manager=None, parent=None):
+    def __init__(self, settings, adapter_manager=None, dcc_version=None, parent=None):
         """
         Initialize the editor panel and all UI components.
 
         :param MCASettings settings: Application settings instance.
         :param AdapterManager adapter_manager: Optional adapter manager.
+        :param str dcc_version: Optional DCC version tag (e.g. ``"Maya2024"``)
+            for per-version session isolation.
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
@@ -152,8 +154,14 @@ class MCAEditorPanel(QWidget):
         self._sidebar_visible = True
         self._output_visible = True
 
+        # DCC version tag (e.g. "Maya2025") — passed to MCAProject for
+        # profile selection, and to SessionManager for per-version storage.
+        self._dcc_version = dcc_version
+
         # Session manager for buffer persistence across restarts.
-        self._session_manager = SessionManager()
+        # When embedded in a DCC, pass the version tag so session.json and
+        # output.log are stored per-version while scripts/ stays shared.
+        self._session_manager = SessionManager(dcc_version=dcc_version)
 
         # Background symbol index for instant Go To Declaration lookups.
         self._symbol_index = None   # SymbolIndex instance (created on project open).
@@ -1224,8 +1232,8 @@ class MCAEditorPanel(QWidget):
             self._close_project()
 
         if has_project_file(folder_path):
-            # Load the existing project file.
-            project = MCAProject(folder_path)
+            # Load the existing project file, selecting the DCC-specific profile.
+            project = MCAProject(folder_path, dcc_tag=self._dcc_version)
         else:
             # Show creation dialog for the user to confirm name and paths.
             from mca_qt.widgets.create_project_dialog import CreateProjectDialog
@@ -1234,7 +1242,9 @@ class MCAEditorPanel(QWidget):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             name, selected_paths = dialog.result()
-            project = create_default_project(folder_path, name, selected_paths)
+            project = create_default_project(
+                folder_path, name, selected_paths, dcc_tag=self._dcc_version
+            )
 
         # Validate the project.
         warnings = project.validate()
@@ -1701,7 +1711,7 @@ class MCAEditorPanel(QWidget):
 
             # Re-read the project file from disk so any manual edits are
             # picked up (same as what _on_refresh_project does).
-            self._active_project = MCAProject(project_root)
+            self._active_project = MCAProject(project_root, dcc_tag=self._dcc_version)
 
             # --- Startup ---
             self._inject_project_paths()
@@ -1737,7 +1747,9 @@ class MCAEditorPanel(QWidget):
                 self._output.write_error(
                     "Failed to open project settings: {}".format(exc))
                 return
-        dialog = ProjectSettingsDialog(self._active_project, parent=self)
+        dialog = ProjectSettingsDialog(
+            self._active_project, dcc_tag=self._dcc_version, parent=self
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -1750,17 +1762,17 @@ class MCAEditorPanel(QWidget):
         self._remove_project_paths()
 
         # Apply the user's changes to the project model.
+        # Shared settings.
         self._active_project.name = result["name"]
         self._active_project.python_paths = result["python_paths"]
         self._active_project.excluded_folders = result["excluded_folders"]
-        self._active_project.startup_script = result["startup_script"]
-        self._active_project.startup_code = result["startup_code"]
-        self._active_project.shutdown_script = result["shutdown_script"]
-        self._active_project.shutdown_code = result["shutdown_code"]
-        self._active_project.env_vars = result["env_vars"]
-        self._active_project.load_immediately = result.get("load_immediately", False)
         self._active_project.open_on_editor_open = result.get("open_on_editor_open", False)
         self._active_project.auto_reload_modules = result.get("auto_reload_modules", True)
+
+        # Profile-specific settings — replace all profiles at once
+        # since the dialog allows editing any/all profiles.
+        if "profiles" in result:
+            self._active_project.set_profiles(result["profiles"])
 
         # Save the updated .mca-project file.
         self._active_project.save()

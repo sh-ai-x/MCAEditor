@@ -78,20 +78,40 @@ class SessionManager:
     #     supports both horizontal and vertical splits
     MANIFEST_VERSION = 3
 
-    def __init__(self):
+    def __init__(self, dcc_version=None):
         """
         Initialize the session manager and compute directory paths.
 
+        When *dcc_version* is provided (e.g. ``"Maya2024"``), session
+        state (``session.json``, ``output.log``) is stored in a
+        version-specific subdirectory so different Maya versions don't
+        overwrite each other's sessions.  The ``scripts/`` workspace
+        remains shared across all versions so users have one set of
+        buffer files.
+
         Directories are NOT created until the first write operation
         (lazy creation via ``_ensure_dirs``).
+
+        :param str dcc_version: Optional DCC version identifier for
+            per-version session isolation (e.g. ``"Maya2024"``).
         """
         # Base preferences directory under the user's Documents folder.
         # Centralized in mca_core.__init__.get_prefs_dir().
         from mca_core import get_prefs_dir
         self._prefs_dir = get_prefs_dir()
 
+        # When running inside a specific DCC version, session state goes
+        # into a version-specific subdirectory.  This prevents Maya 2024
+        # and 2025 from overwriting each other's tab layouts and output.
+        self._dcc_version = dcc_version
+        if dcc_version:
+            self._session_dir = os.path.join(self._prefs_dir, dcc_version)
+        else:
+            self._session_dir = self._prefs_dir
+
         # Default workspace directories inside mca_preferences.
         # "scripts" is for user scripts AND buffer storage (unified).
+        # SHARED across all DCC versions — one set of buffer files.
         # "site-packages" is added to sys.path so third-party packages
         # can be imported from there.
         self._scripts_dir = os.path.join(self._prefs_dir, "scripts")
@@ -123,6 +143,9 @@ class SessionManager:
             return
         os.makedirs(self._buffers_dir, exist_ok=True)
         os.makedirs(self._site_packages_dir, exist_ok=True)
+        # Create the version-specific session directory if needed.
+        if self._session_dir != self._prefs_dir:
+            os.makedirs(self._session_dir, exist_ok=True)
         self._dirs_created = True
         logger.debug("Ensured session directories: %s", self._buffers_dir)
 
@@ -264,7 +287,7 @@ class SessionManager:
         :param str content: The plain text content of the output panel.
         """
         self._ensure_dirs()
-        filepath = os.path.join(self._prefs_dir, "output.log")
+        filepath = os.path.join(self._session_dir, "output.log")
 
         try:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -280,7 +303,7 @@ class SessionManager:
         :return: The saved output text, or None if no file exists.
         :rtype: str or None
         """
-        filepath = os.path.join(self._prefs_dir, "output.log")
+        filepath = os.path.join(self._session_dir, "output.log")
 
         if not os.path.isfile(filepath):
             return None
@@ -364,7 +387,7 @@ class SessionManager:
         :return: Parsed manifest dict, or None if missing/corrupt.
         :rtype: dict or None
         """
-        manifest_path = os.path.join(self._prefs_dir, "session.json")
+        manifest_path = os.path.join(self._session_dir, "session.json")
 
         if not os.path.isfile(manifest_path):
             logger.debug("No session manifest found at %s", manifest_path)
@@ -406,7 +429,7 @@ class SessionManager:
         :param int active_group_index: Index of the active group (DFS order).
         """
         self._ensure_dirs()
-        manifest_path = os.path.join(self._prefs_dir, "session.json")
+        manifest_path = os.path.join(self._session_dir, "session.json")
 
         manifest = {
             "version": self.MANIFEST_VERSION,

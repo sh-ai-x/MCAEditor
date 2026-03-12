@@ -642,8 +642,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self.setWindowTitle("MCA Editor")
         self.setWindowIcon(mca_logo(size=32))
 
-        # Load settings (QSettings-backed inside Maya).
-        self._settings = MCASettings()
+        # Load version-specific settings so Maya 2024 and 2025 don't
+        # share QSettings (splitter sizes, editor_was_open, etc.).
+        from mca_maya.plugin_main import _maya_version
+        _dcc_tag = "Maya{}".format(_maya_version) if _maya_version else None
+        _app_name = "MCAEditor-{}".format(_dcc_tag) if _dcc_tag else "MCAEditor"
+        self._settings = MCASettings(app_name=_app_name)
 
         # Create an adapter manager without the built-in TCP adapter, since
         # we're running inside Maya and don't need socket communication.
@@ -655,9 +659,11 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._adapter_manager.register_adapter_instance("maya_internal", internal_adapter)
 
         # Create the editor panel with the pre-connected adapter manager.
+        # Pass the DCC version tag so session/output are stored per-version.
         self._panel = MCAEditorPanel(
             self._settings,
             adapter_manager=self._adapter_manager,
+            dcc_version=_dcc_tag,
             parent=self,
         )
 
@@ -1452,7 +1458,11 @@ def show_mca_editor():
     from mca_core.license import check_license
     from mca_qt.widgets.license_dialog import LicenseDialog
 
-    _license_settings = MCASettings()
+    # Use version-specific settings for the license check too.
+    from mca_maya.plugin_main import _maya_version as _mv
+    _lc_tag = "Maya{}".format(_mv) if _mv else None
+    _lc_app = "MCAEditor-{}".format(_lc_tag) if _lc_tag else "MCAEditor"
+    _license_settings = MCASettings(app_name=_lc_app)
     license_status = check_license(_license_settings)
 
     if license_status["needs_key"]:
@@ -1534,7 +1544,7 @@ def show_mca_editor():
     QTimer.singleShot(0, _reveal_first_show)
 
     # Record that the editor is now open so it auto-opens on next Maya launch.
-    MCASettings().set("editor_was_open", True)
+    MCASettings(app_name=_lc_app).set("editor_was_open", True)
 
     # Show trial notice on the Maya status bar if in trial mode.
     if _show_license_notice and _license_message:

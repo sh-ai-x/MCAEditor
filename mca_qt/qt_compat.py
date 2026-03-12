@@ -142,10 +142,28 @@ else:
         def __int__(self):
             return self._combined
 
-    # --- Patch QApplication.exec() ------------------------------------------
+    # --- Patch exec() aliases -----------------------------------------------
     # PySide2 uses exec_() because 'exec' was a keyword in Python 2.
+    # PySide6 uses exec().  We add exec() as a thin wrapper that calls
+    # exec_() on the instance.  Must call via self.exec_() (bound method),
+    # NOT via an unbound class method reference — Shiboken2 doesn't handle
+    # explicit self passing for C++ methods.
     if not hasattr(QApplication, "exec"):
-        QApplication.exec = QApplication.exec_
+        QApplication.exec = lambda self=None: QApplication.exec_()
+
+    if not hasattr(QDialog, "exec"):
+        QDialog.exec = lambda self: self.exec_()
+
+    if not hasattr(QMenu, "exec"):
+        QMenu.exec = lambda self, *args: self.exec_(*args)
+
+    # QDrag.exec() also needs patching (used in drag-and-drop).
+    try:
+        from PySide2.QtGui import QDrag as _QDrag
+        if not hasattr(_QDrag, "exec"):
+            _QDrag.exec = lambda self, *args: self.exec_(*args)
+    except (ImportError, AttributeError):
+        pass
 
     # --- Scoped Enum Patches ------------------------------------------------
     # PySide6 uses scoped enums (e.g. Qt.AlignmentFlag.AlignLeft) while
@@ -172,6 +190,7 @@ else:
         ])
         _patch_enum_group(Qt, "Orientation", ["Horizontal", "Vertical"])
         _patch_enum_group(Qt, "ItemFlag", [
+            "NoItemFlags",
             "ItemIsSelectable", "ItemIsEditable", "ItemIsEnabled",
             "ItemIsUserCheckable", "ItemIsDragEnabled", "ItemIsDropEnabled",
         ])
@@ -193,17 +212,45 @@ else:
             "Key_ParenRight", "Key_QuoteDbl", "Key_Apostrophe",
         ])
         _patch_enum_group(Qt, "WidgetAttribute", [
-            "WA_DeleteOnClose",
+            "WA_DeleteOnClose", "WA_DontShowOnScreen",
             "WA_TransparentForMouseEvents", "WA_NoSystemBackground",
         ])
         _patch_enum_group(Qt, "WindowType", [
-            "Window", "Dialog", "Widget", "ToolTip", "FramelessWindowHint",
+            "Window", "Dialog", "Widget", "Popup", "ToolTip", "FramelessWindowHint",
         ])
         _patch_enum_group(Qt, "ScrollBarPolicy", [
             "ScrollBarAsNeeded", "ScrollBarAlwaysOff", "ScrollBarAlwaysOn",
         ])
         _patch_enum_group(Qt, "FocusPolicy", [
             "NoFocus", "TabFocus", "ClickFocus", "StrongFocus", "WheelFocus",
+        ])
+        _patch_enum_group(Qt, "FocusReason", [
+            "MouseFocusReason", "TabFocusReason", "BacktabFocusReason",
+            "ActiveWindowFocusReason", "PopupFocusReason", "ShortcutFocusReason",
+            "MenuBarFocusReason", "OtherFocusReason",
+        ])
+        _patch_enum_group(Qt, "CheckState", [
+            "Unchecked", "PartiallyChecked", "Checked",
+        ])
+        _patch_enum_group(Qt, "CursorShape", [
+            "ArrowCursor", "UpArrowCursor", "CrossCursor", "WaitCursor",
+            "IBeamCursor", "SizeVerCursor", "SizeHorCursor", "SizeBDiagCursor",
+            "SizeFDiagCursor", "SizeAllCursor", "BlankCursor", "SplitVCursor",
+            "SplitHCursor", "PointingHandCursor", "ForbiddenCursor",
+            "WhatsThisCursor", "BusyCursor", "OpenHandCursor", "ClosedHandCursor",
+        ])
+        _patch_enum_group(Qt, "GlobalColor", [
+            "color0", "color1", "black", "white", "darkGray", "gray",
+            "lightGray", "red", "green", "blue", "cyan", "magenta", "yellow",
+            "darkRed", "darkGreen", "darkBlue", "darkCyan", "darkMagenta",
+            "darkYellow", "transparent",
+        ])
+        _patch_enum_group(Qt, "ShortcutContext", [
+            "WidgetShortcut", "WindowShortcut", "ApplicationShortcut",
+            "WidgetWithChildrenShortcut",
+        ])
+        _patch_enum_group(Qt, "MouseButton", [
+            "NoButton", "LeftButton", "RightButton", "MiddleButton",
         ])
         _patch_enum_group(Qt, "TextInteractionFlag", [
             "TextSelectableByMouse", "TextSelectableByKeyboard",
@@ -328,7 +375,8 @@ else:
             "ToolTip", "MouseMove", "KeyPress", "KeyRelease",
             "FocusIn", "FocusOut", "Enter", "Leave",
             "DragEnter", "DragMove", "DragLeave", "Drop",
-            "MouseButtonDblClick", "Resize",
+            "MouseButtonDblClick", "MouseButtonPress", "MouseButtonRelease",
+            "Resize", "ShortcutOverride", "WindowActivate",
         ])
 
         # --- Qt.DropAction enums (used by drag-and-drop tab splitting) ---

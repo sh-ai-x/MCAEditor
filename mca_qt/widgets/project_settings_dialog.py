@@ -6,13 +6,22 @@ hand-editing the ``.mca-project`` JSON file. Uses a left-nav list
 with stacked pages (General, Startup, Shutdown) matching the
 app Settings dialog pattern.
 
-Editable fields:
+Profile-specific settings (startup/shutdown code, environment variables,
+load_immediately) are edited per-profile. A profile selector at the top
+of the dialog lets the user switch between DCC-specific profiles
+(e.g. ``Maya2024``, ``Maya2025``, ``Unreal``).
+
+Editable fields (shared):
 
     - Project name
-    - Load immediately (skip startup scripts on open)
     - Open project on open (auto-open when editor launches)
+    - Auto-reload modules on save/execute
     - Python source paths (add/remove relative directories)
     - Excluded folders (add/remove folder names)
+
+Editable fields (per-profile):
+
+    - Load immediately (skip startup scripts on open)
     - Environment variables (key=value pairs set in os.environ)
     - Startup script file (relative path to a .py file)
     - Startup inline code (Python code typed directly into the dialog)
@@ -21,9 +30,10 @@ Editable fields:
 
 Dependencies:
     - PySide6 (QDialog, QVBoxLayout, etc.)
-    - mca_core.project (MCAProject)
+    - mca_core.project (MCAProject, PROFILE_DEFAULTS)
 """
 
+import copy
 import os
 import logging
 
@@ -32,7 +42,7 @@ from mca_qt.qt_compat import (
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QWidget, QGroupBox, QFormLayout, QStackedWidget,
     QAbstractItemView, QCheckBox,
-    QPlainTextEdit,
+    QPlainTextEdit, QComboBox,
     Qt,
 )
 
@@ -152,6 +162,28 @@ _NAV_LIST_STYLE = """
     }
     QListWidget::item:hover:!selected {
         background-color: #3e3e42;
+    }
+"""
+
+_COMBO_STYLE = """
+    QComboBox {
+        background-color: #3c3c3c;
+        color: #d4d4d4;
+        border: 1px solid #555;
+        border-radius: 3px;
+        padding: 4px 8px;
+        font-size: 12px;
+        min-width: 140px;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 20px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #2d2d30;
+        color: #d4d4d4;
+        selection-background-color: #094771;
+        border: 1px solid #555;
     }
 """
 
@@ -313,35 +345,57 @@ class ProjectSettingsDialog(QDialog):
     Uses a left-nav list + stacked pages layout matching the app
     Settings dialog pattern. Three pages: General, Startup, Shutdown.
 
+    A profile selector at the top lets the user switch between
+    DCC-specific profiles. Profile-specific fields (env vars,
+    load_immediately, startup, shutdown) are saved per-profile.
+
     Reads the current values from the ``MCAProject`` instance and
     presents them in an editable form. On accept, the caller can
     retrieve the updated values via ``result()`` and apply them.
 
     :param MCAProject project: The active project to edit.
+    :param str dcc_tag: Optional DCC version tag for pre-selecting profile.
     :param QWidget parent: Optional parent widget.
     """
 
-    def __init__(self, project, parent=None):
+    def __init__(self, project, dcc_tag=None, parent=None):
         """
         Initialize the dialog with the project's current values.
 
         :param MCAProject project: The active project instance.
+        :param str dcc_tag: Optional DCC version tag (e.g. ``"Maya2025"``).
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
         self._project = project
+        self._dcc_tag = dcc_tag
         self._result = None
 
+        # --- Profile data ---
+        # Deep copy all profiles so edits don't affect the model until save.
+        self._profiles_data = copy.deepcopy(project.profiles)
+        # If no profiles exist yet, create a "default" one.
+        if not self._profiles_data:
+            from mca_core.project import PROFILE_DEFAULTS
+            self._profiles_data["default"] = dict(PROFILE_DEFAULTS)
+        # Track which profile is currently displayed in the widgets.
+        self._current_profile_name = project.active_profile_name
+        # Guard flag to prevent recursive signals during profile switching.
+        self._switching_profile = False
+
         self.setWindowTitle("Project Settings -- {}".format(project.name))
-        self.setMinimumSize(600, 550)
+        self.setMinimumSize(640, 600)
         self.setModal(True)
         self._setup_ui()
 
     def _setup_ui(self):
-        """Build the top-level layout: left-nav list + stacked pages + buttons."""
+        """Build the top-level layout: profile selector + left-nav + pages + buttons."""
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(8)
+
+        # --- Profile selector row at the top ---
+        self._build_profile_selector(root_layout)
 
         # --- Top section: category list + pages side-by-side ---
         body = QHBoxLayout()
@@ -398,22 +452,260 @@ class ProjectSettingsDialog(QDialog):
 
         root_layout.addLayout(btn_layout)
 
+    # --- Profile Selector -----------------------------------------------------
+
+    def _build_profile_selector(self, parent_layout):
+        """
+        Build the profile selector row at the top of the dialog.
+
+        Contains a label, a combobox for profile selection, and
+        Add / Remove / Copy buttons for profile management.
+
+        :param QVBoxLayout parent_layout: Layout to add the selector to.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        # Label.
+        profile_label = QLabel("Profile:")
+        profile_label.setStyleSheet("color: #d4d4d4; font-size: 12px; font-weight: bold;")
+        row.addWidget(profile_label)
+
+        # Combobox with all profile names.
+        self._profile_combo = QComboBox()
+        self._profile_combo.setStyleSheet(_COMBO_STYLE)
+        self._populate_profile_combo()
+        self._profile_combo.currentTextChanged.connect(self._on_profile_changed)
+        row.addWidget(self._profile_combo)
+
+        # Add button.
+        add_btn = QPushButton("Add...")
+        add_btn.setStyleSheet(_BTN_STYLE)
+        add_btn.setToolTip("Create a new profile (e.g. Maya2024, Unreal)")
+        add_btn.clicked.connect(self._add_profile)
+        row.addWidget(add_btn)
+
+        # Remove button.
+        self._remove_profile_btn = QPushButton("Remove")
+        self._remove_profile_btn.setStyleSheet(_BTN_STYLE)
+        self._remove_profile_btn.setToolTip("Remove the selected profile")
+        self._remove_profile_btn.clicked.connect(self._remove_profile)
+        row.addWidget(self._remove_profile_btn)
+
+        # Copy To button.
+        copy_btn = QPushButton("Copy To...")
+        copy_btn.setStyleSheet(_BTN_STYLE)
+        copy_btn.setToolTip("Copy this profile's settings to a new profile")
+        copy_btn.clicked.connect(self._copy_profile)
+        row.addWidget(copy_btn)
+
+        row.addStretch()
+
+        # Active profile indicator — shows which profile the DCC is using.
+        if self._dcc_tag:
+            active_label = QLabel("Active: {}".format(
+                self._project.active_profile_name))
+            active_label.setStyleSheet("color: #888888; font-size: 10px;")
+            active_label.setToolTip(
+                "The profile that {} is currently using".format(self._dcc_tag))
+            row.addWidget(active_label)
+
+        parent_layout.addLayout(row)
+
+        # Update remove button state.
+        self._update_remove_btn_state()
+
+    def _populate_profile_combo(self):
+        """Repopulate the profile combobox with current profile names."""
+        self._switching_profile = True
+        self._profile_combo.clear()
+        for name in sorted(self._profiles_data.keys()):
+            self._profile_combo.addItem(name)
+        # Select the current profile.
+        idx = self._profile_combo.findText(self._current_profile_name)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._switching_profile = False
+
+    def _update_remove_btn_state(self):
+        """Disable remove button when only one profile remains."""
+        self._remove_profile_btn.setEnabled(
+            len(self._profiles_data) > 1
+        )
+
+    def _on_profile_changed(self, new_name):
+        """
+        Handle profile selection change.
+
+        Saves the current profile's widget state back to ``_profiles_data``,
+        then loads the new profile's data into the widgets.
+
+        :param str new_name: The newly selected profile name.
+        """
+        if self._switching_profile or not new_name:
+            return
+
+        # Save current widget state to the outgoing profile.
+        self._save_widgets_to_profile(self._current_profile_name)
+
+        # Switch to the new profile.
+        self._current_profile_name = new_name
+
+        # Load new profile data into widgets.
+        self._load_profile_to_widgets(new_name)
+
+    def _save_widgets_to_profile(self, profile_name):
+        """
+        Read all profile-specific widget values and store them in
+        ``_profiles_data[profile_name]``.
+
+        :param str profile_name: Profile name to save to.
+        """
+        if profile_name not in self._profiles_data:
+            from mca_core.project import PROFILE_DEFAULTS
+            self._profiles_data[profile_name] = dict(PROFILE_DEFAULTS)
+
+        profile = self._profiles_data[profile_name]
+
+        # Load immediately checkbox.
+        profile["load_immediately"] = self._load_immediately_cb.isChecked()
+
+        # Environment variables.
+        env_vars = {}
+        for i in range(self._env_list.count()):
+            entry = self._env_list.item(i).text()
+            if "=" in entry:
+                key, value = entry.split("=", 1)
+                env_vars[key.strip()] = value.strip()
+        profile["env_vars"] = env_vars
+
+        # Startup fields.
+        profile["startup_script"] = self._script_edit.text().strip()
+        profile["startup_code"] = self._code_edit.toPlainText()
+
+        # Shutdown fields.
+        profile["shutdown_script"] = self._shutdown_script_edit.text().strip()
+        profile["shutdown_code"] = self._shutdown_code_edit.toPlainText()
+
+    def _load_profile_to_widgets(self, profile_name):
+        """
+        Populate all profile-specific widgets from ``_profiles_data[profile_name]``.
+
+        :param str profile_name: Profile name to load from.
+        """
+        from mca_core.project import PROFILE_DEFAULTS
+        profile = self._profiles_data.get(profile_name, PROFILE_DEFAULTS)
+
+        # Load immediately checkbox.
+        self._load_immediately_cb.setChecked(profile.get("load_immediately", False))
+
+        # Environment variables.
+        self._env_list.clear()
+        env_vars = profile.get("env_vars", {})
+        for key in sorted(env_vars):
+            self._env_list.addItem("{}={}".format(key, env_vars[key]))
+
+        # Startup fields.
+        self._script_edit.setText(profile.get("startup_script", ""))
+        self._code_edit.setPlainText(profile.get("startup_code", ""))
+
+        # Shutdown fields.
+        self._shutdown_script_edit.setText(profile.get("shutdown_script", ""))
+        self._shutdown_code_edit.setPlainText(profile.get("shutdown_code", ""))
+
+        # Update the env vars group title to show profile name.
+        self._env_group.setTitle(
+            "Environment Variables -- profile: {}".format(profile_name))
+
+    def _add_profile(self):
+        """Prompt for a name and create a new empty profile."""
+        from mca_qt.qt_compat import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "Add Profile",
+            "Profile name (e.g. Maya2024, Maya2025, Unreal):"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # Don't overwrite an existing profile.
+        if name in self._profiles_data:
+            return
+
+        # Save current widgets before switching.
+        self._save_widgets_to_profile(self._current_profile_name)
+
+        # Create the new profile with empty defaults.
+        from mca_core.project import PROFILE_DEFAULTS
+        self._profiles_data[name] = dict(PROFILE_DEFAULTS)
+        self._current_profile_name = name
+
+        # Refresh the combobox and select the new profile.
+        self._populate_profile_combo()
+        self._load_profile_to_widgets(name)
+        self._update_remove_btn_state()
+
+    def _remove_profile(self):
+        """Remove the currently selected profile."""
+        name = self._profile_combo.currentText()
+        if not name or len(self._profiles_data) <= 1:
+            return
+
+        # Remove from data.
+        del self._profiles_data[name]
+
+        # Switch to the first remaining profile.
+        first = sorted(self._profiles_data.keys())[0]
+        self._current_profile_name = first
+        self._populate_profile_combo()
+        self._load_profile_to_widgets(first)
+        self._update_remove_btn_state()
+
+    def _copy_profile(self):
+        """Copy the current profile's settings to a new profile name."""
+        from mca_qt.qt_compat import QInputDialog
+        current_name = self._profile_combo.currentText()
+        name, ok = QInputDialog.getText(
+            self, "Copy Profile",
+            "New profile name (copying from '{}'):".format(current_name)
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        if name in self._profiles_data:
+            return
+
+        # Save current widgets first so the copy is up-to-date.
+        self._save_widgets_to_profile(self._current_profile_name)
+
+        # Deep copy the current profile's data.
+        self._profiles_data[name] = copy.deepcopy(
+            self._profiles_data[current_name]
+        )
+
+        # Switch to the new copy.
+        self._current_profile_name = name
+        self._populate_profile_combo()
+        self._load_profile_to_widgets(name)
+        self._update_remove_btn_state()
+
     # --- Page Builders --------------------------------------------------------
 
     def _build_general_page(self):
         """
         Build the General settings page.
 
-        Contains: project name, project root (read-only), two new
-        checkboxes, python source paths, excluded folders, and
-        environment variables.
+        Contains shared settings (project name, root, checkboxes,
+        python paths, excluded folders) and profile-specific settings
+        (load immediately, environment variables).
         """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
-        # --- Project Info ---
+        # --- Project Info (shared) ---
         info_group = QGroupBox("Project Info")
         info_group.setStyleSheet(_GROUP_STYLE)
         info_layout = QFormLayout(info_group)
@@ -433,16 +725,7 @@ class ProjectSettingsDialog(QDialog):
         )
         info_layout.addRow(self._make_label("Project Root:"), root_label)
 
-        # --- Checkboxes for new project options ---
-        self._load_immediately_cb = QCheckBox("Load project immediately (skip startup scripts on open)")
-        self._load_immediately_cb.setStyleSheet(_CHECKBOX_STYLE)
-        self._load_immediately_cb.setChecked(self._project.load_immediately)
-        self._load_immediately_cb.setToolTip(
-            "When checked, opening the project skips startup scripts.\n"
-            "Use the Load button in the toolbar to run them manually."
-        )
-        info_layout.addRow(self._load_immediately_cb)
-
+        # --- Shared checkboxes ---
         self._open_on_editor_open_cb = QCheckBox("Open project on editor open")
         self._open_on_editor_open_cb.setStyleSheet(_CHECKBOX_STYLE)
         self._open_on_editor_open_cb.setChecked(self._project.open_on_editor_open)
@@ -461,9 +744,20 @@ class ProjectSettingsDialog(QDialog):
         )
         info_layout.addRow(self._auto_reload_cb)
 
+        # --- Profile-specific: Load immediately ---
+        self._load_immediately_cb = QCheckBox("Load project immediately (skip startup scripts on open)")
+        self._load_immediately_cb.setStyleSheet(_CHECKBOX_STYLE)
+        self._load_immediately_cb.setChecked(self._project.load_immediately)
+        self._load_immediately_cb.setToolTip(
+            "When checked, opening the project skips startup scripts.\n"
+            "Use the Load button in the toolbar to run them manually.\n"
+            "(This setting is per-profile.)"
+        )
+        info_layout.addRow(self._load_immediately_cb)
+
         layout.addWidget(info_group)
 
-        # --- Python Source Paths ---
+        # --- Python Source Paths (shared) ---
         paths_group = QGroupBox("Python Source Paths (added to sys.path)")
         paths_group.setStyleSheet(_GROUP_STYLE)
         paths_layout = QVBoxLayout(paths_group)
@@ -493,7 +787,7 @@ class ProjectSettingsDialog(QDialog):
         paths_layout.addLayout(paths_btn_row)
         layout.addWidget(paths_group)
 
-        # --- Excluded Folders ---
+        # --- Excluded Folders (shared) ---
         excl_group = QGroupBox("Excluded Folders (hidden in workspace tree)")
         excl_group.setStyleSheet(_GROUP_STYLE)
         excl_layout = QVBoxLayout(excl_group)
@@ -523,15 +817,18 @@ class ProjectSettingsDialog(QDialog):
         excl_layout.addLayout(excl_btn_row)
         layout.addWidget(excl_group)
 
-        # --- Environment Variables ---
-        env_group = QGroupBox("Environment Variables (set in os.environ on open)")
-        env_group.setStyleSheet(_GROUP_STYLE)
-        env_layout = QVBoxLayout(env_group)
+        # --- Environment Variables (profile-specific) ---
+        # Title includes the profile name to make it clear this is per-profile.
+        self._env_group = QGroupBox(
+            "Environment Variables -- profile: {}".format(
+                self._current_profile_name))
+        self._env_group.setStyleSheet(_GROUP_STYLE)
+        env_layout = QVBoxLayout(self._env_group)
 
         self._env_list = QListWidget()
         self._env_list.setStyleSheet(_LIST_STYLE)
         self._env_list.setMinimumHeight(70)
-        # Populate with current env vars as "KEY=VALUE" entries.
+        # Populate with current profile's env vars as "KEY=VALUE" entries.
         for key in sorted(self._project.env_vars):
             value = self._project.env_vars[key]
             self._env_list.addItem("{}={}".format(key, value))
@@ -557,14 +854,14 @@ class ProjectSettingsDialog(QDialog):
         env_btn_row.addWidget(remove_env_btn)
 
         env_layout.addLayout(env_btn_row)
-        layout.addWidget(env_group)
+        layout.addWidget(self._env_group)
 
         layout.addStretch()
         self._pages.addWidget(page)
 
     def _build_startup_page(self):
         """
-        Build the Startup settings page.
+        Build the Startup settings page (profile-specific).
 
         Contains: startup script file path with Browse button, and
         an inline code editor for startup code.
@@ -622,7 +919,7 @@ class ProjectSettingsDialog(QDialog):
 
     def _build_shutdown_page(self):
         """
-        Build the Shutdown settings page.
+        Build the Shutdown settings page (profile-specific).
 
         Contains: shutdown script file path with Browse button, and
         an inline code editor for shutdown code.
@@ -840,7 +1137,16 @@ class ProjectSettingsDialog(QDialog):
     # --- Save -----------------------------------------------------------------
 
     def _on_save(self):
-        """Collect all field values and accept the dialog."""
+        """
+        Collect all field values and accept the dialog.
+
+        Shared settings are collected directly from widgets. Profile-specific
+        settings are saved from widgets into the current profile, then all
+        profiles are included in the result.
+        """
+        # Save the currently displayed profile's widget state.
+        self._save_widgets_to_profile(self._current_profile_name)
+
         # Gather python paths from the list widget.
         python_paths = []
         for i in range(self._paths_list.count()):
@@ -851,26 +1157,13 @@ class ProjectSettingsDialog(QDialog):
         for i in range(self._excluded_list.count()):
             excluded.append(self._excluded_list.item(i).text())
 
-        # Gather env vars from the list widget — parse "KEY=VALUE" entries.
-        env_vars = {}
-        for i in range(self._env_list.count()):
-            entry = self._env_list.item(i).text()
-            if "=" in entry:
-                key, value = entry.split("=", 1)
-                env_vars[key.strip()] = value.strip()
-
         self._result = {
             "name": self._name_edit.text().strip() or self._project.name,
             "python_paths": python_paths,
             "excluded_folders": excluded,
-            "startup_script": self._script_edit.text().strip(),
-            "startup_code": self._code_edit.toPlainText(),
-            "shutdown_script": self._shutdown_script_edit.text().strip(),
-            "shutdown_code": self._shutdown_code_edit.toPlainText(),
-            "env_vars": env_vars,
-            "load_immediately": self._load_immediately_cb.isChecked(),
             "open_on_editor_open": self._open_on_editor_open_cb.isChecked(),
             "auto_reload_modules": self._auto_reload_cb.isChecked(),
+            "profiles": self._profiles_data,
         }
         self.accept()
 
@@ -879,9 +1172,10 @@ class ProjectSettingsDialog(QDialog):
         Return the user's edited values after the dialog is accepted.
 
         :return: Dictionary with keys: name, python_paths, excluded_folders,
-            startup_script, startup_code, shutdown_script, shutdown_code,
-            env_vars, load_immediately, open_on_editor_open. Or None if
-            cancelled.
+            open_on_editor_open, auto_reload_modules, profiles. The
+            ``profiles`` value is a dict of profile name to profile data
+            (each with startup_script, startup_code, shutdown_script,
+            shutdown_code, env_vars, load_immediately). Or None if cancelled.
         :rtype: dict or None
         """
         return self._result

@@ -1,8 +1,8 @@
 """
-MCA Editor - Maya 2025 Build & Distribution Script.
+MCA Editor - Maya Build & Distribution Script.
 
-Automates the full pipeline for creating a distributable Maya 2025 plugin:
-    1. Locate Maya 2025's ``mayapy.exe`` interpreter
+Automates the full pipeline for creating a distributable Maya plugin:
+    1. Locate the target Maya version's ``mayapy.exe`` interpreter
     2. Ensure Cython is available in Maya's Python
     3. Compile all source via ``setup.py build_ext --inplace``
     4. Collect compiled ``.pyd`` files + ``__init__.py`` stubs into a clean dist folder
@@ -12,12 +12,13 @@ Automates the full pipeline for creating a distributable Maya 2025 plugin:
     8. Zip the final distribution
 
 Usage:
-    python build_maya.py
+    python build_maya.py                          # Build for Maya 2025 (default)
+    python build_maya.py --maya-version 2024      # Build for Maya 2024
     python build_maya.py --mayapy "C:/custom/path/mayapy.exe"
 
 Dependencies:
     - Cython >= 3.0 (auto-installed into Maya's Python if missing)
-    - Maya 2025 installed (provides mayapy.exe with Python 3.11)
+    - Maya 2024+ installed (provides mayapy.exe)
 """
 
 import os
@@ -33,8 +34,11 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mca_core import __version__ as VERSION
 
-# Default location of Maya 2025's Python interpreter on Windows.
-DEFAULT_MAYAPY = "C:/Program Files/Autodesk/Maya2025/bin/mayapy.exe"
+# Default Maya version to build for (can be overridden with --maya-version).
+DEFAULT_MAYA_VERSION = "2025"
+
+# Template for the default mayapy.exe path on Windows.
+MAYAPY_TEMPLATE = "C:/Program Files/Autodesk/Maya{version}/bin/mayapy.exe"
 
 # Packages to include in the Maya distribution (no standalone or legacy compat).
 DIST_PACKAGES = ["mca_core", "mca_qt", "mca_maya"]
@@ -80,6 +84,21 @@ DIST_PYC_FILES = [
     os.path.join("mca_qt", "widgets", "tool_stripe.py"),
     # Plugin settings dialog has keyPressEvent override -> .pyc
     os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),
+    # --- PySide2/Shiboken2 + Cython incompatibility -----------------------
+    # ANY file that defines a class inheriting from a Qt class must ship
+    # as .pyc when targeting Maya 2024 (PySide2).  Shiboken2's metaclass
+    # cannot properly handle Cython-compiled Qt subclasses — causes
+    # TypeError, RecursionError, or ACCESS_VIOLATION crashes even without
+    # virtual method overrides.
+    os.path.join("mca_qt", "widgets", "editor_group_container.py"),
+    os.path.join("mca_qt", "widgets", "terminal_tab_panel.py"),
+    os.path.join("mca_qt", "widgets", "terminal_backend.py"),
+    os.path.join("mca_qt", "widgets", "ai_panel.py"),
+    os.path.join("mca_qt", "widgets", "connection_dialog.py"),
+    os.path.join("mca_qt", "widgets", "create_project_dialog.py"),
+    os.path.join("mca_qt", "widgets", "license_dialog.py"),
+    os.path.join("mca_qt", "widgets", "new_tab_dialog.py"),
+    os.path.join("mca_qt", "widgets", "project_settings_dialog.py"),
     # --- AI Chat plugin ---
     # chat_widget.py has keyPressEvent override -> .pyc
     os.path.join("mca_core", "plugins", "ai_chat", "chat_widget.py"),
@@ -90,10 +109,24 @@ DIST_PYC_FILES = [
 # Project root (directory containing this script).
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Name of the output distribution folder and zip.
-DIST_NAME = "MCAEditor-Maya2025"
-DIST_DIR = os.path.join(PROJECT_ROOT, "dist", DIST_NAME)
-ZIP_PATH = os.path.join(PROJECT_ROOT, "dist", "{}-v{}.zip".format(DIST_NAME, VERSION))
+# These are set by _set_maya_version() based on the target Maya version.
+DIST_NAME = None
+DIST_DIR = None
+ZIP_PATH = None
+
+
+def _set_maya_version(maya_version):
+    """
+    Configure module-level dist paths for the target Maya version.
+
+    Called once from main() after parsing command-line arguments.
+
+    :param str maya_version: Maya version year (e.g. "2024", "2025").
+    """
+    global DIST_NAME, DIST_DIR, ZIP_PATH
+    DIST_NAME = "MCAEditor-Maya{}".format(maya_version)
+    DIST_DIR = os.path.join(PROJECT_ROOT, "dist", DIST_NAME)
+    ZIP_PATH = os.path.join(PROJECT_ROOT, "dist", "{}-v{}.zip".format(DIST_NAME, VERSION))
 
 
 # --- Install / Uninstall Script Templates ------------------------------------
@@ -309,16 +342,17 @@ def run_command(cmd, description):
         sys.exit(1)
 
 
-def locate_mayapy(override_path):
+def locate_mayapy(override_path, maya_version):
     """
-    Find the mayapy.exe interpreter for Maya 2025.
+    Find the mayapy.exe interpreter for the target Maya version.
 
     :param str override_path: User-supplied path, or None to use default.
+    :param str maya_version: Maya version year (e.g. "2024", "2025").
     :return: Verified path to mayapy.exe.
     :rtype: str
     :raises SystemExit: If mayapy.exe is not found.
     """
-    path = override_path or DEFAULT_MAYAPY
+    path = override_path or MAYAPY_TEMPLATE.format(version=maya_version)
 
     if not os.path.isfile(path):
         print("ERROR: mayapy.exe not found at: {}".format(path))
@@ -359,15 +393,28 @@ def ensure_cython(mayapy):
 
 def clean_build_dirs():
     """
-    Remove previous build and dist directories for a clean start.
+    Remove the build directory and this version's dist folder for a clean start.
+
+    Only removes the version-specific dist subfolder (e.g. dist/MCAEditor-Maya2024),
+    NOT the entire dist/ directory — so builds for other Maya versions are preserved.
     """
     print("\n--- Cleaning previous build artifacts ---")
 
-    for dirname in ["build", "dist"]:
-        path = os.path.join(PROJECT_ROOT, dirname)
-        if os.path.isdir(path):
-            shutil.rmtree(path)
-            print("  Removed: {}".format(path))
+    # Always clean the build directory (Cython intermediates).
+    build_path = os.path.join(PROJECT_ROOT, "build")
+    if os.path.isdir(build_path):
+        shutil.rmtree(build_path)
+        print("  Removed: {}".format(build_path))
+
+    # Only remove THIS version's dist subfolder, not the whole dist/.
+    if os.path.isdir(DIST_DIR):
+        shutil.rmtree(DIST_DIR)
+        print("  Removed: {}".format(DIST_DIR))
+
+    # Remove the zip for this version if it exists.
+    if os.path.isfile(ZIP_PATH):
+        os.remove(ZIP_PATH)
+        print("  Removed: {}".format(ZIP_PATH))
 
 
 def compile_extensions(mayapy):
@@ -585,7 +632,7 @@ def create_zip():
     Create a zip archive of the distribution folder.
 
     The zip includes the distribution directory name as the top-level folder,
-    so unzipping produces ``MCAEditor-Maya2025/`` with all contents inside.
+    so unzipping produces ``MCAEditor-MayaXXXX/`` with all contents inside.
 
     :return: Path to the created zip file.
     :rtype: str
@@ -613,28 +660,36 @@ def create_zip():
 
 def main():
     """
-    Main entry point for the Maya 2025 build pipeline.
+    Main entry point for the Maya build pipeline.
 
     Parses command-line arguments, then runs each build step in order:
     locate mayapy -> ensure cython -> clean -> compile -> package -> zip.
     """
     parser = argparse.ArgumentParser(
-        description="Build MCA Editor for Maya 2025 distribution."
+        description="Build MCA Editor for Maya distribution."
+    )
+    parser.add_argument(
+        "--maya-version",
+        default=DEFAULT_MAYA_VERSION,
+        help="Maya version year to build for (default: {})".format(DEFAULT_MAYA_VERSION),
     )
     parser.add_argument(
         "--mayapy",
         default=None,
-        help="Path to mayapy.exe (default: {})".format(DEFAULT_MAYAPY),
+        help="Path to mayapy.exe (overrides --maya-version auto-detection)",
     )
     args = parser.parse_args()
 
+    # Configure module-level paths for the target Maya version.
+    _set_maya_version(args.maya_version)
+
     print("=" * 60)
-    print("  MCA Editor - Maya 2025 Build Script")
+    print("  MCA Editor - Maya {} Build Script".format(args.maya_version))
     print("  Version: {}".format(VERSION))
     print("=" * 60)
 
     # Step 1: Locate Maya's Python interpreter.
-    mayapy = locate_mayapy(args.mayapy)
+    mayapy = locate_mayapy(args.mayapy, args.maya_version)
 
     # Step 2: Ensure Cython is available in Maya's Python.
     ensure_cython(mayapy)
@@ -676,7 +731,7 @@ def main():
     print("To install into Maya:")
     print("  1. Unzip {} to a permanent location".format(os.path.basename(zip_path)))
     print("  2. Run: python install_maya.py")
-    print("  3. Open Maya 2025 and load the plugin from Plug-in Manager")
+    print("  3. Open Maya {} and load the plugin from Plug-in Manager".format(args.maya_version))
 
 
 # Script guard for direct execution.
