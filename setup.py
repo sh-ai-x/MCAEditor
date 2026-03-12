@@ -200,6 +200,10 @@ def collect_extensions():
             "wraparound": True,         # Keep Python negative-indexing semantics —
                                         # the codebase uses [-1] extensively.
         },
+        # Force regeneration of .c intermediates even if timestamps look fresh.
+        # Without this, Cython may skip recompilation after edits, causing the
+        # compiled .pyd to silently contain stale code.
+        force=True,
         # Don't fail if a single file has issues.
         nthreads=os.cpu_count() or 1,
     )

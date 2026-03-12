@@ -133,6 +133,7 @@ def _do_auto_open_editor():
             return
 
         from mca_maya import maya_window as _mw
+        import maya.api.OpenMaya as _om2
 
         # Discard any window created by uiScript — the _restore_mca_editor
         # path can produce blank windows where the widget is parented but
@@ -144,8 +145,49 @@ def _do_auto_open_editor():
         if cmds.workspaceControl(_ctrl, exists=True):
             cmds.deleteUI(_ctrl)
 
+        # --- Clean up stale state from ALL module copies -----------------
+        # The dual module import problem can create separate globals in
+        # different copies of maya_window.  Scan sys.modules for every copy
+        # and remove their callbacks, tees, and window references so
+        # show_mca_editor() starts from a clean slate.
+        _tee_names = ("_StdoutTee", "_StderrTee")
+        for _mod_name, _mod_obj in list(sys.modules.items()):
+            if _mod_obj is None:
+                continue
+            if not hasattr(_mod_obj, "WORKSPACE_CONTROL_NAME"):
+                continue
+            if not hasattr(_mod_obj, "_output_callback_id"):
+                continue
+            # Remove orphaned Maya output callback.
+            _cb_id = getattr(_mod_obj, "_output_callback_id", None)
+            if _cb_id is not None:
+                try:
+                    _om2.MMessage.removeCallback(_cb_id)
+                except Exception:
+                    pass
+                _mod_obj._output_callback_id = None
+            # Clear tee and window references on every copy.
+            _mod_obj._stdout_tee = None
+            _mod_obj._stderr_tee = None
+            _mod_obj._mca_editor_window = None
+
+        # Unwrap ALL tee layers from sys.stdout / sys.stderr so
+        # show_mca_editor() wraps Maya's raw Output — not a stale tee.
+        # Use class name check (not isinstance) to handle cross-module tees.
+        for _attr in ("stdout", "stderr"):
+            _stream = getattr(sys, _attr)
+            _depth = 0
+            while type(_stream).__name__ in _tee_names and _depth < 20:
+                _orig = getattr(_stream, "_original", None)
+                if _orig is None:
+                    break
+                _stream = _orig
+                _depth += 1
+            setattr(sys, _attr, _stream)
+
         from mca_maya.maya_window import show_mca_editor
         show_mca_editor()
+
     except Exception as exc:
         logger.warning("Auto-open editor failed: %s", exc)
 

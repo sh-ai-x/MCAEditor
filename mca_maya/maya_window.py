@@ -23,7 +23,6 @@ Dependencies:
 import logging
 import struct
 import sys
-import traceback
 
 import maya.cmds as cmds
 import maya.api.OpenMaya as om2
@@ -95,6 +94,45 @@ _stderr_tee = None
 # kDisplay for print() from directly exec'd Python code, so this tee
 # is the sole capture mechanism for Python stdout.
 _stdout_tee = None
+
+
+# Tee class names used for cross-module isinstance checks.  The dual
+# module import problem means isinstance() fails across module copies
+# (different class objects).  Checking type().__name__ is immune to this.
+_TEE_CLASS_NAMES = ("_StdoutTee", "_StderrTee")
+
+
+def _unwrap_all_tees(stream):
+    """
+    Unwrap ALL nested tee layers and return the original non-tee stream.
+
+    The dual module import problem causes tee chains to stack: each
+    ``_install_output_hook`` call wraps the current ``sys.stdout`` in
+    a new tee.  If the current ``sys.stdout`` is already a tee from a
+    different module copy, ``isinstance()`` fails and the old tee is
+    never unwound — it just gets wrapped again.
+
+    This function walks the ``_original`` chain by checking the class
+    name (string comparison, not ``isinstance``), which works across
+    module copies.  It returns the deepest non-tee object (Maya's raw
+    ``Output`` redirector).
+
+    Safety: caps at 20 iterations to prevent infinite loops if the
+    chain is somehow circular.
+
+    :param object stream: A stream that may be a tee (or chain of tees).
+    :return: The original non-tee stream at the bottom of the chain.
+    :rtype: object
+    """
+    depth = 0
+    while type(stream).__name__ in _TEE_CLASS_NAMES and depth < 20:
+        orig = getattr(stream, "_original", None)
+        if orig is None:
+            break
+        stream = orig
+        depth += 1
+    return stream
+
 
 class _StderrTee:
     """
@@ -810,6 +848,31 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 pass
             _output_callback_id = None
 
+        # Remove orphaned callbacks from OTHER module copies.  The dual
+        # module import problem creates separate globals in each copy —
+        # our _output_callback_id only tracks THIS copy's callback.  Scan
+        # sys.modules for any other maya_window modules and clean their
+        # callback IDs too.
+        for mod_name, mod_obj in list(sys.modules.items()):
+            if mod_obj is None:
+                continue
+            # Match any module that looks like our maya_window (could be
+            # under a different sys.modules key due to import aliasing).
+            if not hasattr(mod_obj, "_output_callback_id"):
+                continue
+            if not hasattr(mod_obj, "WORKSPACE_CONTROL_NAME"):
+                continue
+            # Skip our own module — already handled above.
+            if mod_obj is sys.modules.get(__name__):
+                continue
+            other_cb_id = getattr(mod_obj, "_output_callback_id", None)
+            if other_cb_id is not None:
+                try:
+                    om2.MMessage.removeCallback(other_cb_id)
+                except Exception:
+                    pass
+                mod_obj._output_callback_id = None
+
         try:
             _output_callback_id = om2.MCommandMessage.addCommandOutputCallback(
                 self._on_maya_output
@@ -821,10 +884,19 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         # Install stdout tee to capture Python print() output.
         # MCommandMessage does NOT fire kDisplay for print() from exec'd
         # Python code, so this tee is the sole capture mechanism for
-        # stdout.  Restore original stdout first if a previous tee exists.
+        # stdout.
+        #
+        # Unwrap ALL tee layers first — not just one.  The dual module
+        # import problem causes tee chains to stack (each module copy
+        # wraps the other's tee).  _unwrap_all_tees() walks the chain
+        # by class name (immune to cross-module isinstance failure) and
+        # returns Maya's raw Output redirector at the bottom.
         if _stdout_tee is not None:
-            sys.stdout = _stdout_tee._original
             _stdout_tee = None
+
+        # Unwrap any stale tees on sys.stdout (from this or other module copies).
+        raw_stdout = _unwrap_all_tees(sys.stdout)
+        sys.stdout = raw_stdout
 
         try:
             _stdout_tee = _StdoutTee(sys.stdout, self._panel._output)
@@ -834,10 +906,13 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
             logger.warning("Could not install stdout tee: %s", exc)
 
         # Install stderr tee to capture Python logging output.
-        # Restore original stderr first if a previous tee is still in place.
+        # Same unwrap-all treatment as stdout above.
         if _stderr_tee is not None:
-            sys.stderr = _stderr_tee._original
             _stderr_tee = None
+
+        # Unwrap any stale tees on sys.stderr (from this or other module copies).
+        raw_stderr = _unwrap_all_tees(sys.stderr)
+        sys.stderr = raw_stderr
 
         try:
             _stderr_tee = _StderrTee(sys.stderr, self._panel._output)
@@ -1194,15 +1269,20 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 pass
             _output_callback_id = None
 
-        # Restore original stdout (remove the tee).
+        # Restore original stdout — unwrap ALL tee layers (not just one).
+        # The dual module import problem can leave stale tees from other
+        # module copies in the chain.  _unwrap_all_tees() walks the full
+        # chain by class name and returns Maya's raw Output at the bottom.
         if _stdout_tee is not None:
-            sys.stdout = _stdout_tee._original
             _stdout_tee = None
+        raw_stdout = _unwrap_all_tees(sys.stdout)
+        sys.stdout = raw_stdout
 
-        # Restore original stderr (remove the tee).
+        # Restore original stderr — same unwrap-all treatment.
         if _stderr_tee is not None:
-            sys.stderr = _stderr_tee._original
             _stderr_tee = None
+        raw_stderr = _unwrap_all_tees(sys.stderr)
+        sys.stderr = raw_stderr
 
         # Remove the hotkey filter and disconnect focusChanged so no
         # dangling callbacks remain on QApplication after the window closes.
@@ -1217,6 +1297,7 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
         self._panel.save_window_state(self._settings)
         self._panel.cleanup()
+
         logger.info("MCA Maya Editor window closed")
 
 
@@ -1572,15 +1653,20 @@ def cleanup_editor(maya_is_exiting=False):
             pass
         _output_callback_id = None
 
-    # Restore original stdout (remove the tee wrapper).
+    # Restore original stdout — unwrap ALL tee layers (not just one).
+    # The dual module import problem can leave stale tees from other
+    # module copies in the chain.  _unwrap_all_tees() walks the full
+    # chain by class name and returns Maya's raw Output at the bottom.
     if _stdout_tee is not None:
-        sys.stdout = _stdout_tee._original
         _stdout_tee = None
+    raw_stdout = _unwrap_all_tees(sys.stdout)
+    sys.stdout = raw_stdout
 
-    # Restore original stderr (remove the tee wrapper).
+    # Restore original stderr — same unwrap-all treatment.
     if _stderr_tee is not None:
-        sys.stderr = _stderr_tee._original
         _stderr_tee = None
+    raw_stderr = _unwrap_all_tees(sys.stderr)
+    sys.stderr = raw_stderr
 
     # Clean up the editor window if it exists.
     if _mca_editor_window is not None:
