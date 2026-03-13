@@ -30,60 +30,6 @@ logger = logging.getLogger(__name__)
 
 # --- Stdout Tee Writer (exec-time capture) ----------------------------------
 
-class _TeeWriter:
-    """
-    Temporary tee writer used ONLY during ``_execute_python()`` to capture
-    ``print()`` output from exec'd code.
-
-    Writes pass through to Maya's original stdout (so the Script Editor
-    still shows them) and simultaneously buffer to a StringIO for the
-    output panel.  This is installed for the duration of a single exec()
-    call, then removed.
-
-    The permanent ``_StdoutTee`` in ``maya_window.py`` handles output
-    that occurs OUTSIDE of exec (deferred callbacks, framework startup).
-    During exec, the permanent tee is temporarily bypassed so output
-    doesn't appear twice in the panel.
-
-    :param object original: Maya's original stdout (NOT the permanent tee).
-    :param io.StringIO capture: Buffer to capture a copy of all writes.
-    """
-
-    def __init__(self, original, capture):
-        """
-        Initialize the tee with both output targets.
-
-        :param object original: The original stdout to pass through to.
-        :param io.StringIO capture: StringIO buffer for our output panel.
-        """
-        self._original = original
-        self._capture = capture
-
-    def write(self, text):
-        """
-        Write to both the original stdout and the capture buffer.
-
-        :param str text: Text to write.
-        """
-        self._original.write(text)
-        self._capture.write(text)
-
-    def flush(self):
-        """Flush the original stdout."""
-        self._original.flush()
-
-    def __getattr__(self, name):
-        """
-        Forward unknown attributes to the original stdout.
-
-        Preserves compatibility with Maya's OutputRedirector attributes.
-
-        :param str name: Attribute name.
-        :return: The attribute from the original stdout.
-        """
-        return getattr(self._original, name)
-
-
 # --- Internal Maya Adapter --------------------------------------------------
 
 class InternalMayaAdapter(DCCAdapter):
@@ -276,38 +222,22 @@ class InternalMayaAdapter(DCCAdapter):
            via a formatted ``print("# Result: <value> #")`` call.
         2. Fall back to "exec" for statements (imports, assignments, etc.).
 
-        During execution, a temporary ``_TeeWriter`` captures stdout
-        to a StringIO buffer while passing through to Maya's original
-        stdout (Script Editor).  The temporary tee bypasses the permanent
-        ``_StdoutTee`` installed by ``maya_window.py`` to avoid double
-        writes.  After execution, the permanent tee is restored so it
-        can capture deferred callback output.
+        All ``print()`` output flows through Maya's native stdout
+        (OutputRedirector), which fires ``MCommandMessage`` with kDisplay.
+        The ``_on_maya_output()`` callback in ``maya_window.py`` routes it
+        to the output panel.  No tee or capture needed here.
 
         :param str code: Python source code to execute.
-        :return: Captured stdout text from execution.
+        :return: Empty string (output arrives via MCommandMessage).
         :rtype: str
         """
         import __main__
-        import io
         import maya.api.OpenMaya as om2
 
-        # Save current stdout — this is typically the permanent _StdoutTee
-        # from maya_window.py (or Maya's raw stdout if no tee installed).
-        saved_stdout = sys.stdout
-
-        # Get Maya's ORIGINAL stdout, bypassing any tee wrappers.
-        # The permanent _StdoutTee stores the original as _original.
-        # We bypass it during exec so output doesn't appear twice in
-        # the panel (once from the temporary tee's return value, once
-        # from the permanent tee's live write).
-        maya_stdout = saved_stdout
-        while hasattr(maya_stdout, '_original'):
-            maya_stdout = maya_stdout._original
-
-        # Install temporary tee: captures to StringIO while passing
-        # through to Maya's original stdout (Script Editor still works).
-        captured = io.StringIO()
-        sys.stdout = _TeeWriter(maya_stdout, captured)
+        # All print() output flows through Maya's stdout (OutputRedirector)
+        # which fires MCommandMessage → _on_maya_output() → output panel.
+        # No temporary tee or StringIO capture needed — MCommandMessage
+        # is the single source of truth for ALL stdout content.
 
         try:
             # Try eval mode first — expressions like variable names,
@@ -318,13 +248,13 @@ class InternalMayaAdapter(DCCAdapter):
 
                 # Display the result in Maya's exact format:
                 #   # Result: <value> #
-                # Goes through the temp tee → Maya stdout + captured.
+                # Goes through Maya's stdout → MCommandMessage → panel.
                 if result is not None:
                     print("# Result: {} #".format(repr(result)))
 
             except SyntaxError:
                 # Not a single expression — execute as statements.
-                # print() calls flow through the temporary tee.
+                # print() calls flow through Maya's stdout → MCommandMessage.
                 exec(compile(code, "<mca_editor>", "exec"), __main__.__dict__)
 
         except Exception as exc:
@@ -360,14 +290,8 @@ class InternalMayaAdapter(DCCAdapter):
                 error_display = self._format_error_for_maya(exc)
                 om2.MGlobal.displayError(error_display)
 
-        finally:
-            # Restore the saved stdout (permanent tee or original).
-            # This re-enables the permanent tee for deferred callback
-            # output that fires after exec() returns.
-            sys.stdout = saved_stdout
-
-        # Return captured output so the caller can write it to the panel.
-        return captured.getvalue()
+        # Return empty — all output already displayed via MCommandMessage.
+        return ""
 
     def _format_error_for_maya(self, exc):
         """

@@ -54,8 +54,10 @@ CURRENT_SCHEMA_VERSION = 4                      # Bump when the JSON schema chan
 PROFILE_KEYS = (
     "startup_script",
     "startup_code",
+    "startup_language",
     "shutdown_script",
     "shutdown_code",
+    "shutdown_language",
     "env_vars",
     "load_immediately",
 )
@@ -64,8 +66,10 @@ PROFILE_KEYS = (
 PROFILE_DEFAULTS = {
     "startup_script": "",
     "startup_code": "",
+    "startup_language": "python",
     "shutdown_script": "",
     "shutdown_code": "",
+    "shutdown_language": "python",
     "env_vars": {},
     "load_immediately": False,
 }
@@ -389,6 +393,24 @@ class MCAProject:
         self._set_profile_value("startup_code", code)
 
     @property
+    def startup_language(self):
+        """
+        Language for the inline startup code ('python' or 'mel').
+
+        :rtype: str
+        """
+        return self._get_profile_value("startup_language") or "python"
+
+    @startup_language.setter
+    def startup_language(self, lang):
+        """
+        Set the language for inline startup code.
+
+        :param str lang: Language identifier ('python' or 'mel').
+        """
+        self._set_profile_value("startup_language", lang)
+
+    @property
     def resolved_startup_script(self):
         """
         Absolute path to the startup script, or empty string if not set.
@@ -443,6 +465,24 @@ class MCAProject:
         :param str code: Python code string, or empty string.
         """
         self._set_profile_value("shutdown_code", code)
+
+    @property
+    def shutdown_language(self):
+        """
+        Language for the inline shutdown code ('python' or 'mel').
+
+        :rtype: str
+        """
+        return self._get_profile_value("shutdown_language") or "python"
+
+    @shutdown_language.setter
+    def shutdown_language(self, lang):
+        """
+        Set the language for inline shutdown code.
+
+        :param str lang: Language identifier ('python' or 'mel').
+        """
+        self._set_profile_value("shutdown_language", lang)
 
     @property
     def resolved_shutdown_script(self):

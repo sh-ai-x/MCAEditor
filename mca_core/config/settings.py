@@ -190,7 +190,7 @@ class MCASettings:
         "sidebar_visible": True,         # Whether the sidebar is shown (Advanced mode).
 
         # --- Plugins ---
-        "disabled_plugins": ["com.mechart.hello-world"],  # Plugin IDs to skip on load.
+        "disabled_plugins": [],  # Plugin IDs to skip on load.
 
         # --- Licensing ---
         "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).

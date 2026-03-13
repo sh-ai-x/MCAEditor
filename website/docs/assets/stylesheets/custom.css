@@ -1,0 +1,15 @@
+/* --- MCA Editor blue header (#007acc) ----------------------------------- */
+
+/* Primary color override — matches the editor's status bar blue. */
+:root {
+    --md-primary-fg-color: #007acc;
+    --md-primary-fg-color--light: #1a8ad4;
+    --md-primary-fg-color--dark: #005a9e;
+}
+
+/* Ensure the header stays blue in both light and dark scheme. */
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color: #007acc;
+    --md-primary-fg-color--light: #1a8ad4;
+    --md-primary-fg-color--dark: #005a9e;
+}

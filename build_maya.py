@@ -656,6 +656,47 @@ def create_zip():
     return ZIP_PATH
 
 
+# --- Pack & Deploy ----------------------------------------------------------
+
+def pack_and_deploy(maya_version):
+    """
+    Pack the distribution into a single-file plugin and deploy it.
+
+    Runs ``pack_single_file.py`` to create the single-file Maya plugin,
+    then copies it into the user's Maya plug-ins directory, replacing
+    any existing ``mcaEditor.py``.
+
+    :param str maya_version: Maya version year (e.g. "2024", "2025").
+    """
+    import pack_single_file
+
+    # --- Pack into single .py file ---
+    single_file = os.path.join(PROJECT_ROOT, "dist", "mcaEditor-Maya{}.py".format(maya_version))
+    print("\n--- Packing single-file plugin ---")
+    pack_single_file.pack(DIST_DIR, single_file, maya_version=maya_version)
+
+    # --- Deploy to Maya's plug-ins folder ---
+    if sys.platform == "win32":
+        maya_dir = os.path.join(os.path.expanduser("~"), "Documents", "maya")
+    elif sys.platform == "darwin":
+        maya_dir = os.path.join(
+            os.path.expanduser("~"), "Library", "Preferences", "Autodesk", "maya"
+        )
+    else:
+        maya_dir = os.path.join(os.path.expanduser("~"), "maya")
+
+    plugins_dir = os.path.join(maya_dir, maya_version, "plug-ins")
+
+    if not os.path.isdir(plugins_dir):
+        os.makedirs(plugins_dir, exist_ok=True)
+        print("  Created: {}".format(plugins_dir))
+
+    deploy_path = os.path.join(plugins_dir, "mcaEditor.py")
+    shutil.copy2(single_file, deploy_path)
+    print("\n--- Deployed to Maya {} ---".format(maya_version))
+    print("  {}".format(deploy_path))
+
+
 # --- Main Build Pipeline ----------------------------------------------------
 
 def main():
@@ -719,6 +760,9 @@ def main():
     # Step 10: Clean in-place build artifacts from the source tree.
     clean_source_tree()
 
+    # Step 11: Pack single-file plugin and deploy to Maya's plug-ins folder.
+    pack_and_deploy(args.maya_version)
+
     # Done!
     print()
     print("=" * 60)
@@ -727,11 +771,6 @@ def main():
     print()
     print("Distribution folder: {}".format(DIST_DIR))
     print("Zip archive:         {}".format(zip_path))
-    print()
-    print("To install into Maya:")
-    print("  1. Unzip {} to a permanent location".format(os.path.basename(zip_path)))
-    print("  2. Run: python install_maya.py")
-    print("  3. Open Maya {} and load the plugin from Plug-in Manager".format(args.maya_version))
 
 
 # Script guard for direct execution.

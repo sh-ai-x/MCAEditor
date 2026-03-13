@@ -657,8 +657,9 @@ class MCAEditorPanel(QWidget):
         self._adapter_manager.set_connection_callback(self._update_dcc_status)
 
         # Set output/error callbacks on all adapters.
+        # Route through filtering methods so verbosity level is respected.
         for adapter in self._adapter_manager.get_all_adapters().values():
-            adapter.set_output_callback(self._output.write_output)
+            adapter.set_output_callback(self._filtered_output)
             adapter.set_error_callback(self._output.write_error)
 
     # --- Menu Building (called by the host) ----------------------------------
@@ -1592,6 +1593,9 @@ class MCAEditorPanel(QWidget):
         available. Execution is routed through the active DCC adapter
         (if connected) or the local Python interpreter, matching the
         normal "Execute" behavior.
+
+        The editor window is protected from external close attempts during
+        execution (see ``_run_shutdown_script`` for details).
         """
         project = self._active_project
         if not project:
@@ -1603,38 +1607,56 @@ class MCAEditorPanel(QWidget):
         if not has_script and not has_code:
             return
 
+        # Protect the editor from frameworks that close all "MCA" windows
+        # during startup (e.g. MCACloud's startup_init calls restart which
+        # calls shutdown → close_all_mca_windows).
+        host = self.parent()
+        saved_title = None
+        if host:
+            host._shutdown_script_running = True
+            saved_title = host.windowTitle()
+            host.setWindowTitle("_mca_editor_startup_guard_")
+
         adapter = self._adapter_manager.get_active_adapter()
 
-        # --- Run the script file first (if configured) ---
-        if has_script:
-            script_path = project.resolved_startup_script
-            if not os.path.isfile(script_path):
-                self._output.write_warning(
-                    "Startup script not found: {}".format(project.startup_script))
-            else:
-                self._output.write_info("Running startup script: {}".format(
-                    project.startup_script))
-                try:
-                    with open(script_path, "r", encoding="utf-8") as f:
-                        file_code = f.read()
-                except OSError as exc:
-                    self._output.write_error(
-                        "Could not read startup script: {}".format(exc))
-                    file_code = None
+        try:
+            # --- Run the script file first (if configured) ---
+            if has_script:
+                script_path = project.resolved_startup_script
+                if not os.path.isfile(script_path):
+                    self._output.write_warning(
+                        "Startup script not found: {}".format(project.startup_script))
+                else:
+                    self._output.write_info("Running startup script: {}".format(
+                        project.startup_script))
+                    try:
+                        with open(script_path, "r", encoding="utf-8") as f:
+                            file_code = f.read()
+                    except OSError as exc:
+                        self._output.write_error(
+                            "Could not read startup script: {}".format(exc))
+                        file_code = None
 
-                if file_code:
-                    if adapter and adapter.is_connected:
-                        adapter.execute(file_code, "python")
-                    else:
-                        self._execute_locally(file_code)
+                    if file_code:
+                        if adapter and adapter.is_connected:
+                            adapter.execute(file_code, "python")
+                        else:
+                            self._execute_locally(file_code)
 
-        # --- Run inline startup code (if configured) ---
-        if has_code:
-            self._output.write_info("Running inline startup code...")
-            if adapter and adapter.is_connected:
-                adapter.execute(project.startup_code, "python")
-            else:
-                self._execute_locally(project.startup_code)
+            # --- Run inline startup code (if configured) ---
+            if has_code:
+                lang = project.startup_language
+                self._output.write_info("Running inline startup code ({})...".format(lang))
+                if adapter and adapter.is_connected:
+                    adapter.execute(project.startup_code, lang)
+                else:
+                    self._execute_locally(project.startup_code)
+        finally:
+            # Restore the title and clear the guard flag.
+            if host:
+                if saved_title is not None:
+                    host.setWindowTitle(saved_title)
+                host._shutdown_script_running = False
 
     def _run_shutdown_script(self):
         """
@@ -1644,6 +1666,12 @@ class MCAEditorPanel(QWidget):
         paths and env vars are still active so the shutdown code can use
         project imports and environment. Execution is routed through the
         active DCC adapter (if connected) or the local Python interpreter.
+
+        Sets ``_shutdown_script_running`` on the host window so that
+        ``dockCloseEventTriggered`` can block external close attempts
+        during execution.  Some project frameworks (e.g. MCACloud's
+        ``close_all_mca_windows()``) close every window whose title
+        contains "MCA", which would destroy the editor mid-shutdown.
         """
         project = self._active_project
         if not project:
@@ -1655,38 +1683,61 @@ class MCAEditorPanel(QWidget):
         if not has_script and not has_code:
             return
 
+        # Protect the editor from being destroyed by user shutdown scripts.
+        # Some frameworks (e.g. MCACloud) call close_all_mca_windows() which
+        # finds windows by matching "MCA" in the title, then calls .close()
+        # and .deleteLater() on each.  To survive this:
+        #   1. Set a flag so dockCloseEventTriggered ignores the close.
+        #   2. Temporarily change the window title so it doesn't match the
+        #      "MCA" filter.  Restored in the finally block.
+        host = self.parent()
+        saved_title = None
+        if host:
+            host._shutdown_script_running = True
+            saved_title = host.windowTitle()
+            host.setWindowTitle("_mca_editor_shutdown_guard_")
+
         adapter = self._adapter_manager.get_active_adapter()
 
-        # --- Run the script file first (if configured) ---
-        if has_script:
-            script_path = project.resolved_shutdown_script
-            if not os.path.isfile(script_path):
-                self._output.write_warning(
-                    "Shutdown script not found: {}".format(project.shutdown_script))
-            else:
-                self._output.write_info("Running shutdown script: {}".format(
-                    project.shutdown_script))
-                try:
-                    with open(script_path, "r", encoding="utf-8") as f:
-                        file_code = f.read()
-                except OSError as exc:
-                    self._output.write_error(
-                        "Could not read shutdown script: {}".format(exc))
-                    file_code = None
+        try:
+            # --- Run the script file first (if configured) ---
+            if has_script:
+                script_path = project.resolved_shutdown_script
+                if not os.path.isfile(script_path):
+                    self._output.write_warning(
+                        "Shutdown script not found: {}".format(project.shutdown_script))
+                else:
+                    self._output.write_info("Running shutdown script: {}".format(
+                        project.shutdown_script))
+                    try:
+                        with open(script_path, "r", encoding="utf-8") as f:
+                            file_code = f.read()
+                    except OSError as exc:
+                        self._output.write_error(
+                            "Could not read shutdown script: {}".format(exc))
+                        file_code = None
 
-                if file_code:
-                    if adapter and adapter.is_connected:
-                        adapter.execute(file_code, "python")
-                    else:
-                        self._execute_locally(file_code)
+                    if file_code:
+                        if adapter and adapter.is_connected:
+                            adapter.execute(file_code, "python")
+                        else:
+                            self._execute_locally(file_code)
 
-        # --- Run inline shutdown code (if configured) ---
-        if has_code:
-            self._output.write_info("Running inline shutdown code...")
-            if adapter and adapter.is_connected:
-                adapter.execute(project.shutdown_code, "python")
-            else:
-                self._execute_locally(project.shutdown_code)
+            # --- Run inline shutdown code (if configured) ---
+            if has_code:
+                lang = project.shutdown_language
+                self._output.write_info("Running inline shutdown code ({})...".format(lang))
+                if adapter and adapter.is_connected:
+                    adapter.execute(project.shutdown_code, lang)
+                else:
+                    self._execute_locally(project.shutdown_code)
+        finally:
+            # Always restore the title and clear the guard flag so
+            # normal close works again.
+            if host:
+                if saved_title is not None:
+                    host.setWindowTitle(saved_title)
+                host._shutdown_script_running = False
 
     def _on_reload_project(self):
         """
@@ -1751,7 +1802,8 @@ class MCAEditorPanel(QWidget):
                     "Failed to open project settings: {}".format(exc))
                 return
         dialog = ProjectSettingsDialog(
-            self._active_project, dcc_tag=self._dcc_version, parent=self
+            self._active_project, dcc_tag=self._dcc_version,
+            settings=self._settings, parent=self
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -3455,6 +3507,9 @@ class MCAEditorPanel(QWidget):
           - ``# Result: ... #`` → ``write_result()`` (yellow)
           - Everything else → ``write_output()`` (white)
 
+        Respects the verbosity level — "minimal" suppresses normal output
+        but still shows result lines.
+
         Warnings and errors from Maya commands (``cmds.warning()``,
         ``cmds.error()``, etc.) arrive via MCommandMessage and are NOT
         included in the adapter's return value — they're handled by
@@ -3472,7 +3527,7 @@ class MCAEditorPanel(QWidget):
             # Route result-formatted lines to write_result for coloring.
             if stripped.startswith("# Result:") and stripped.endswith("#"):
                 self._output.write_result(line)
-            else:
+            elif self._verbosity_level != "minimal":
                 self._output.write_output(line)
 
     def _execute_all(self):
@@ -3485,7 +3540,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        self._output.write_code_echo(code.strip())
+        # Echo the code to output only when verbosity is "echo_all".
+        if self._verbosity_level == "echo_all":
+            self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
             # The adapter captures stdout via a temporary tee during
@@ -3508,7 +3565,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        self._output.write_code_echo(code.strip())
+        # Echo the code to output only when verbosity is "echo_all".
+        if self._verbosity_level == "echo_all":
+            self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
             result = adapter.execute(code, editor.language)
@@ -3529,7 +3588,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        self._output.write_code_echo(code.strip())
+        # Echo the code to output only when verbosity is "echo_all".
+        if self._verbosity_level == "echo_all":
+            self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
             result = adapter.execute(code, editor.language)
@@ -3558,11 +3619,14 @@ class MCAEditorPanel(QWidget):
             exec(code, self._local_namespace)
             output = sys.stdout.getvalue()
             errors = sys.stderr.getvalue()
-            if output:
+            # Respect verbosity: "minimal" suppresses normal stdout output.
+            if output and self._verbosity_level != "minimal":
                 self._output.write_output(output.rstrip())
             if errors:
                 self._output.write_warning(errors.rstrip())
-            self._output.write_success("Executed locally (no DCC)")
+            # Show success message unless in minimal mode.
+            if self._verbosity_level != "minimal":
+                self._output.write_success("Executed locally (no DCC)")
         except Exception:
             tb = traceback.format_exc()
             self._output.write_error(tb.rstrip())
@@ -4923,6 +4987,20 @@ class MCAEditorPanel(QWidget):
                 break
         self._show_status("Verbosity: {}".format(level))
 
+    def _filtered_output(self, text):
+        """
+        Route adapter output through verbosity filtering before display.
+
+        Used as the adapter output callback so that "minimal" mode
+        suppresses normal stdout lines from the DCC.
+
+        :param str text: Output text from a DCC adapter.
+        """
+        # Minimal verbosity suppresses normal stdout output.
+        if self._verbosity_level == "minimal":
+            return
+        self._output.write_output(text)
+
     def _toggle_line_numbers_in_errors(self, checked):
         """
         Toggle whether error output includes source line numbers.
@@ -5014,15 +5092,16 @@ class MCAEditorPanel(QWidget):
         QMessageBox.about(
             self, "About MCA Editor",
             f"<h3>MCA Editor v{_APP_VERSION}</h3>"
-            "<p>Cross-DCC Script IDE</p>"
-            "Supports Maya (with future expansion to Blender, Unreal, Unity, and more).</p>"
-            "<p><b>Features:</b><br>"
-            "- Dual mode: Simple (script editor) &amp; Advanced (IDE)<br>"
-            "- Multi-DCC connection via adapters<br>"
-            "- AI integration (BYOK or managed)<br>"
-            "- Plugin architecture for extensions</p>"
+            "<p style='font-size: 11pt; color: #ccc;'>"
+            "A better Maya script editor.</p>"
+            "<p><b>Features</b></p>"
+            "<ul style='margin-top: 0;'>"
+            "<li>Dual mode &mdash; Script Editor &amp; Project Mode</li>"
+            "<li>AI integration (Orange Slice)</li>"
+            "<li>Plugin architecture for extensions</li>"
+            "</ul>"
             "<hr>"
-            "<p style='color: #888;'>Built with PySide6 (Qt6)</p>"
+            "<p style='color: #888;'>Built by Nathan Comes</p>"
         )
 
     # =========================================================================

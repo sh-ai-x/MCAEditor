@@ -1,0 +1,78 @@
+site_name: MCA Editor
+site_url: https://mcaeditor.com
+docs_dir: website/docs
+site_dir: website/site
+site_description: A better Maya script editor — dual mode, AI integration, and plugin architecture.
+site_author: Nathan Comes
+
+theme:
+  name: material
+  custom_dir: website/overrides
+  palette:
+    scheme: slate
+    primary: custom
+    accent: orange
+  font:
+    text: Inter
+    code: JetBrains Mono
+  logo: assets/images/mca.png
+  favicon: assets/images/mca.png
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+extra_css:
+  - assets/stylesheets/custom.css
+
+extra_javascript:
+  - assets/javascripts/logo-replay.js
+
+extra:
+  generator: false
+
+copyright: Copyright &copy; 2026 Nathan Comes. All rights reserved.
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.keys
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - First Launch: getting-started/first-launch.md
+  - Editor Guide:
+    - Script Mode: editor-guide/script-mode.md
+    - Project Mode: editor-guide/project-mode.md
+    - Output Panel: editor-guide/output-panel.md
+    - Terminal: editor-guide/terminal.md
+    - AI Chat: editor-guide/ai-chat.md
+    - Keyboard Shortcuts: editor-guide/keyboard-shortcuts.md
+  - Plugin Development:
+    - Overview: plugin-development/overview.md
+    - Getting Started: plugin-development/getting-started.md
+    - Using Qt: plugin-development/qt-guide.md
+    - Plugin Manifest: plugin-development/plugin-json.md
+    - API Reference: plugin-development/api-reference.md
+    - Examples: plugin-development/examples.md
+    - Error Handling: plugin-development/error-handling.md
+    - Sharing & Distribution: plugin-development/distribution.md
+  - Changelog: changelog.md

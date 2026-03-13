@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QTextCursor
 
+from mca_editor import __version__ as _APP_VERSION
 from mca_editor.config.settings import MCASettings, EditorMode
 from mca_editor.ui.code_editor import MCACodeEditor
 from mca_editor.ui.output_window import OutputWindow
@@ -2877,16 +2878,17 @@ class MCAMainWindow(QMainWindow):
         """Show the About dialog."""
         QMessageBox.about(
             self, "About MCA Editor",
-            "<h3>MCA Editor v0.1.0</h3>"
-            "<p>Cross-DCC Script IDE</p>"
-            "Supports Maya (with future expansion to Blender, Unreal, Unity, and more).</p>"
-            "<p><b>Features:</b><br>"
-            "- Dual mode: Simple (script editor) &amp; Advanced (IDE)<br>"
-            "- Multi-DCC connection via adapters<br>"
-            "- AI integration (BYOK or managed)<br>"
-            "- Plugin architecture for extensions</p>"
+            f"<h3>MCA Editor v{_APP_VERSION}</h3>"
+            "<p style='font-size: 11pt; color: #ccc;'>"
+            "A better Maya script editor.</p>"
+            "<p><b>Features</b></p>"
+            "<ul style='margin-top: 0;'>"
+            "<li>Dual mode &mdash; Script Editor &amp; Project Mode</li>"
+            "<li>AI integration (Orange Slice)</li>"
+            "<li>Plugin architecture for extensions</li>"
+            "</ul>"
             "<hr>"
-            "<p style='color: #888;'>Built with PySide6 (Qt6)</p>"
+            "<p style='color: #888;'>Built by Nathan Comes</p>"
         )
 
     # =========================================================================

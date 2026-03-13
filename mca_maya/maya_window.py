@@ -216,21 +216,21 @@ class _StderrTee:
 
 class _StdoutTee:
     """
-    Wrapper around sys.stdout that tees writes to the MCA output panel.
+    Transparent wrapper around sys.stdout for safe tee unwrapping.
 
-    MCommandMessage does NOT capture Python ``print()`` output from
-    directly ``exec()``'d code — it only fires for Maya's C++ command
-    system output (MEL echo, ``cmds.warning()``, etc.).  This tee
-    bridges the gap so ALL Python stdout output (``print()`` calls,
-    framework startup logs, deferred callbacks) appears in our editor's
-    output window alongside Maya's native output.
+    Maya's ``MCommandMessage.addCommandOutputCallback`` captures ALL
+    stdout output — including Python ``print()`` from exec'd code,
+    deferred callbacks, and framework startup logs.  The output panel
+    is written to solely by ``_on_maya_output()``, NOT here.
 
-    The original stdout object (Maya's ``OutputRedirector``) is preserved
-    and all writes are forwarded to it first, so Maya's Script Editor
-    and console still work normally.
+    This wrapper exists so that ``_unwrap_all_tees()`` can strip it
+    during adapter execution (replaced with ``_TeeWriter`` for
+    StringIO capture) and restore it afterward, without losing the
+    reference to Maya's original ``OutputRedirector``.
 
     :param object original: The original sys.stdout object to wrap.
-    :param OutputWindow output_widget: Our output panel widget.
+    :param OutputWindow output_widget: Our output panel widget (unused,
+        kept for API compatibility with ``_StderrTee``).
     """
 
     def __init__(self, original, output_widget):
@@ -245,33 +245,21 @@ class _StdoutTee:
 
     def write(self, text):
         """
-        Write to both the original stdout and our output panel.
+        Forward writes to Maya's original stdout.
+
+        The output panel is NOT written to here — MCommandMessage's
+        addCommandOutputCallback already captures all print() output
+        and routes it through ``_on_maya_output()``.  Writing here
+        too would cause every print() to appear twice in the panel.
 
         :param str text: Text to write.
         """
-        # Always forward to the original so Maya's Script Editor works.
+        # Forward to the original so Maya's Script Editor works.
         if self._original is not None:
             try:
                 self._original.write(text)
             except Exception:
                 pass
-
-        # Skip empty or whitespace-only writes.
-        if not text or not text.strip():
-            return
-
-        # Route to our output panel.
-        try:
-            stripped = text.rstrip()
-            # Detect result-formatted output from the internal adapter.
-            # "# Result: <value> #" is printed for eval'd expressions.
-            if stripped.startswith("# Result:") and stripped.endswith("#"):
-                self._output.write_result(stripped)
-            else:
-                self._output.write_output(stripped)
-        except (RuntimeError, AttributeError):
-            # Output widget already deleted — ignore silently.
-            pass
 
     def flush(self):
         """Flush the original stdout."""
@@ -1056,13 +1044,10 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 output.write_info(text)
 
             else:
-                # kDisplay — MEL echo and Maya C++ output.
-                #
-                # Python print() output is captured separately by the
-                # permanent _StdoutTee (MCommandMessage does NOT fire
-                # kDisplay for print() from exec'd Python code).  So
-                # kDisplay here only contains MEL echo, command output,
-                # and other Maya C++ system messages — no dedup needed.
+                # kDisplay — all print() output, MEL echo, and Maya
+                # C++ system messages.  This is the sole path to the
+                # output panel for stdout content; _StdoutTee only
+                # forwards to Maya's original OutputRedirector.
                 #
                 # Detect result-formatted output from our internal adapter.
                 # Maya's C++ displayResult (kResult) is not exposed in
@@ -1261,6 +1246,15 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         stays closed on next Maya launch (user explicitly closed it).
         """
         global _output_callback_id, _stderr_tee, _stdout_tee
+
+        # Block close events while a project shutdown script is running.
+        # Some frameworks (e.g. MCACloud) call close_all_mca_windows()
+        # during shutdown, which matches "MCA" in the window title and
+        # tries to destroy the editor mid-teardown.  Ignore the close
+        # and let _close_project finish cleanly.
+        if getattr(self, "_shutdown_script_running", False):
+            logger.info("dockCloseEventTriggered blocked — shutdown script running")
+            return
 
         # Record that the user explicitly closed the editor — don't auto-open
         # on next Maya launch.

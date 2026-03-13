@@ -48,6 +48,8 @@ except ImportError:
 # Placeholders replaced at pack time:
 #   __MCA_VERSION__     → version string
 #   __MCA_BUILD_HASH__  → short hash of payload (forces re-extract on rebuild)
+#   __MCA_BUILD_YEAR__  → copyright year (e.g. "2026")
+#   __MCA_MAYA_VERSION__ → Maya year (e.g. "2026") for cache isolation
 #   __MCA_PAYLOAD__     → base64-encoded zip data
 #   __MCA_BUILD_DATE__  → ISO date of build
 #   __MCA_FILE_COUNT__  → number of files in payload
@@ -55,6 +57,20 @@ except ImportError:
 TEMPLATE = r'''# -*- coding: utf-8 -*-
 """
 MCA Editor __MCA_VERSION__ — Maya Plugin (single-file distribution)
+
+Copyright (c) __MCA_BUILD_YEAR__ Nathan Comes. All rights reserved.
+
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this file, via any medium, is
+strictly prohibited without prior written permission from the author.
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 Drop this file into your Maya plug-ins folder:
     ~/Documents/maya/<version>/plug-ins/mcaEditor.py
@@ -86,6 +102,7 @@ maya_useNewAPI = True
 
 _VERSION = "__MCA_VERSION__"
 _BUILD_HASH = "__MCA_BUILD_HASH__"
+_MAYA_VERSION = "__MCA_MAYA_VERSION__"
 _EXTRACT_DIR_NAME = "MCAEditor"
 _VERSION_FILENAME = ".mca_version"
 
@@ -102,15 +119,16 @@ def _get_extract_dir():
     """
     Get the directory where packages are extracted.
 
-    Uses %LOCALAPPDATA%/MCAEditor-py3.XX on Windows.  The Python
-    major.minor version is included so Maya 2024 (3.10) and Maya
-    2025/2026 (3.11) don't collide — .pyd files are ABI-specific.
+    Uses %LOCALAPPDATA%/MCAEditor-Maya2026-py3.11 on Windows.
+    Both the Maya year AND the Python major.minor version are
+    included so each Maya version gets its own isolated cache —
+    even if two versions share the same Python ABI.
 
     :rtype: str
     """
-    # Include Python version to prevent ABI conflicts between Maya versions.
+    # Include both Maya version and Python version for full isolation.
     py_ver = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
-    dir_name = "{}-py{}".format(_EXTRACT_DIR_NAME, py_ver)
+    dir_name = "{}-Maya{}-py{}".format(_EXTRACT_DIR_NAME, _MAYA_VERSION, py_ver)
     local = os.environ.get("LOCALAPPDATA")
     if local:
         return os.path.join(local, dir_name)
@@ -303,12 +321,15 @@ def format_payload_string(b64_data, line_width=76):
     return "\n".join(lines)
 
 
-def pack(dist_dir, output_path):
+def pack(dist_dir, output_path, maya_version="2025"):
     """
     Pack the distribution directory into a single .py file.
 
     :param str dist_dir: Path to the compiled distribution directory.
     :param str output_path: Path for the output .py file.
+    :param str maya_version: Target Maya year (e.g. "2025", "2026").
+        Embedded in the output so each Maya version extracts to its
+        own cache directory.
     :return: Dict with build stats.
     :rtype: dict
     """
@@ -342,6 +363,8 @@ def pack(dist_dir, output_path):
     output = TEMPLATE
     output = output.replace("__MCA_VERSION__", VERSION)
     output = output.replace("__MCA_BUILD_HASH__", build_hash)
+    output = output.replace("__MCA_BUILD_YEAR__", str(datetime.date.today().year))
+    output = output.replace("__MCA_MAYA_VERSION__", maya_version)
     output = output.replace("__MCA_PAYLOAD__", payload_str)
     output = output.replace("__MCA_BUILD_DATE__", build_date)
     output = output.replace("__MCA_FILE_COUNT__", str(file_count))
@@ -388,6 +411,11 @@ def main():
              "(default: dist/MCAEditor-Maya2025/)",
     )
     parser.add_argument(
+        "--maya-version", default=None,
+        help="Maya version year (e.g. 2025, 2026). Auto-detected from "
+             "--dist folder name if not specified.",
+    )
+    parser.add_argument(
         "--output", "-o", default=None,
         help="Output filename (default: dist/mcaEditor.py)",
     )
@@ -404,6 +432,19 @@ def main():
         print("Run build_maya.py first to create the compiled distribution.")
         sys.exit(1)
 
+    # --- Resolve Maya version ---
+    # Auto-detect from the dist folder name (e.g. "MCAEditor-Maya2026" → "2026").
+    maya_version = args.maya_version
+    if not maya_version:
+        import re
+        match = re.search(r"Maya(\d{4})", os.path.basename(dist_dir))
+        if match:
+            maya_version = match.group(1)
+        else:
+            maya_version = "2025"
+            print("WARNING: Could not detect Maya version from dist folder name.")
+            print("         Defaulting to {}. Use --maya-version to override.".format(maya_version))
+
     if args.output:
         output_path = args.output
     else:
@@ -413,7 +454,7 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     # --- Pack ---
-    pack(dist_dir, output_path)
+    pack(dist_dir, output_path, maya_version=maya_version)
 
 
 if __name__ == "__main__":

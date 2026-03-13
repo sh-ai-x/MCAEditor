@@ -1,9 +1,0 @@
-{
-    "id": "com.mechart.hello-world",
-    "name": "Hello World",
-    "version": "1.0.0",
-    "author": "MechArt Studios",
-    "description": "A minimal test plugin to verify the plugin system is working. Adds a right panel tab and a Plugins menu action.",
-    "entry_point": "__init__.py",
-    "min_editor_version": "0.1.0"
-}

@@ -61,8 +61,12 @@ class AIChatPlugin(MCAPlugin):
         # Create the chat widget.
         self._widget = AIChatWidget(api)
 
+        # Use the MCA logo (orange slice) for the sidebar button.
+        from mca_qt.icons import mca_logo
+        icon = mca_logo(size=16)
+
         # Register the panel in the right sidebar.
-        api.add_panel("ai-chat", "Orange Slice", self._widget)
+        api.add_panel("ai-chat", "Orange Slice", self._widget, icon=icon)
 
         # Register menu actions under Plugins > Orange Slice.
         api.add_menu_action("Orange Slice", "New Chat", self._new_chat)

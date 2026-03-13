@@ -352,7 +352,7 @@ def settings_icon():
 
 
 def _paint_settings_icon():
-    """Paint a simple gear icon using lines radiating from a circle."""
+    """Paint a gear icon with 8 teeth using a QPainterPath outline."""
     import math
 
     pix = QPixmap(ICON_SIZE, ICON_SIZE)
@@ -361,30 +361,55 @@ def _paint_settings_icon():
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    cx, cy = 8.0, 8.0
     color = QColor("#969696")
+    cx, cy = 8.0, 8.0
 
-    # Draw 6 gear teeth as short radial lines around the center.
-    pen = QPen(color, 1.8)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    for i in range(6):
-        angle = math.radians(i * 60)
-        x1 = cx + 4.0 * math.cos(angle)
-        y1 = cy + 4.0 * math.sin(angle)
-        x2 = cx + 6.0 * math.cos(angle)
-        y2 = cy + 6.0 * math.sin(angle)
-        p.drawLine(int(x1 * 10) / 10, int(y1 * 10) / 10,
-                   int(x2 * 10) / 10, int(y2 * 10) / 10)
+    # Build gear outline: 8 teeth alternating between inner and outer radii.
+    inner_r = 4.2
+    outer_r = 6.5
+    teeth = 8
+    # Each tooth spans half a step (raised) then half a step (valley).
+    step = 2.0 * math.pi / teeth
+    half_tooth = step * 0.28  # Width of each tooth at the tip.
 
-    # Outer ring.
-    p.setPen(QPen(color, 1.4))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(3, 3, 10, 10)
+    gear = QPainterPath()
+    for i in range(teeth):
+        base_angle = i * step
+        # Outer tooth corners.
+        a1 = base_angle - half_tooth
+        a2 = base_angle + half_tooth
+        # Inner valley corners (midway between teeth).
+        a3 = base_angle + half_tooth
+        a4 = base_angle + step - half_tooth
 
-    # Inner circle (hollow center).
-    p.setPen(QPen(color, 1.2))
-    p.drawEllipse(5, 5, 6, 6)
+        ox1 = cx + outer_r * math.cos(a1)
+        oy1 = cy + outer_r * math.sin(a1)
+        ox2 = cx + outer_r * math.cos(a2)
+        oy2 = cy + outer_r * math.sin(a2)
+        ix1 = cx + inner_r * math.cos(a3)
+        iy1 = cy + inner_r * math.sin(a3)
+        ix2 = cx + inner_r * math.cos(a4)
+        iy2 = cy + inner_r * math.sin(a4)
+
+        if i == 0:
+            gear.moveTo(ox1, oy1)
+        else:
+            gear.lineTo(ox1, oy1)
+        gear.lineTo(ox2, oy2)
+        gear.lineTo(ix1, iy1)
+        gear.lineTo(ix2, iy2)
+
+    gear.closeSubpath()
+
+    # Hollow center — subtract an inner circle.
+    center_hole = QPainterPath()
+    center_hole.addEllipse(cx - 2.2, cy - 2.2, 4.4, 4.4)
+    gear = gear.subtracted(center_hole)
+
+    # Draw the gear shape.
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    p.drawPath(gear)
 
     p.end()
     return QIcon(pix)

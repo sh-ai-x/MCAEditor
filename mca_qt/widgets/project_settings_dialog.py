@@ -45,6 +45,8 @@ from mca_qt.qt_compat import (
     QPlainTextEdit, QComboBox,
     Qt,
 )
+from mca_qt.widgets.code_editor import MCACodeEditor
+from mca_core.config.color_scheme import build_scheme_dict
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -358,18 +360,23 @@ class ProjectSettingsDialog(QDialog):
     :param QWidget parent: Optional parent widget.
     """
 
-    def __init__(self, project, dcc_tag=None, parent=None):
+    def __init__(self, project, dcc_tag=None, settings=None, parent=None):
         """
         Initialize the dialog with the project's current values.
 
         :param MCAProject project: The active project instance.
         :param str dcc_tag: Optional DCC version tag (e.g. ``"Maya2025"``).
+        :param MCASettings settings: Optional settings for color scheme.
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
         self._project = project
         self._dcc_tag = dcc_tag
+        self._settings = settings
         self._result = None
+
+        # Build the color scheme for syntax-highlighted code editors.
+        self._color_scheme = build_scheme_dict(settings) if settings else None
 
         # --- Profile data ---
         # Deep copy all profiles so edits don't affect the model until save.
@@ -582,10 +589,12 @@ class ProjectSettingsDialog(QDialog):
         # Startup fields.
         profile["startup_script"] = self._script_edit.text().strip()
         profile["startup_code"] = self._code_edit.toPlainText()
+        profile["startup_language"] = self._startup_lang_combo.currentText()
 
         # Shutdown fields.
         profile["shutdown_script"] = self._shutdown_script_edit.text().strip()
         profile["shutdown_code"] = self._shutdown_code_edit.toPlainText()
+        profile["shutdown_language"] = self._shutdown_lang_combo.currentText()
 
     def _load_profile_to_widgets(self, profile_name):
         """
@@ -608,10 +617,22 @@ class ProjectSettingsDialog(QDialog):
         # Startup fields.
         self._script_edit.setText(profile.get("startup_script", ""))
         self._code_edit.setPlainText(profile.get("startup_code", ""))
+        # Set the language combo and update the editor highlighting.
+        startup_lang = profile.get("startup_language", "python")
+        idx = self._startup_lang_combo.findText(startup_lang)
+        if idx >= 0:
+            self._startup_lang_combo.setCurrentIndex(idx)
+        self._code_edit.set_language(startup_lang)
 
         # Shutdown fields.
         self._shutdown_script_edit.setText(profile.get("shutdown_script", ""))
         self._shutdown_code_edit.setPlainText(profile.get("shutdown_code", ""))
+        # Set the language combo and update the editor highlighting.
+        shutdown_lang = profile.get("shutdown_language", "python")
+        idx = self._shutdown_lang_combo.findText(shutdown_lang)
+        if idx >= 0:
+            self._shutdown_lang_combo.setCurrentIndex(idx)
+        self._shutdown_code_edit.set_language(shutdown_lang)
 
         # Update the env vars group title to show profile name.
         self._env_group.setTitle(
@@ -900,16 +921,29 @@ class ProjectSettingsDialog(QDialog):
         code_group.setStyleSheet(_GROUP_STYLE)
         code_layout = QVBoxLayout(code_group)
 
+        # Label and language selector on the same row.
+        code_header = QHBoxLayout()
         code_label = QLabel("Runs after the script file (if any):")
         code_label.setStyleSheet(_LABEL_STYLE)
-        code_layout.addWidget(code_label)
+        code_header.addWidget(code_label)
+        code_header.addStretch()
 
-        self._code_edit = QPlainTextEdit()
+        lang_label = QLabel("Language:")
+        lang_label.setStyleSheet(_LABEL_STYLE)
+        code_header.addWidget(lang_label)
+
+        self._startup_lang_combo = QComboBox()
+        self._startup_lang_combo.addItems(["python", "mel"])
+        self._startup_lang_combo.setStyleSheet(_COMBO_STYLE)
+        self._startup_lang_combo.setFixedWidth(100)
+        self._startup_lang_combo.currentTextChanged.connect(
+            self._on_startup_lang_changed)
+        code_header.addWidget(self._startup_lang_combo)
+        code_layout.addLayout(code_header)
+
+        # Syntax-highlighted code editor matching the main editor tabs.
+        self._code_edit = self._make_code_editor("python")
         self._code_edit.setPlainText(self._project.startup_code)
-        self._code_edit.setPlaceholderText("# Python code to run on project open...")
-        self._code_edit.setStyleSheet(_CODE_EDIT_STYLE)
-        self._code_edit.setMinimumHeight(200)
-        self._code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
         code_layout.addWidget(self._code_edit)
 
         layout.addWidget(code_group)
@@ -958,16 +992,29 @@ class ProjectSettingsDialog(QDialog):
         code_group.setStyleSheet(_GROUP_STYLE)
         code_layout = QVBoxLayout(code_group)
 
+        # Label and language selector on the same row.
+        code_header = QHBoxLayout()
         code_label = QLabel("Runs after the script file (if any):")
         code_label.setStyleSheet(_LABEL_STYLE)
-        code_layout.addWidget(code_label)
+        code_header.addWidget(code_label)
+        code_header.addStretch()
 
-        self._shutdown_code_edit = QPlainTextEdit()
+        lang_label = QLabel("Language:")
+        lang_label.setStyleSheet(_LABEL_STYLE)
+        code_header.addWidget(lang_label)
+
+        self._shutdown_lang_combo = QComboBox()
+        self._shutdown_lang_combo.addItems(["python", "mel"])
+        self._shutdown_lang_combo.setStyleSheet(_COMBO_STYLE)
+        self._shutdown_lang_combo.setFixedWidth(100)
+        self._shutdown_lang_combo.currentTextChanged.connect(
+            self._on_shutdown_lang_changed)
+        code_header.addWidget(self._shutdown_lang_combo)
+        code_layout.addLayout(code_header)
+
+        # Syntax-highlighted code editor matching the main editor tabs.
+        self._shutdown_code_edit = self._make_code_editor("python")
         self._shutdown_code_edit.setPlainText(self._project.shutdown_code)
-        self._shutdown_code_edit.setPlaceholderText("# Python code to run on project close...")
-        self._shutdown_code_edit.setStyleSheet(_CODE_EDIT_STYLE)
-        self._shutdown_code_edit.setMinimumHeight(200)
-        self._shutdown_code_edit.setTabStopDistance(28.0)  # ~4 spaces at 12px font.
         code_layout.addWidget(self._shutdown_code_edit)
 
         layout.addWidget(code_group)
@@ -988,6 +1035,50 @@ class ProjectSettingsDialog(QDialog):
         label = QLabel(text)
         label.setStyleSheet(_LABEL_STYLE)
         return label
+
+    def _make_code_editor(self, language="python"):
+        """
+        Create a syntax-highlighted code editor matching the main editor tabs.
+
+        Uses MCACodeEditor with full highlighting for Python and MEL.
+        Falls back to a plain QPlainTextEdit if the editor can't be created.
+
+        :param str language: Initial language ('python' or 'mel').
+        :return: Configured code editor widget.
+        :rtype: MCACodeEditor
+        """
+        editor = MCACodeEditor()
+        editor.setMinimumHeight(200)
+
+        # Apply color scheme and language for syntax highlighting.
+        if self._color_scheme:
+            editor.set_color_scheme(self._color_scheme)
+        editor.set_language(language)
+
+        # Disable signals we don't need in this context.
+        editor.execute_requested.connect(lambda: None)
+
+        return editor
+
+    # --- Language Combo Handlers -----------------------------------------------
+
+    def _on_startup_lang_changed(self, language):
+        """
+        Update the startup code editor's syntax highlighting when the
+        language selector changes.
+
+        :param str language: The newly selected language ('python' or 'mel').
+        """
+        self._code_edit.set_language(language)
+
+    def _on_shutdown_lang_changed(self, language):
+        """
+        Update the shutdown code editor's syntax highlighting when the
+        language selector changes.
+
+        :param str language: The newly selected language ('python' or 'mel').
+        """
+        self._shutdown_code_edit.set_language(language)
 
     # --- Python Paths Actions -------------------------------------------------
 
