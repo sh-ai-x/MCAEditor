@@ -68,7 +68,16 @@ __version__ = "1.0.0"
 # Discovery file written by the editor's JSON-RPC server.
 # Path is inlined here (not imported from mca_core) because this module
 # runs as a standalone MCP server process where mca_core is not on sys.path.
-_PREFS_DIR = os.path.join(os.path.expanduser("~/Documents"), "mca_preferences", "MCAEditor")
+# 3-way platform check so the server finds the right prefs directory
+# on Windows, macOS, and Linux.
+_home = os.path.expanduser("~")
+if sys.platform in ("win32", "darwin"):
+    # Windows and macOS both use ~/Documents.
+    _PREFS_DIR = os.path.join(_home, "Documents", "mca_preferences", "MCAEditor")
+else:
+    # Linux follows XDG convention — ~/.config.
+    _xdg = os.environ.get("XDG_CONFIG_HOME", os.path.join(_home, ".config"))
+    _PREFS_DIR = os.path.join(_xdg, "mca_preferences", "MCAEditor")
 _DISCOVERY_FILE = os.path.join(_PREFS_DIR, "api_port.json")
 
 # TCP connection timeout to the editor's JSON-RPC server (seconds).

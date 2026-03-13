@@ -38,15 +38,14 @@ __org_domain__ = "mcatools.dev"
 _package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --- Preferences Directory ------------------------------------------------
-# All MCA Editor user data lives under ~/Documents/mca_preferences/MCAEditor/.
+# All MCA Editor user data lives under a platform-specific directory.
 # The parent "mca_preferences" folder is shared with other MCA tools (the MCA
 # codebase), so MCA Editor keeps its own files in a dedicated subfolder.
 # Computed once at import time and used by all modules that need persistent
 # storage (venv, session manager, plugins, MCP servers, API discovery, etc.).
 
-_prefs_dir = os.path.join(
-    os.path.expanduser("~/Documents"), "mca_preferences", "MCAEditor"
-)
+from .platform_utils import get_preferences_dir
+_prefs_dir = get_preferences_dir()
 
 
 def get_prefs_dir():

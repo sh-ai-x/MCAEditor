@@ -294,6 +294,25 @@ def initializePlugin(plugin):
     _maya_version = cmds.about(version=True)  # e.g. "2024", "2025"
     logger.info("Maya version: %s", _maya_version)
 
+    # --- Batch mode early exit ------------------------------------------------
+    # In batch mode (maya -batch) there is no UI, so skip venv setup, MCP,
+    # command ports, ScriptEditor override, and auto-open.  Only register
+    # the mcaEditor command so scripts can query plugin info.
+    from mca_core.platform_utils import is_batch_mode
+    if is_batch_mode():
+        fn_plugin = om2.MFnPlugin(plugin, PLUGIN_VENDOR, PLUGIN_VERSION)
+        try:
+            fn_plugin.registerCommand(
+                MCAEditorCommand.COMMAND_NAME,
+                MCAEditorCommand.creator,
+            )
+        except Exception as exc:
+            logger.error("Failed to register command %s: %s",
+                         MCAEditorCommand.COMMAND_NAME, exc)
+            raise
+        logger.info("%s v%s loaded (batch mode — UI skipped)", PLUGIN_NAME, PLUGIN_VERSION)
+        return
+
     # Detect first launch — if the venv doesn't exist yet, we need to run
     # the full setup with a progress dialog so the user sees what's happening
     # instead of staring at a frozen Maya for 30-60 seconds.
@@ -406,10 +425,9 @@ def initializePlugin(plugin):
         import os
         # Derive the Maya version dynamically so this works across
         # Maya 2024, 2025, 2026, etc. without hardcoding.
+        from mca_core.platform_utils import get_maya_scripts_dir
         maya_version = cmds.about(version=True)
-        scripts_dir = os.path.join(
-            os.path.expanduser("~"), "Documents", "maya", maya_version, "scripts"
-        )
+        scripts_dir = get_maya_scripts_dir(maya_version)
         setup_path = os.path.join(scripts_dir, "userSetup.py")
 
         # Marker lines to identify our auto-load block.

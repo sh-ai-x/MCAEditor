@@ -119,20 +119,34 @@ def _get_extract_dir():
     """
     Get the directory where packages are extracted.
 
-    Uses %LOCALAPPDATA%/MCAEditor-Maya2026-py3.11 on Windows.
-    Both the Maya year AND the Python major.minor version are
-    included so each Maya version gets its own isolated cache —
-    even if two versions share the same Python ABI.
+    Platform paths (Maya year AND Python version included for ABI isolation):
+        - Windows: ``%LOCALAPPDATA%/MCAEditor-Maya2026-py3.11``
+        - macOS:   ``~/Library/Caches/MCAEditor-Maya2026-py3.11``
+        - Linux:   ``$XDG_CACHE_HOME/MCAEditor-Maya2026-py3.11``
+                   (falls back to ``~/.cache``)
 
     :rtype: str
     """
     # Include both Maya version and Python version for full isolation.
     py_ver = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
     dir_name = "{}-Maya{}-py{}".format(_EXTRACT_DIR_NAME, _MAYA_VERSION, py_ver)
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return os.path.join(local, dir_name)
-    return os.path.join(os.path.expanduser("~"), dir_name)
+
+    if sys.platform == "win32":
+        # Windows: use %LOCALAPPDATA% (always set on modern Windows).
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return os.path.join(local, dir_name)
+        return os.path.join(os.path.expanduser("~"), dir_name)
+
+    elif sys.platform == "darwin":
+        # macOS: caches live under ~/Library/Caches/.
+        return os.path.join(os.path.expanduser("~"), "Library", "Caches", dir_name)
+
+    else:
+        # Linux: XDG_CACHE_HOME defaults to ~/.cache.
+        cache_base = os.environ.get("XDG_CACHE_HOME",
+                                    os.path.join(os.path.expanduser("~"), ".cache"))
+        return os.path.join(cache_base, dir_name)
 
 
 def _needs_extraction(extract_dir):
