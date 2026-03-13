@@ -314,9 +314,41 @@ class MayaAdapter(DCCAdapter):
                 result = self._strip_exec_none(result)
 
             # If there's actual output left, display it.
+            # Split traceback output from normal output so errors are
+            # routed through _on_error and displayed in red.
             if result:
-                if self._on_output:
-                    self._on_output(result)
+                tb_marker = "Traceback (most recent call last):"
+                tb_idx = result.find(tb_marker)
+
+                if tb_idx > 0:
+                    # There's normal output before the traceback — send both.
+                    normal_part = result[:tb_idx].rstrip()
+                    error_part = result[tb_idx:].rstrip()
+                    if normal_part and self._on_output:
+                        self._on_output(normal_part)
+                    if error_part and self._on_error:
+                        self._on_error(error_part)
+                elif tb_idx == 0:
+                    # Entire response is a traceback.
+                    if self._on_error:
+                        self._on_error(result)
+                else:
+                    # No traceback found — check for bare error lines
+                    # (e.g. SyntaxError without traceback frames).
+                    error_prefixes = (
+                        "SyntaxError:", "NameError:", "TypeError:",
+                        "ValueError:", "AttributeError:", "ImportError:",
+                        "ModuleNotFoundError:", "KeyError:", "IndexError:",
+                        "RuntimeError:", "OSError:", "IOError:",
+                        "FileNotFoundError:", "ZeroDivisionError:",
+                        "StopIteration:", "IndentationError:", "TabError:",
+                    )
+                    if any(result.lstrip().startswith(p) for p in error_prefixes):
+                        if self._on_error:
+                            self._on_error(result)
+                    else:
+                        if self._on_output:
+                            self._on_output(result)
                 return result
 
             # No meaningful output — return empty string.
@@ -414,14 +446,15 @@ class MayaAdapter(DCCAdapter):
             "        exec(compile(__mca_code, '<mca_editor>', 'exec'), globals())\n"
             "except Exception as __e:\n"
             "    __mca_err = __e\n"
+            "    __mca_tb = __sys.exc_info()[2]\n"
+            "    __mca_err.__context__ = None\n"
             "finally:\n"
             "    __sys.stdout = __mca_old_stdout\n"
             "__mca_result = __mca_buf.getvalue()\n"
             "if __mca_result:\n"
             "    print(__mca_result, end='')\n"
             "if __mca_err:\n"
-            "    __tb.print_exception(type(__mca_err), __mca_err, "
-            "__mca_err.__traceback__)\n"
+            "    __tb.print_exception(type(__mca_err), __mca_err, __mca_tb)\n"
         ).format(encoded)
 
         # Now base64-encode the wrapper itself for safe single-line transmission.

@@ -102,13 +102,13 @@ class LicenseDialog(QDialog):
 
         # QLineEdit with input mask — handles uppercase + dash insertion
         # natively without custom keystroke handling.
-        # Mask format: >AAA-AAAA-AAAA-AAAA-AAAA;_
+        # Mask format: >NNN-NNNN-NNNN-NNNN-NNNN;_
         #   > = force uppercase
-        #   A = required alphanumeric (A-Z, 0-9)
+        #   N = required alphanumeric (A-Z, 0-9)
         #   - = literal dash
         #   ;_ = placeholder character
         self._key_input = QLineEdit()
-        self._key_input.setInputMask(">AAA-AAAA-AAAA-AAAA-AAAA;_")
+        self._key_input.setInputMask(">NNN-NNNN-NNNN-NNNN-NNNN;_")
         self._key_input.setPlaceholderText("MCA-XXXX-XXXX-XXXX-XXXX")
         self._key_input.setFont(self._key_input.font())
         self._key_input.setStyleSheet("font-family: Consolas; font-size: 14px; padding: 4px;")
@@ -130,6 +130,13 @@ class LicenseDialog(QDialog):
         self._activate_btn.clicked.connect(self._on_activate)
         button_layout.addWidget(self._activate_btn)
 
+        # Deactivate button — only visible when a license is currently active.
+        self._deactivate_btn = QPushButton("Deactivate")
+        self._deactivate_btn.setToolTip("Remove the current license key")
+        self._deactivate_btn.clicked.connect(self._on_deactivate)
+        self._deactivate_btn.setVisible(status["licensed"])
+        button_layout.addWidget(self._deactivate_btn)
+
         self._close_btn = QPushButton("Cancel")
         self._close_btn.clicked.connect(self.reject)
         button_layout.addWidget(self._close_btn)
@@ -141,9 +148,9 @@ class LicenseDialog(QDialog):
 
     def _mask_key(self, key_str):
         """
-        Mask the middle groups of a license key for display.
+        Mask a license key for display, showing only the MCA- prefix.
 
-        Example: MCA-AIBQ-RDEF-GHIJ-AILP  →  MCA-AIBQ-****-****-AILP
+        Example: MCA-AIBQ-RDEF-GHIJ-AILP  →  MCA-****-****-****-****
 
         :param str key_str: The full license key string.
         :rtype: str
@@ -155,8 +162,42 @@ class LicenseDialog(QDialog):
         if len(parts) != 5:
             return key_str
 
-        # Keep prefix, first group, and last group — mask the middle two.
-        return "{}-{}-****-****-{}".format(parts[0], parts[1], parts[4])
+        # Only show the MCA- prefix — mask all key groups.
+        return "{}-****-****-****-****".format(parts[0])
+
+    def _on_deactivate(self):
+        """
+        Remove the stored license key and revert to trial mode.
+
+        Clears the key from settings, refreshes the status display,
+        and hides the Deactivate button.
+        """
+        from mca_core.license import check_license
+
+        # Clear the stored license key.
+        self._settings.set("license_key", "")
+        logger.info("License key deactivated")
+
+        # Refresh the status display to show trial/expired state.
+        status = check_license(self._settings)
+        if status["trial"]:
+            status_text = (
+                "<span style='color: #dcdcaa;'>Trial Mode</span>"
+                "<br>{} days remaining"
+            ).format(status["days_remaining"])
+        else:
+            status_text = (
+                "<span style='color: #f44747;'>Trial Expired</span>"
+                "<br>Please enter a license key to continue."
+            )
+
+        self._status_display.setText(status_text)
+        self._feedback_label.setText(
+            "<span style='color: #dcdcaa;'>License key removed.</span>"
+        )
+
+        # Hide the deactivate button since there's no longer an active key.
+        self._deactivate_btn.setVisible(False)
 
     def _on_activate(self):
         """

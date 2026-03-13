@@ -328,6 +328,18 @@ class InternalMayaAdapter(DCCAdapter):
                 exec(compile(code, "<mca_editor>", "exec"), __main__.__dict__)
 
         except Exception as exc:
+            # Capture the full traceback NOW while sys.exc_info() is alive.
+            # exc.__traceback__ can be None for SyntaxError from compile(),
+            # but sys.exc_info()[2] always has the active traceback chain.
+            exc.__traceback__ = sys.exc_info()[2]
+
+            # Suppress implicit exception chaining from the eval→exec
+            # fallback.  When compile(eval) raises SyntaxError and then
+            # compile(exec) also raises, Python sets __context__ which
+            # produces noisy "During handling of..." messages.  The user
+            # only cares about the final error, not the eval attempt.
+            exc.__context__ = None
+
             # Determine if this error was already displayed by Maya's
             # own output system.  Maya commands like cmds.error(),
             # cmds.warning(), cmds.polySphere(invalidFlag=True), etc.
@@ -344,7 +356,7 @@ class InternalMayaAdapter(DCCAdapter):
             else:
                 # Pure Python error — route through Maya's output system
                 # so it appears in BOTH the Script Editor and our panel.
-                # Format in Maya's style: "file <source> line N: Error"
+                # Full traceback with stack frames and source context.
                 error_display = self._format_error_for_maya(exc)
                 om2.MGlobal.displayError(error_display)
 
@@ -359,36 +371,47 @@ class InternalMayaAdapter(DCCAdapter):
 
     def _format_error_for_maya(self, exc):
         """
-        Format an exception in Maya's Script Editor style.
+        Format an exception as a full Python traceback.
 
-        Maya's Script Editor shows Python errors as:
-            ``file <source> line N: ErrorType: message``
+        Uses ``traceback.format_exception()`` to produce the standard
+        Python traceback output including all stack frames, source lines,
+        and caret indicators for SyntaxError.  This matches what the user
+        would see in a normal Python terminal.
 
-        Extracts the source file and line number from the innermost
-        traceback frame that originated in user code (``<mca_editor>``).
+        Internal wrapper frames (``<mca_editor_wrapper>``) are filtered
+        out so only user-relevant frames remain.
 
         :param Exception exc: The caught exception with traceback.
-        :return: Formatted error string for ``MGlobal.displayError()``.
+        :return: Formatted traceback string.
         :rtype: str
         """
-        # The error type and message (e.g. "NameError: name 'x' is not defined").
-        error_line = "{}: {}".format(type(exc).__name__, exc)
+        # Use Python's traceback module for full, standard formatting.
+        # This handles SyntaxError specially — showing the offending line,
+        # caret position, and any chained exceptions.
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
 
-        # Walk the traceback chain to find the innermost user code frame.
-        tb = exc.__traceback__
-        source = "<mca_editor>"
-        line_num = 1
+        # Filter out internal wrapper frames that aren't useful to the user.
+        # Keep only frames from user code (<mca_editor>) or real files.
+        filtered = []
+        skip_next = False
+        for line in tb_lines:
+            # Skip frames from our internal wrapper.
+            if "<mca_editor_wrapper>" in line:
+                skip_next = True
+                continue
+            if skip_next and not line.startswith(" "):
+                # We've passed the indented source line of the skipped frame.
+                skip_next = False
+            elif skip_next:
+                continue
+            filtered.append(line)
 
-        while tb is not None:
-            frame = tb.tb_frame
-            filename = frame.f_code.co_filename
-            # Prefer the user's code frame over internal frames.
-            if filename == "<mca_editor>" or not filename.startswith("<"):
-                source = filename
-                line_num = tb.tb_lineno
-            tb = tb.tb_next
+        result = "".join(filtered).rstrip()
 
-        return "file {} line {}: {}".format(source, line_num, error_line)
+        # If traceback had no frames (e.g. SyntaxError from compile()),
+        # format_exception still produces useful output with the error
+        # location and caret.  Return as-is.
+        return result if result else "{}: {}".format(type(exc).__name__, exc)
 
     def _execute_mel(self, code):
         """

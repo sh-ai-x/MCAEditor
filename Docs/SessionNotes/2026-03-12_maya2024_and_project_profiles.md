@@ -112,7 +112,7 @@ specific profiles via the settings dialog.
 }
 ```
 
-## Pending
-- Build and test both Maya 2024 and 2025 with the profile changes
-- Convert Wayward `.mca-project` to v4 with Maya2025 profile (auto-migrates on first open)
-- Commit and push all changes to GitHub
+## Completed
+- Built and deployed both Maya 2024 and 2025 with profile changes
+- Converted Wayward `.mca-project` to v4 with Maya2024 + Maya2025 profiles
+- All changes committed and pushed to GitHub

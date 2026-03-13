@@ -336,11 +336,6 @@ class MCAEditorPanel(QWidget):
         if not has_project_file(last_path):
             return
 
-        # Load the project to inspect its open_on_editor_open flag.
-        project = MCAProject(last_path)
-        if not project.open_on_editor_open:
-            return
-
         logger.info("Auto-opening last project: %s", last_path)
         self._open_project(last_path)
 
@@ -1158,6 +1153,14 @@ class MCAEditorPanel(QWidget):
                             callback=self._open_python_reference)
         self._create_action(help_menu, "Node and Attribute Reference",
                             callback=self._open_node_reference)
+
+        help_menu.addSeparator()
+
+        # --- Bug report / feedback ---
+        self._create_action(help_menu, "Report a Bug...",
+                            callback=self._show_feedback_bug)
+        self._create_action(help_menu, "Send Feedback...",
+                            callback=self._show_feedback)
 
         help_menu.addSeparator()
 
@@ -2338,7 +2341,7 @@ class MCAEditorPanel(QWidget):
         """
         return self._group_container.current_editor()
 
-    def _new_buffer(self):
+    def _new_buffer(self, language="python"):
         """
         Create a new buffer file in the active workspace directory.
 
@@ -2350,10 +2353,15 @@ class MCAEditorPanel(QWidget):
         workspace tree and is searchable by Find in Files / Go to
         Declaration from the moment it's created.
 
+        :param str language: Language for the buffer ('python', 'mel', 'text').
         :return: The newly created editor widget.
         :rtype: MCACodeEditor
         """
         editor = MCACodeEditor()
+
+        # Set language BEFORE saving so the buffer gets the correct
+        # filename and extension (e.g. MEL_2.mel instead of Python_2.py).
+        editor.set_language(language)
 
         # Allocate a buffer ID and immediately save an empty file to disk.
         editor._buffer_id = self._session_manager.allocate_buffer_id()
@@ -2445,6 +2453,16 @@ class MCAEditorPanel(QWidget):
         editor.file_path = filepath
         editor.setPlainText(content)
         editor.document().setModified(False)
+
+        # Detect language from file extension so .mel files get MEL
+        # highlighting and Python analysis doesn't run on them.
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext == ".mel":
+            editor.set_language("mel")
+        elif ext == ".py":
+            editor.set_language("python")
+        else:
+            editor.set_language("text")
 
         # File-backed tabs don't use buffer persistence.
         editor._buffer_id = None
@@ -3720,8 +3738,7 @@ class MCAEditorPanel(QWidget):
 
     def _new_mel_buffer(self):
         """Create a new MEL buffer."""
-        editor = self._new_buffer()
-        editor.set_language("mel")
+        editor = self._new_buffer("mel")
         tab_name = "MEL_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
@@ -3735,8 +3752,7 @@ class MCAEditorPanel(QWidget):
 
     def _new_python_buffer(self):
         """Create a new Python buffer."""
-        editor = self._new_buffer()
-        editor.set_language("python")
+        editor = self._new_buffer("python")
         tab_name = "Python_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
@@ -3750,8 +3766,7 @@ class MCAEditorPanel(QWidget):
 
     def _new_text_buffer(self):
         """Create a new plain text buffer."""
-        editor = self._new_buffer()
-        editor.set_language("text")
+        editor = self._new_buffer("text")
         tab_name = "Text_{}".format(editor._buffer_id)
         group = self._group_container.active_group()
         if group:
@@ -4971,6 +4986,22 @@ class MCAEditorPanel(QWidget):
     def _open_node_reference(self):
         """Open the Autodesk Maya Node Reference in the default browser."""
         webbrowser.open("https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/Nodes/")
+
+    def _show_feedback_bug(self):
+        """Open the feedback dialog pre-set to Bug Report."""
+        from mca_qt.widgets.feedback_dialog import FeedbackDialog
+        dialog = FeedbackDialog(app_version=_APP_VERSION, parent=self)
+        # Pre-select "Bug Report" in the category combo.
+        dialog._category_combo.setCurrentIndex(0)
+        dialog.exec()
+
+    def _show_feedback(self):
+        """Open the feedback dialog pre-set to General Feedback."""
+        from mca_qt.widgets.feedback_dialog import FeedbackDialog
+        dialog = FeedbackDialog(app_version=_APP_VERSION, parent=self)
+        # Pre-select "General Feedback" in the category combo.
+        dialog._category_combo.setCurrentIndex(2)
+        dialog.exec()
 
     def _show_licensing(self):
         """Open the license dialog to view status or enter a new key."""

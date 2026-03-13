@@ -1226,11 +1226,32 @@ class MCACodeEditor(QPlainTextEdit):
         # and "" in "([{" is True in Python, which would cause a KeyError.
         if self._auto_close_brackets and event.text() and event.text() in "([{":
             closing = {"(": ")", "[": "]", "{": "}"}[event.text()]
-            super().keyPressEvent(event)
-            self.insertPlainText(closing)
+
+            # Only auto-pair when the next character is "safe" — whitespace,
+            # closing bracket, comma, semicolon, colon, or end of line.
+            # If an alphanumeric character or other content follows, the user
+            # is likely wrapping existing text, so just insert the opening
+            # bracket without a closing pair (matches VS Code behavior).
             cursor = self.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.Left)
-            self.setTextCursor(cursor)
+            should_pair = True
+            if not cursor.atEnd():
+                peek = QTextCursor(cursor)
+                peek.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor
+                )
+                next_char = peek.selectedText()
+                if next_char and next_char not in " \t\r\n)]},:;>":
+                    should_pair = False
+
+            super().keyPressEvent(event)
+
+            if should_pair:
+                self.insertPlainText(closing)
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.Left)
+                self.setTextCursor(cursor)
+
             # Dismiss completer on bracket — not a continuation of typing.
             if self._completer and self._completer.is_active:
                 self._completer.dismiss()
