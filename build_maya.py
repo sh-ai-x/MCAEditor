@@ -37,8 +37,17 @@ from mca_core import __version__ as VERSION
 # Default Maya version to build for (can be overridden with --maya-version).
 DEFAULT_MAYA_VERSION = "2025"
 
-# Template for the default mayapy.exe path on Windows.
-MAYAPY_TEMPLATE = "C:/Program Files/Autodesk/Maya{version}/bin/mayapy.exe"
+# Platform-specific template for the default mayapy path.
+if sys.platform == "darwin":
+    MAYAPY_TEMPLATE = "/Applications/Autodesk/maya{version}/Maya.app/Contents/bin/mayapy"
+elif sys.platform == "win32":
+    MAYAPY_TEMPLATE = "C:/Program Files/Autodesk/Maya{version}/bin/mayapy.exe"
+else:
+    # Linux — common install location.
+    MAYAPY_TEMPLATE = "/usr/autodesk/maya{version}/bin/mayapy"
+
+# Compiled extension suffix: .pyd on Windows, .so on macOS/Linux.
+COMPILED_EXT = ".pyd" if sys.platform == "win32" else ".so"
 
 # Packages to include in the Maya distribution (no standalone or legacy compat).
 DIST_PACKAGES = ["mca_core", "mca_qt", "mca_maya"]
@@ -355,7 +364,7 @@ def locate_mayapy(override_path, maya_version):
     path = override_path or MAYAPY_TEMPLATE.format(version=maya_version)
 
     if not os.path.isfile(path):
-        print("ERROR: mayapy.exe not found at: {}".format(path))
+        print("ERROR: mayapy not found at: {}".format(path))
         print("Use --mayapy to specify the correct path.")
         sys.exit(1)
 
@@ -525,8 +534,8 @@ def create_dist_structure():
             rel_root = os.path.relpath(root, PROJECT_ROOT)
             dest_root = os.path.join(DIST_DIR, rel_root)
 
-            # Compiled package — copy .pyd + __init__.py + explicit pure files.
-            pyd_files = [f for f in files if f.endswith(".pyd")]
+            # Compiled package — copy compiled extensions + __init__.py + explicit pure files.
+            pyd_files = [f for f in files if f.endswith(COMPILED_EXT)]
             init_files = [f for f in files if f == "__init__.py"]
 
             # Include any pure-Python files that must ship uncompiled.
@@ -606,7 +615,7 @@ def clean_source_tree():
     """
     print("\n--- Cleaning source tree ---")
 
-    # Remove .pyd and .c files from each package.
+    # Remove compiled extensions and .c intermediates from each package.
     for package in DIST_PACKAGES + ["mca_standalone", "mca_editor"]:
         package_path = os.path.join(PROJECT_ROOT, package)
         if not os.path.isdir(package_path):
@@ -615,7 +624,7 @@ def clean_source_tree():
         for root, dirs, files in os.walk(package_path):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for filename in files:
-                if filename.endswith((".pyd", ".c")):
+                if filename.endswith((".pyd", ".so", ".c")):
                     filepath = os.path.join(root, filename)
                     os.remove(filepath)
                     print("  Removed: {}".format(os.path.relpath(filepath, PROJECT_ROOT)))

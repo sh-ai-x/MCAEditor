@@ -390,24 +390,37 @@ def _setup_venv():
     """
     Create the MayaMCP venv and install requirements.
 
-    Uses system Python (not Maya's Python) to create the venv, since this
-    venv needs to run standalone as an MCP server process.
+    Prefers a system Python (lighter startup for MCP server processes).
+    Falls back to Maya's ``mayapy`` if no system Python 3.10+ is found.
+    When using mayapy, applies platform-specific fixes so the venv's
+    Python can find the standard library.
 
     :return: True if the venv is ready.
     :rtype: bool
     """
     system_python = _find_system_python()
     if not system_python:
-        logger.warning("No system Python 3.10+ found — cannot create MCP venv")
+        logger.warning("No Python 3.10+ found — cannot create MCP venv")
         return False
+
+    # Detect if we're using Maya's mayapy (needs post-creation fixes).
+    is_mayapy = "maya" in system_python.lower()
 
     # Create venv if it doesn't exist.
     venv_python = _get_venv_python()
     if not venv_python or not os.path.isfile(venv_python):
         logger.info("Creating MCP venv at %s ...", _MAYAMCP_VENV_DIR)
+
+        # When using mayapy, create without pip — ensurepip fails until
+        # the stdlib path fix is applied.
+        venv_cmd = [system_python, "-m", "venv"]
+        if is_mayapy:
+            venv_cmd.append("--without-pip")
+        venv_cmd.append(_MAYAMCP_VENV_DIR)
+
         try:
             subprocess.run(
-                [system_python, "-m", "venv", _MAYAMCP_VENV_DIR],
+                venv_cmd,
                 check=True,
                 timeout=_SUBPROCESS_TIMEOUT,
                 stdout=subprocess.PIPE,
@@ -425,12 +438,27 @@ def _setup_venv():
             logger.warning("Venv creation error: %s", exc)
             return False
 
-    # Install requirements from MayaMCP's requirements.txt.
+        # Apply Maya-specific fixes so the venv Python can find the
+        # standard library and run independently.
+        if is_mayapy:
+            _fix_mayapy_venv(_MAYAMCP_VENV_DIR, system_python)
+
+    # Refresh — pick up the (possibly renamed) venv Python.
     venv_python = _get_venv_python()
     if not venv_python:
         logger.warning("Venv created but Python not found at expected path")
         return False
 
+    # If we used mayapy and created without pip, bootstrap it now.
+    if is_mayapy:
+        _ensure_pip_in_venv(venv_python, system_python)
+
+    # Re-check that pip is available before trying to install packages.
+    venv_python = _get_venv_python()
+    if not venv_python:
+        return False
+
+    # Install requirements from MayaMCP's requirements.txt.
     req_file = os.path.join(_MAYAMCP_DIR, "requirements.txt")
     if not os.path.isfile(req_file):
         # Fallback: install mcp directly if requirements.txt is missing.
@@ -451,14 +479,160 @@ def _setup_venv():
         logger.info("MCP requirements installed successfully.")
         return True
     except subprocess.CalledProcessError as exc:
-        logger.warning(
-            "pip install failed (exit %d): %s",
-            exc.returncode,
-            exc.stderr.decode(errors="replace").strip() if exc.stderr else "",
-        )
-        return False
+        # Venv pip failed — try host interpreter with --target as fallback.
+        logger.warning("pip install in venv failed — trying host interpreter.")
+        return _pip_install_via_host(venv_python, system_python)
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning("pip install error: %s", exc)
+        return False
+
+
+def _fix_mayapy_venv(venv_dir, mayapy_path):
+    """
+    Fix a venv created from Maya's ``mayapy`` so it can run standalone.
+
+    Maya's Python resolves PYTHONHOME relative to the executable:
+        - **Windows:** ``<exe>/../Python/`` → needs a directory junction
+        - **macOS:** ``<exe>/../../Frameworks/Python.framework/`` → needs a symlink
+
+    Without this fix the venv Python cannot find the standard library
+    (``encodings``, ``os``, etc.) and crashes immediately.
+
+    Also renames ``mayapy`` → ``python`` in the venv so standard tooling
+    (pip, ensurepip) works correctly.
+
+    :param str venv_dir: Path to the venv root directory.
+    :param str mayapy_path: Path to the mayapy that created this venv.
+    """
+    maya_bin = os.path.dirname(os.path.abspath(mayapy_path))
+
+    if platform.system() == "Windows":
+        # Windows: mayapy resolves PYTHONHOME to <exe>/../Python/
+        maya_root = os.path.dirname(maya_bin)
+        maya_python_dir = os.path.normpath(os.path.join(maya_root, "Python"))
+        venv_python_dir = os.path.normpath(os.path.join(venv_dir, "Python"))
+
+        if os.path.isdir(maya_python_dir) and not os.path.exists(venv_python_dir):
+            try:
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", venv_python_dir, maya_python_dir],
+                    check=True, capture_output=True,
+                    creationflags=_CREATION_FLAGS,
+                )
+                logger.debug("Created junction: %s -> %s", venv_python_dir, maya_python_dir)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                logger.warning("Failed to create stdlib junction: %s", exc)
+
+        # Rename mayapy.exe -> python.exe in Scripts/.
+        scripts_dir = os.path.join(venv_dir, "Scripts")
+        mayapy_in = os.path.join(scripts_dir, "mayapy.exe")
+        python_in = os.path.join(scripts_dir, "python.exe")
+        if os.path.isfile(mayapy_in) and not os.path.isfile(python_in):
+            shutil.copy2(mayapy_in, python_in)
+            logger.debug("Copied mayapy.exe -> python.exe in venv Scripts/")
+
+    elif platform.system() == "Darwin":
+        # macOS: mayapy resolves PYTHONHOME relative to
+        # <exe>/../../Frameworks/Python.framework/Versions/Current/
+        # Create a symlink so the venv Python can find the framework.
+        maya_contents = os.path.dirname(maya_bin)  # Contents/ or similar
+        maya_frameworks = os.path.join(maya_contents, "Frameworks")
+        venv_frameworks = os.path.join(venv_dir, "Frameworks")
+
+        if os.path.isdir(maya_frameworks) and not os.path.exists(venv_frameworks):
+            try:
+                os.symlink(maya_frameworks, venv_frameworks)
+                logger.debug("Created symlink: %s -> %s", venv_frameworks, maya_frameworks)
+            except OSError as exc:
+                logger.warning("Failed to create Frameworks symlink: %s", exc)
+
+        # Rename mayapy -> python in bin/.
+        bin_dir = os.path.join(venv_dir, "bin")
+        mayapy_in = os.path.join(bin_dir, "mayapy")
+        python_in = os.path.join(bin_dir, "python")
+        if os.path.isfile(mayapy_in) and not os.path.isfile(python_in):
+            shutil.copy2(mayapy_in, python_in)
+            logger.debug("Copied mayapy -> python in venv bin/")
+
+
+def _ensure_pip_in_venv(venv_python, host_python):
+    """
+    Bootstrap pip into a venv that was created with ``--without-pip``.
+
+    Tries ``ensurepip`` first (uses bundled pip wheel).  If that fails,
+    falls back to using the host interpreter's pip with ``--target``.
+
+    :param str venv_python: Path to the venv's Python executable.
+    :param str host_python: Path to the host interpreter (e.g. mayapy).
+    """
+    # Try ensurepip first.
+    try:
+        subprocess.run(
+            [venv_python, "-m", "ensurepip", "--upgrade", "--default-pip"],
+            check=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
+        )
+        logger.debug("Pip bootstrapped via ensurepip.")
+        return
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("ensurepip failed: %s — trying get-pip fallback.", exc)
+
+    # Fallback: use host interpreter to install pip into the venv.
+    site_pkg = _get_venv_site_packages()
+    if site_pkg and os.path.isfile(host_python):
+        try:
+            subprocess.run(
+                [host_python, "-m", "pip", "install", "--target", site_pkg,
+                 "--quiet", "pip"],
+                check=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=_CREATION_FLAGS,
+            )
+            logger.debug("Pip installed via host interpreter.")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("Could not bootstrap pip: %s", exc)
+
+
+def _pip_install_via_host(venv_python, host_python):
+    """
+    Fall back to using the host interpreter for pip install into the venv.
+
+    :param str venv_python: Path to the venv Python (unused, for signature compat).
+    :param str host_python: Path to the host interpreter with pip available.
+    :return: True if installation succeeded.
+    :rtype: bool
+    """
+    site_pkg = _get_venv_site_packages()
+    if not site_pkg:
+        logger.warning("Venv site-packages not found for fallback pip install.")
+        return False
+
+    req_file = os.path.join(_MAYAMCP_DIR, "requirements.txt")
+    if not os.path.isfile(req_file):
+        install_args = [host_python, "-m", "pip", "install", "--target", site_pkg,
+                        "--quiet", "mcp"]
+    else:
+        install_args = [host_python, "-m", "pip", "install", "--target", site_pkg,
+                        "--quiet", "-r", req_file]
+
+    try:
+        subprocess.run(
+            install_args,
+            check=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=_CREATION_FLAGS,
+        )
+        logger.info("MCP requirements installed via host interpreter.")
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Fallback pip install also failed: %s", exc)
         return False
 
 
@@ -652,14 +826,16 @@ def _find_git():
 
 def _find_system_python():
     """
-    Find a system Python 3.10+ that is NOT Maya's bundled Python.
+    Find a Python 3.10+ interpreter for creating the MCP server venv.
 
-    The MCP server venv needs a standalone Python so it can run as its own
-    process outside Maya.  Maya's ``mayapy`` would work but drags in Maya
-    initialization overhead.
+    The MCP server runs as a standalone process outside Maya, so a system
+    Python is preferred (lighter startup).  If none is found, falls back
+    to Maya's ``mayapy`` which is a full Python interpreter and works fine
+    — just has slightly more startup overhead.
 
-    Search order: ``python``, ``python3``, ``py -3`` (Windows launcher),
-    then well-known install locations.
+    Search order:
+        1. ``python3``, ``python``, ``py -3`` on PATH (non-Maya)
+        2. Maya's ``mayapy`` (fallback — always available, 3.10+)
 
     :return: Path to a suitable Python executable, or None.
     :rtype: str or None
@@ -729,7 +905,46 @@ def _find_system_python():
                 OSError, FileNotFoundError, ValueError):
             continue
 
-    logger.warning("No system Python 3.10+ found")
+    # --- Fallback: use Maya's mayapy as the venv creator ---
+    # mayapy is a full standalone Python interpreter (3.10+ in Maya 2024+).
+    # It works fine for creating venvs and running MCP servers — just has
+    # slightly more startup overhead than a bare system Python.
+    mayapy = _find_mayapy()
+    if mayapy:
+        logger.info("No system Python 3.10+ found — using mayapy: %s", mayapy)
+        return mayapy
+
+    logger.warning("No system Python 3.10+ found and mayapy not available")
+    return None
+
+
+def _find_mayapy():
+    """
+    Locate Maya's ``mayapy`` interpreter from the running Maya process.
+
+    Uses ``sys.executable`` to find the Maya application, then resolves
+    ``mayapy`` relative to it.
+
+    :return: Absolute path to mayapy, or None if not found.
+    :rtype: str or None
+    """
+    exe = sys.executable
+    exe_name = os.path.basename(exe).lower()
+
+    # If we're already running as mayapy, just return it.
+    if exe_name.startswith("mayapy"):
+        return exe
+
+    # Running inside Maya — find mayapy alongside the Maya binary.
+    if exe_name.startswith("maya"):
+        exe_dir = os.path.dirname(exe)
+        if platform.system() == "Windows":
+            mayapy = os.path.join(exe_dir, "mayapy.exe")
+        else:
+            mayapy = os.path.join(exe_dir, "mayapy")
+        if os.path.isfile(mayapy):
+            return mayapy
+
     return None
 
 

@@ -38,13 +38,17 @@ def _find_maya_paths():
     """
     Locate Maya's non-standard Python include and library directories.
 
-    Maya 2025 stores these in unusual places:
+    On Windows, Maya 2025 stores headers and libraries in unusual places:
         Headers:  <MAYA_ROOT>/include/Python311/Python/Python.h
         Library:  <MAYA_ROOT>/lib/python311.lib
+    The default sysconfig paths point to non-existent directories, so both
+    the compiler and linker fail without this fix.
 
-    The default sysconfig paths point to <MAYA_ROOT>/Python/include/ and
-    <MAYA_ROOT>/Python/libs/ which don't exist, so both the compiler and
-    linker fail.
+    On macOS, Maya embeds Python in a framework inside the .app bundle.
+    ``sysconfig`` returns the correct paths, but ``distutils.sysconfig``
+    (used by setuptools for compilation) returns the system Python framework
+    path, causing "Python.h not found" errors.  We return the correct
+    ``sysconfig`` include path so it can be injected as an extra include dir.
 
     :rtype: tuple(str or None, str or None)
     :return: (include_dir, library_dir) — either may be None if not
@@ -55,18 +59,26 @@ def _find_maya_paths():
     if "Maya" not in exe and "maya" not in exe:
         return None, None
 
+    # --- macOS: distutils picks up the system Python framework instead of
+    #     Maya's embedded framework.  Use sysconfig (which is correct). ---
+    if sys.platform == "darwin":
+        import sysconfig as _sc
+        inc_dir = _sc.get_path("include")
+        if inc_dir and os.path.isdir(inc_dir):
+            return inc_dir, None
+        return None, None
+
+    # --- Windows: Maya puts headers and libs in non-standard locations. ---
     # Walk up from the interpreter to the Maya root.
     # e.g. C:/Program Files/Autodesk/Maya2025/bin/mayapy.exe → Maya2025/
     maya_root = os.path.dirname(os.path.dirname(os.path.abspath(exe)))
 
-    # --- Include directory ---
     # Maya 2025 uses Python 3.11 → include/Python311/Python/
     ver = "Python{}{}".format(sys.version_info.major, sys.version_info.minor)
     inc_dir = os.path.join(maya_root, "include", ver, "Python")
     if not os.path.isdir(inc_dir):
         inc_dir = None
 
-    # --- Library directory ---
     # Maya 2025 puts python311.lib in <MAYA_ROOT>/lib/ instead of
     # <MAYA_ROOT>/Python/libs/ where sysconfig says to look.
     lib_dir = os.path.join(maya_root, "lib")

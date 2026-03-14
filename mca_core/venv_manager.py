@@ -153,9 +153,12 @@ def get_venv_python():
                 return candidate
         return None
     else:
-        python = os.path.join(venv_dir, "bin", "python")
-        if os.path.isfile(python):
-            return python
+        # POSIX: check python first, then mayapy — Maya's venv module may
+        # name the executable after the source interpreter (mayapy).
+        for exe_name in ("python", "mayapy", "python3"):
+            candidate = os.path.join(venv_dir, "bin", exe_name)
+            if os.path.isfile(candidate):
+                return candidate
         return None
 
 
@@ -226,14 +229,19 @@ def ensure_venv():
     os.makedirs(_PREFS_DIR, exist_ok=True)
 
     # Determine the best Python executable for venv creation.
-    # Inside Maya, sys.executable is "maya.exe" which doesn't support
-    # "-m venv" (it shows Maya's command-line help instead).  We need
-    # "mayapy.exe" which is the real Python interpreter in Maya's bin dir.
+    # Inside Maya, sys.executable is the Maya app binary which doesn't
+    # support "-m venv".  We need "mayapy" which is the real Python
+    # interpreter in Maya's bin dir.
     python_exe = sys.executable
     exe_name = os.path.basename(python_exe).lower()
     if exe_name.startswith("maya") and not exe_name.startswith("mayapy"):
-        # Running inside Maya — swap to mayapy in the same directory.
-        mayapy = os.path.join(os.path.dirname(python_exe), "mayapy.exe")
+        # Running inside Maya — find mayapy in the same directory.
+        exe_dir = os.path.dirname(python_exe)
+        if platform.system() == "Windows":
+            mayapy = os.path.join(exe_dir, "mayapy.exe")
+        else:
+            # macOS: mayapy lives alongside Maya in Contents/MacOS/.
+            mayapy = os.path.join(exe_dir, "mayapy")
         if os.path.isfile(mayapy):
             python_exe = mayapy
             logger.debug("Using mayapy for venv creation: %s", mayapy)
@@ -264,9 +272,9 @@ def ensure_venv():
         logger.warning("Venv creation OS error: %s", exc)
         return False
 
-    # Maya's venv module names the venv executable "mayapy.exe" instead of
-    # "python.exe".  Copy it to "python.exe" so pip, ensurepip, and all
-    # standard tooling works correctly inside the venv.
+    # Maya's venv module names the venv executable after the source
+    # interpreter (mayapy/mayapy.exe) instead of python/python.exe.
+    # Copy it so pip, ensurepip, and standard tooling work correctly.
     if platform.system() == "Windows":
         scripts_dir = os.path.join(venv_dir, "Scripts")
         mayapy_in_venv = os.path.join(scripts_dir, "mayapy.exe")
@@ -274,6 +282,14 @@ def ensure_venv():
         if os.path.isfile(mayapy_in_venv) and not os.path.isfile(python_in_venv):
             shutil.copy2(mayapy_in_venv, python_in_venv)
             logger.debug("Copied mayapy.exe -> python.exe in venv Scripts/")
+    else:
+        # macOS/Linux: venv bin/ may have mayapy instead of python.
+        bin_dir = os.path.join(venv_dir, "bin")
+        mayapy_in_venv = os.path.join(bin_dir, "mayapy")
+        python_in_venv = os.path.join(bin_dir, "python")
+        if os.path.isfile(mayapy_in_venv) and not os.path.isfile(python_in_venv):
+            shutil.copy2(mayapy_in_venv, python_in_venv)
+            logger.debug("Copied mayapy -> python in venv bin/")
 
     # Apply Maya-specific fixes (stdlib junction, DLL copy, sitecustomize).
     # Must happen before ensurepip since the venv Python needs these
@@ -589,7 +605,11 @@ def _pip_install_via_host(missing):
 
     # Try mayapy first, then plain python — whichever exists in home.
     host_python = None
-    for exe_name in ("mayapy.exe", "python.exe", "python"):
+    if platform.system() == "Windows":
+        search_names = ("mayapy.exe", "python.exe")
+    else:
+        search_names = ("mayapy", "python3", "python")
+    for exe_name in search_names:
         candidate = os.path.join(maya_bin, exe_name)
         if os.path.isfile(candidate):
             host_python = candidate
