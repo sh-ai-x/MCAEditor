@@ -198,81 +198,45 @@ def _do_auto_open_editor():
         logger.warning("Auto-open editor failed: %s", exc)
 
 
-# --- First-Launch Progress Dialog -------------------------------------------
+# --- First-Launch Splash Screen ---------------------------------------------
 
 def _first_launch_setup():
     """
-    Run full first-launch setup with a progress dialog.
+    Run full first-launch setup with a branded splash screen.
 
     On the very first launch the venv doesn't exist yet, so venv creation,
     pip installs, git clone, and MCP registration all run synchronously.
-    Each step takes several seconds and spawns subprocesses.  Without a
-    progress dialog the user sees Maya freeze for 30-60 seconds and thinks
-    it stalled.
+    Each step takes several seconds and spawns subprocesses.
 
-    This function shows an indeterminate (pulsing) QProgressDialog that
-    updates its label text as each step completes.  ``processEvents()``
-    is called after every status update so the bar keeps animating even
-    though the blocking subprocess calls are on the main thread.
+    All blocking work runs on a background thread via ``run_with_splash()``,
+    which keeps the main thread free to pump the Qt event loop.  This means
+    the Orange Slice mascot GIF animates smoothly and the joke label
+    rotates every few seconds while the user waits.
 
-    MCP setup is run synchronously here (``background=False``) so the
-    user sees all setup steps in the same dialog.  On subsequent launches
-    the venv already exists, so this function is never called and MCP
-    runs in its normal background thread.
+    On subsequent launches the venv already exists, so this function is
+    never called and MCP runs in its normal background thread.
 
     :return: *True* if venv setup succeeded.
     :rtype: bool
     """
-    # Maya 2025+ ships PySide6; older versions use PySide2.
-    try:
-        from PySide6 import QtWidgets, QtCore
-    except ImportError:
-        from PySide2 import QtWidgets, QtCore
+    from mca_maya.splash_progress import run_with_splash
 
-    # Get Maya's main window as the parent so the dialog stays on top.
-    maya_main = None
-    try:
-        from maya.OpenMayaUI import MQtUtil
-        import shiboken2
-        ptr = MQtUtil.mainWindow()
-        if ptr:
-            maya_main = shiboken2.wrapInstance(int(ptr), QtWidgets.QWidget)
-    except Exception:
-        pass
+    def _do_setup(status_callback):
+        """Worker function — runs on background thread."""
+        # Run venv setup (create venv, pip install, inject sys.path).
+        venv_ok = setup_venv(status_callback=status_callback)
 
-    # Build the progress dialog — indeterminate (range 0,0 = pulsing bar),
-    # no cancel button, fixed width so the label text doesn't resize it.
-    # Parented to Maya's main window so it stays on top.
-    dlg = QtWidgets.QProgressDialog(
-        "Preparing MCA Editor for first use...",
-        "",       # Empty cancel button text — hides the button.
-        0, 0,     # min=max=0 → indeterminate / pulsing bar.
-        maya_main,
-    )
-    dlg.setWindowTitle("MCA Editor Setup")
-    dlg.setWindowModality(QtCore.Qt.WindowModal)
-    dlg.setMinimumWidth(400)
-    dlg.setCancelButton(None)  # Remove cancel button entirely.
-    dlg.show()
-    QtWidgets.QApplication.processEvents()
+        # Run MCP setup synchronously so all steps show in the splash.
+        try:
+            from mca_core import mcp_setup
+            mcp_setup.ensure_maya_mcp(background=False,
+                                      status_callback=status_callback)
+        except Exception as exc:
+            logger.warning("MCP setup during first launch failed: %s", exc)
 
-    def _on_status(msg):
-        """Update the dialog label and pump the event loop."""
-        dlg.setLabelText(msg)
-        QtWidgets.QApplication.processEvents()
+        return venv_ok
 
-    # Run venv setup with progress callbacks.
-    venv_ok = setup_venv(status_callback=_on_status)
-
-    # Run MCP setup synchronously so all steps appear in the same dialog.
-    try:
-        from mca_core import mcp_setup
-        mcp_setup.ensure_maya_mcp(background=False, status_callback=_on_status)
-    except Exception as exc:
-        logger.warning("MCP setup during first launch failed: %s", exc)
-
-    dlg.close()
-    return venv_ok
+    return run_with_splash(_do_setup)
 
 
 # --- Plugin Registration ----------------------------------------------------
