@@ -33,6 +33,20 @@ animated mascot GIF, status updates, and rotating orange puns.
 - Removed inline PySide6/PySide2 imports and shiboken2-only code (moved to
   splash_progress.py with proper shiboken6/2 fallback)
 
+### Bug Fix: Output panel blue code echo not showing
+- `_execute_all()`, `_execute_selected()`, `_execute_line()` in `editor_panel.py`
+  gated `write_code_echo()` behind `verbosity == "echo_all"` only
+- Changed to `verbosity != "minimal"` — blue echo now shows at both "normal"
+  and "echo_all" verbosity levels, matching expected Script Editor behavior
+- Users see executed code in blue, then the result below it
+
+### Bug Fix: Code completer inserting wrong completion
+- `accept_completion()` indexed `self._items` (full unfiltered list) using the
+  row from the filtered QListWidget — wrong item when list was filtered
+- Added `self._visible_items` tracking: `_show_items()` stores the filtered
+  subset, `accept_completion()` indexes into that instead
+- Also cleared `_visible_items` in `dismiss()` for clean state
+
 ## Testing
 - Built and deployed all three Maya versions (2024, 2025, 2026)
 - Reset Maya 2024 and 2025 (removed .venv, extraction cache, MCP servers)

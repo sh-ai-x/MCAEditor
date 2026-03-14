@@ -3540,8 +3540,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        # Echo the code to output only when verbosity is "echo_all".
-        if self._verbosity_level == "echo_all":
+        # Echo the executed code in blue so the user sees what ran.
+        # Only suppressed in "minimal" verbosity mode.
+        if self._verbosity_level != "minimal":
             self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
@@ -3565,8 +3566,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        # Echo the code to output only when verbosity is "echo_all".
-        if self._verbosity_level == "echo_all":
+        # Echo the executed code in blue so the user sees what ran.
+        # Only suppressed in "minimal" verbosity mode.
+        if self._verbosity_level != "minimal":
             self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:
@@ -3588,8 +3590,9 @@ class MCAEditorPanel(QWidget):
             return
         # Always save before executing so content is never lost.
         self._save_on_execute(editor)
-        # Echo the code to output only when verbosity is "echo_all".
-        if self._verbosity_level == "echo_all":
+        # Echo the executed code in blue so the user sees what ran.
+        # Only suppressed in "minimal" verbosity mode.
+        if self._verbosity_level != "minimal":
             self._output.write_code_echo(code.strip())
         adapter = self._adapter_manager.get_active_adapter()
         if adapter and adapter.is_connected:

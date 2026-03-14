@@ -276,8 +276,10 @@ class CodeCompleter(QFrame):
         self._provider = provider
         self._settings = settings
 
-        # Current completion items (CompletionItem list).
+        # Current completion items (CompletionItem list) — full unfiltered set.
         self._items = []
+        # Currently visible (filtered) items — matches the QListWidget rows.
+        self._visible_items = []
         # Whether the popup is currently showing an active completion session.
         self._active = False
 
@@ -359,6 +361,7 @@ class CodeCompleter(QFrame):
         self._delay_timer.stop()
         self._active = False
         self._items = []
+        self._visible_items = []
         self._list.clear()
         self.hide()
 
@@ -404,12 +407,15 @@ class CodeCompleter(QFrame):
             self.dismiss()
             return
 
+        # Use _visible_items (matches the QListWidget rows) not _items
+        # (the full unfiltered set).  Using _items here caused the wrong
+        # completion to be inserted after filtering narrowed the list.
         row = self._list.row(current)
-        if row < 0 or row >= len(self._items):
+        if row < 0 or row >= len(self._visible_items):
             self.dismiss()
             return
 
-        item = self._items[row]
+        item = self._visible_items[row]
         self._insert_completion(item)
         self.dismiss()
 
@@ -536,6 +542,10 @@ class CodeCompleter(QFrame):
 
         :param list items: List of CompletionItem instances to display.
         """
+        # Track which items are visible so accept_completion() indexes
+        # into the right list (not the full unfiltered _items).
+        self._visible_items = items
+
         # Match the editor's current font so the popup feels native.
         self._list.setFont(self._editor.font())
 
