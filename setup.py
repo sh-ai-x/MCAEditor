@@ -145,6 +145,7 @@ def collect_extensions():
         os.path.join("mca_qt", "widgets", "connection_dialog.py"),        # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "create_project_dialog.py"),    # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "license_dialog.py"),           # QDialog + PySide2 Shiboken2
+        os.path.join("mca_qt", "widgets", "licensing_dialog.py"),        # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "new_tab_dialog.py"),           # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "project_settings_dialog.py"),  # QDialog + PySide2 Shiboken2
         # --- AI Chat plugin ---
