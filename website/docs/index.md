@@ -22,9 +22,14 @@ MCA Editor replaces Maya's built-in Script Editor with a modern, full-featured c
 - **Output Panel** — Execution results, logging, and error display with full stack traces
 - **Keyboard-Driven** — Comprehensive shortcuts for everything
 
+[See pricing and try free →](pricing.md)
+
 ---
 
 ## Quick Start
+
+[Buy Now — $99](pricing.md){ .md-button .md-button--primary }
+[Try Free for 14 Days](getting-started/installation.md){ .md-button }
 
 1. Download `mcaEditor.py` for your Maya version
 2. Drop it into `~/Documents/maya/<version>/plug-ins/`

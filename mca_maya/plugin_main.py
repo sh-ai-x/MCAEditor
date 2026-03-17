@@ -329,7 +329,10 @@ def _run_license_check():
         return
 
     # Trial expired + no valid license — show licensing dialog, block editor.
-    _show_licensing_dialog(reason=result.status, message=result.message)
+    # Defer to evalDeferred(lowestPriority=True) so the dialog doesn't pop
+    # up DURING Maya startup — a modal dialog at executeDeferred timing
+    # halts the Maya loading sequence (workspace restore, UI layout, etc.).
+    _queue_licensing_dialog(reason=result.status, message=result.message)
 
 
 def _queue_auto_open_inner():
@@ -349,6 +352,48 @@ def _queue_auto_open_inner():
             "_open_editor_window()",
             lowestPriority=True,
         )
+
+
+# Module-level storage for the deferred licensing dialog callback.
+# Same pattern as _pending_trial_banner_fn — the closure captures reason
+# and message, then evalDeferred calls _run_pending_licensing_dialog().
+_pending_licensing_dialog_fn = None
+
+
+def _queue_licensing_dialog(reason, message):
+    """
+    Defer the licensing dialog to ``evalDeferred(lowestPriority=True)``.
+
+    A modal dialog shown during ``executeDeferred`` timing blocks Maya's
+    startup sequence (workspace restore, UI layout, etc.).  Deferring to
+    lowest priority lets Maya finish loading first.
+
+    Uses the same module-level closure pattern as
+    :func:`_queue_trial_banner` so that the string-based evalDeferred
+    can call back into Python with the captured arguments.
+
+    :param str reason: Machine-readable reason code (e.g. ``"not_activated"``).
+    :param str message: Human-readable message for the dialog header.
+    """
+    global _pending_licensing_dialog_fn
+    _pending_licensing_dialog_fn = lambda: _show_licensing_dialog(reason, message)
+    cmds.evalDeferred(
+        "from mca_maya.plugin_main import _run_pending_licensing_dialog; "
+        "_run_pending_licensing_dialog()",
+        lowestPriority=True,
+    )
+
+
+def _run_pending_licensing_dialog():
+    """
+    Execute the stored licensing dialog callback.
+
+    Called via ``evalDeferred`` from ``_queue_licensing_dialog()``.
+    """
+    global _pending_licensing_dialog_fn
+    if _pending_licensing_dialog_fn is not None:
+        _pending_licensing_dialog_fn()
+        _pending_licensing_dialog_fn = None
 
 
 def _show_licensing_dialog(reason, message):
