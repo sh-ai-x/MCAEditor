@@ -28,8 +28,8 @@ Supports **Windows, macOS, and Linux**. Maya 2024, 2025, and 2026.
 
 </div>
 
-[Buy Perpetual — $99](GUMROAD_PERPETUAL_URL){ .md-button .md-button--primary }
-[Buy Annual — $35/yr](GUMROAD_ANNUAL_URL){ .md-button }
+[Buy Perpetual — $99](https://ncomes.gumroad.com/l/ndsupov){ .md-button .md-button--primary }
+[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/ndsupov){ .md-button }
 
 ---
 
