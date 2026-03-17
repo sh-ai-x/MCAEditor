@@ -501,6 +501,78 @@ def _get_pyvenv_home(venv_dir):
 
 def _fix_maya_venv(venv_dir):
     """
+    Apply platform-specific fixes for venvs created from Maya's Python.
+
+    Maya's ``mayapy`` resolves ``PYTHONHOME`` using hardcoded relative path
+    logic.  When the executable is symlinked/copied into a venv directory,
+    the resolved path doesn't exist and Python cannot find the standard
+    library (``encodings``, ``os``, etc.).
+
+    **Windows** — ``mayapy.exe`` resolves ``PYTHONHOME`` to
+    ``<exe_dir>/../Python/``.  Fix: directory junction
+    ``<venv>/Python`` → ``<maya>/Python``, DLL copy, sitecustomize.
+
+    **macOS** — ``mayapy`` is a framework Python that resolves
+    ``PYTHONHOME`` to ``<exe_dir>/../../Frameworks/Python.framework/
+    Versions/Current/``.  Fix: symlink ``<venv>/Frameworks`` →
+    ``<maya_contents>/Frameworks``.
+
+    :param str venv_dir: Path to the venv root directory.
+    """
+    maya_bin = _get_pyvenv_home(venv_dir)
+    if maya_bin is None:
+        return
+
+    if platform.system() == "Darwin":
+        _fix_maya_venv_macos(venv_dir, maya_bin)
+    elif platform.system() == "Windows":
+        _fix_maya_venv_windows(venv_dir, maya_bin)
+
+
+def _fix_maya_venv_macos(venv_dir, maya_bin):
+    """
+    Apply macOS-specific fixes for venvs created from Maya's Python.
+
+    Maya's ``mayapy`` on macOS is a framework Python.  It resolves
+    ``PYTHONHOME`` by walking up from the executable to find
+    ``Frameworks/Python.framework/Versions/Current/``.  When symlinked
+    into a venv's ``bin/`` directory, the walk resolves to
+    ``<venv>/Frameworks/...`` which doesn't exist.
+
+    Fix: create a symlink from ``<venv>/Frameworks`` to Maya's
+    ``Contents/Frameworks`` so the framework path resolution succeeds.
+
+    :param str venv_dir: Path to the venv root directory.
+    :param str maya_bin: The ``home`` directory from ``pyvenv.cfg``
+        (e.g. ``/Applications/Autodesk/maya2024/Maya.app/Contents/MacOS``).
+    """
+    # Verify this is a Maya venv — check for mayapy in the home dir.
+    if not os.path.isfile(os.path.join(maya_bin, "mayapy")):
+        return
+
+    # Maya's Frameworks directory is a sibling of MacOS/:
+    #   .../Maya.app/Contents/MacOS/mayapy
+    #   .../Maya.app/Contents/Frameworks/Python.framework/...
+    maya_contents = os.path.dirname(maya_bin)
+    maya_frameworks = os.path.join(maya_contents, "Frameworks")
+    if not os.path.isdir(maya_frameworks):
+        logger.warning("Maya Frameworks dir not found: %s", maya_frameworks)
+        return
+
+    # Create symlink: <venv>/Frameworks -> <maya_contents>/Frameworks
+    # The venv's bin/python symlinks to mayapy, which resolves
+    # PYTHONHOME to <venv>/Frameworks/Python.framework/Versions/Current/.
+    venv_frameworks = os.path.join(venv_dir, "Frameworks")
+    if not os.path.exists(venv_frameworks):
+        try:
+            os.symlink(maya_frameworks, venv_frameworks)
+            logger.debug("Created symlink: %s -> %s", venv_frameworks, maya_frameworks)
+        except OSError as exc:
+            logger.warning("Failed to create Frameworks symlink: %s", exc)
+
+
+def _fix_maya_venv_windows(venv_dir, maya_bin):
+    """
     Apply Windows-specific fixes for venvs created from Maya's Python.
 
     Maya's ``mayapy.exe`` resolves ``PYTHONHOME`` to ``<exe_dir>/../Python/``
@@ -518,20 +590,12 @@ def _fix_maya_venv(venv_dir):
        ``bin/`` so compiled extensions like ``_ssl.pyd`` can find their
        runtime dependencies (``libssl``, ``libcrypto``).
 
-    Does nothing on non-Windows platforms or for non-Maya venvs.
-
     :param str venv_dir: Path to the venv root directory.
+    :param str maya_bin: The ``home`` directory from ``pyvenv.cfg``
+        (e.g. ``C:/Program Files/Autodesk/Maya2025/bin``).
     """
-    # Only needed on Windows — macOS/Linux venvs use symlinks properly.
-    if platform.system() != "Windows":
-        return
-
-    # Check if this venv was created from Maya's Python.
-    maya_bin = _get_pyvenv_home(venv_dir)
-    if maya_bin is None:
-        return
+    # Verify this is a Maya venv.
     if not os.path.isfile(os.path.join(maya_bin, "mayapy.exe")):
-        # Not a Maya venv — standard Python venvs work fine.
         return
 
     maya_root = os.path.dirname(maya_bin)
