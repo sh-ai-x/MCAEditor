@@ -90,6 +90,25 @@ activation.
 - Falls back to `certifi` if `/etc/ssl/cert.pem` is missing
 - All three Mac Maya builds (2024, 2025, 2026) rebuilt and deployed with the fix
 
+## Website Downloads
+- Added download zips to installation page for both Windows and macOS
+- Download tables split by platform with `.md-button` styled links
+- Zips contain only `mcaEditor.py` + `README.md` (no compiled internals exposed)
+- All 6 zips uploaded to VPS at `/var/www/mcaeditor.com/downloads/`
+
+## Build Pipeline Changes
+- `build_maya.py`: `create_zip()` now produces slim download zips (single-file plugin + README only)
+  instead of zipping the full dist folder with all compiled files
+- Zip creation moved after `pack_and_deploy()` in the pipeline (needs the single-file .py first)
+- `README.md` sourced from `G:\My Drive\Projects\MCAEditor\README.md`
+- `dist/latest/` folder created to hold all current zips for Gumroad upload
+
+## Mac Mini Remote Access
+- SSH access established: `ncomes@192.168.68.72` (Nathans-Mac-mini.local)
+- Can now download Mac builds remotely instead of building on the Mac manually
+- macOS builds still must be compiled on Mac (Cython produces .so, not .pyd)
+
 ## Remaining
 - Annual Gumroad product Content tab needs post-purchase instructions (retrieve key URL)
 - Perpetual Gumroad product Content tab also needs the same instructions
+- Upload the 6 zips from `dist/latest/` to both Gumroad products

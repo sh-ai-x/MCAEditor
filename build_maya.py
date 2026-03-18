@@ -637,30 +637,42 @@ def clean_source_tree():
         print("  Removed: build/")
 
 
-def create_zip():
+def create_zip(maya_version):
     """
-    Create a zip archive of the distribution folder.
+    Create a website-distribution zip containing only the single-file plugin
+    and README.
 
-    The zip includes the distribution directory name as the top-level folder,
-    so unzipping produces ``MCAEditor-MayaXXXX/`` with all contents inside.
+    The zip contains ``mcaEditor.py`` (renamed from the version-specific file)
+    and ``README.md`` at the top level — no nested folder.  This is the file
+    users download from mcaeditor.com.
 
+    :param str maya_version: Maya version year (e.g. "2024", "2025").
     :return: Path to the created zip file.
     :rtype: str
     """
-    print("\n--- Creating zip archive ---")
+    print("\n--- Creating download zip ---")
 
     # Ensure the parent directory exists.
     os.makedirs(os.path.dirname(ZIP_PATH), exist_ok=True)
 
-    dist_parent = os.path.join(PROJECT_ROOT, "dist")
+    # Path to the single-file plugin produced by pack_and_deploy().
+    single_file = os.path.join(PROJECT_ROOT, "dist", "mcaEditor-Maya{}.py".format(maya_version))
+    if not os.path.isfile(single_file):
+        print("  ERROR: Single-file plugin not found: {}".format(single_file))
+        return ZIP_PATH
+
     with zipfile.ZipFile(ZIP_PATH, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(DIST_DIR):
-            for filename in files:
-                filepath = os.path.join(root, filename)
-                # Archive name preserves the top-level dist folder name.
-                arcname = os.path.relpath(filepath, dist_parent)
-                zf.write(filepath, arcname)
-                print("  Added: {}".format(arcname))
+        # Add the plugin as "mcaEditor.py" (users drop this into plug-ins/).
+        zf.write(single_file, "mcaEditor.py")
+        print("  Added: mcaEditor.py")
+
+        # Include README.md from Google Drive if available.
+        readme_path = os.path.join("G:\\My Drive\\Projects\\MCAEditor", "README.md")
+        if os.path.isfile(readme_path):
+            zf.write(readme_path, "README.md")
+            print("  Added: README.md")
+        else:
+            print("  WARNING: README.md not found at {}".format(readme_path))
 
     print("\nZip created: {}".format(ZIP_PATH))
     return ZIP_PATH
@@ -764,14 +776,14 @@ def main():
     # Step 8: Write install/uninstall scripts into dist.
     create_install_scripts()
 
-    # Step 9: Create the zip archive.
-    zip_path = create_zip()
-
-    # Step 10: Clean in-place build artifacts from the source tree.
+    # Step 9: Clean in-place build artifacts from the source tree.
     clean_source_tree()
 
-    # Step 11: Pack single-file plugin and deploy to Maya's plug-ins folder.
+    # Step 10: Pack single-file plugin and deploy to Maya's plug-ins folder.
     pack_and_deploy(args.maya_version)
+
+    # Step 11: Create the download zip (single-file plugin + README only).
+    zip_path = create_zip(args.maya_version)
 
     # Done!
     print()
