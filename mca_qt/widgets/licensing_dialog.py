@@ -457,15 +457,17 @@ class LicensingDialog(QDialog):
             activations = None
 
         if activations is None:
-            # Online info not available — show placeholder.
+            # Online info not available — show placeholder with web link.
             self._activations_table = None
 
             placeholder = QLabel(
-                "Online activation management is not available yet.\n\n"
-                "Machine activation details will appear here when the "
-                "license server is connected."
+                "Could not connect to the activation server.\n\n"
+                "You can manage your activations online at:\n"
+                "<a href='https://api.mcaeditor.com/manage' style='color: #E8922A;'>"
+                "api.mcaeditor.com/manage</a>"
             )
             placeholder.setWordWrap(True)
+            placeholder.setOpenExternalLinks(True)
             placeholder.setStyleSheet("color: #888; font-size: 12px;")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(placeholder)
@@ -623,6 +625,21 @@ class LicensingDialog(QDialog):
             # Close after a short delay so the user sees the success message.
             from mca_qt.qt_compat import QTimer
             QTimer.singleShot(1200, self._on_success)
+
+        elif result.get("status") == "limit_reached":
+            # Machine limit reached — direct user to Manage tab.
+            ents = result.get("entitlements", {})
+            active = ents.get("active_count", "?")
+            limit = ents.get("machine_limit", 3)
+            self._feedback_label.setText(
+                "<span style='color: {};'>Machine limit reached ({}/{})."
+                " Deactivate another machine on the Manage tab.</span>"
+                .format(_ORANGE, active, limit)
+            )
+            # Switch to the Manage Activations tab.
+            self._tabs.setCurrentIndex(2)
+            logger.warning("License activation: machine limit reached (%s/%s)", active, limit)
+
         else:
             self._feedback_label.setText(
                 "<span style='color: {};'>{}</span>"
@@ -676,12 +693,28 @@ class LicensingDialog(QDialog):
         """
         Deactivate the license on another machine.
 
-        Stub: not available until the license server is connected.
+        Calls the activation server to remove the machine, then refreshes
+        the activations table.
 
         :param str machine_id: Identifier for the machine to deactivate.
         """
-        logger.info("Deactivate other machine requested: %s (not yet available)",
-                     machine_id)
+        stored_key = self._settings.get("license_key", "")
+        if not stored_key:
+            logger.warning("Cannot deactivate other machine — no key stored")
+            return
+
+        try:
+            from mca_core.activation import deactivate_machine
+            result = deactivate_machine(stored_key, machine_id)
+
+            if result["success"]:
+                logger.info("Remote deactivation successful: %s", machine_id[:12])
+                # Refresh the activations table.
+                self._refresh_activations()
+            else:
+                logger.warning("Remote deactivation failed: %s", result.get("message"))
+        except ImportError:
+            logger.warning("Deactivate other machine: activation module unavailable")
 
     def _refresh_activations(self):
         """

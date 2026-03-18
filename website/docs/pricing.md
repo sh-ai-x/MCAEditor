@@ -29,7 +29,7 @@ Supports **Windows, macOS, and Linux**. Maya 2024, 2025, and 2026.
 </div>
 
 [Buy Perpetual — $99](https://ncomes.gumroad.com/l/ndsupov){ .md-button .md-button--primary }
-[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/ndsupov){ .md-button }
+[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/qkscq){ .md-button }
 
 ---
 
@@ -69,6 +69,7 @@ No account or credit card needed — just install and run.
 - One license covers **3 machine activations**
 - Perpetual license covers the **current major version** (MCA Editor 1.x)
 - Annual license stays active as long as subscription is current
+- Manage your activations at [api.mcaeditor.com/manage](https://api.mcaeditor.com/manage)
 - Need more seats? Email [info@mechart.org](mailto:info@mechart.org)
 
 ---
