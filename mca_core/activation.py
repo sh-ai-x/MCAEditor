@@ -204,6 +204,64 @@ def _delete_cached_token():
 # HTTP Helpers
 # ============================================================================
 
+def _get_ssl_context():
+    """
+    Build an SSL context that works in Maya's embedded Python.
+
+    Maya's bundled Python on macOS ships with no CA certificates, so the
+    default ``ssl.create_default_context()`` has an empty trust store and
+    every HTTPS request fails with CERTIFICATE_VERIFY_FAILED.  This
+    helper detects that situation and loads the macOS system certificate
+    bundle from ``/etc/ssl/cert.pem``.
+
+    :return: An SSL context with CA certificates loaded, or None if the
+        default context already works.
+    :rtype: ssl.SSLContext or None
+    """
+    import ssl
+
+    ctx = ssl.create_default_context()
+
+    # Check if the default context has any CA certificates loaded.
+    stats = ctx.cert_store_stats()
+    if stats.get("x509_ca", 0) > 0:
+        # Default context already has certificates — no fix needed.
+        return None
+
+    # Maya's Python on macOS has an empty cert store.  Try loading the
+    # macOS system certificate bundle.
+    if platform.system() == "Darwin":
+        macos_cert_bundle = "/etc/ssl/cert.pem"
+        if os.path.isfile(macos_cert_bundle):
+            try:
+                ctx.load_verify_locations(macos_cert_bundle)
+                logger.debug("Loaded macOS system certificates from %s", macos_cert_bundle)
+                return ctx
+            except Exception as exc:
+                logger.debug("Failed to load macOS cert bundle: %s", exc)
+
+    # Try certifi as a fallback (available if the venv has it installed).
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+        logger.debug("Loaded certificates from certifi")
+        return ctx
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug("Failed to load certifi certs: %s", exc)
+
+    # No certificates found — return None and let urllib use its default
+    # (which will likely fail on macOS Maya, but works on Windows).
+    logger.debug("No CA certificates found for SSL context")
+    return None
+
+
+# Cache the SSL context so we only build it once per session.
+_SSL_CONTEXT = None
+_SSL_CONTEXT_INITIALIZED = False
+
+
 def _post_json(url, payload):
     """
     Send a JSON POST request to the license server.
@@ -212,13 +270,24 @@ def _post_json(url, payload):
     dependency to mca_core.  Returns the parsed JSON response or
     None on network failure.
 
+    On macOS, Maya's embedded Python ships with no CA certificates,
+    so this function builds a custom SSL context on first use that
+    loads the system certificate bundle.
+
     :param str url: Full URL to POST to
     :param dict payload: JSON-serializable payload
     :return: Tuple of (status_code, response_dict) or (None, None) on failure
     :rtype: tuple
     """
+    global _SSL_CONTEXT, _SSL_CONTEXT_INITIALIZED
+
     import urllib.request
     import urllib.error
+
+    # Build the SSL context once and cache it for the session.
+    if not _SSL_CONTEXT_INITIALIZED:
+        _SSL_CONTEXT = _get_ssl_context()
+        _SSL_CONTEXT_INITIALIZED = True
 
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -229,7 +298,12 @@ def _post_json(url, payload):
     )
 
     try:
-        resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT)
+        # Pass the SSL context if we built one, otherwise let urllib
+        # use its default (works fine on Windows).
+        if _SSL_CONTEXT is not None:
+            resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT, context=_SSL_CONTEXT)
+        else:
+            resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT)
         status = resp.status
         resp_data = json.loads(resp.read().decode("utf-8"))
         return status, resp_data
