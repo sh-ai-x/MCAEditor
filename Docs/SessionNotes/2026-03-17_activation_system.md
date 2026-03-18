@@ -78,7 +78,18 @@ activation.
 - Expired key tested: MCA-AG4A-BD7W-ZFAC-OF5O correctly rejected ("expired on 2026-03-16")
 - Valid perpetual key tested: MCA-AMTA-CWLU-X23D-VKRY accepted and activated
 
+## macOS SSL Fix (Later Session)
+- Maya's embedded Python on macOS ships with **zero CA certificates** in its SSL
+  trust store — `ssl.create_default_context().cert_store_stats()` returns all zeros
+- Every HTTPS request from Maya Python failed with `CERTIFICATE_VERIFY_FAILED`
+- This caused `activate()` to always fall back to offline-only mode on Mac
+- **Fix**: Added `_get_ssl_context()` in `mca_core/activation.py` that detects the
+  empty cert store and loads the macOS system bundle from `/etc/ssl/cert.pem`
+- SSL context is built once and cached for the session (`_SSL_CONTEXT` module global)
+- Windows is unaffected — Python uses the Windows certificate store automatically
+- Falls back to `certifi` if `/etc/ssl/cert.pem` is missing
+- All three Mac Maya builds (2024, 2025, 2026) rebuilt and deployed with the fix
+
 ## Remaining
 - Annual Gumroad product Content tab needs post-purchase instructions (retrieve key URL)
 - Perpetual Gumroad product Content tab also needs the same instructions
-- Session notes and code pushed to GitHub
