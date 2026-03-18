@@ -39,7 +39,7 @@ Side effects:
     - Clones a git repo into ``mca_preferences/mcp_servers/MayaMCP/``
     - Creates a venv at ``mca_preferences/mcp_servers/MayaMCP/.venv/``
     - Copies ``mcp_maya_server.py`` and ``mcp_editor_server.py`` to deploy dir
-    - Modifies ``~/.claude.json`` (via ``claude`` CLI or direct JSON write)
+    - Modifies ``~/.claude.json`` project scope (via ``claude`` CLI or direct JSON write)
 """
 
 import json
@@ -692,10 +692,12 @@ def _is_registered(server_name):
     """
     Check if an MCP server is registered in Claude Code's config.
 
-    Looks for the given server name entry in ``~/.claude.json``.
+    Checks the project-scoped entry in ``~/.claude.json`` first (preferred),
+    then falls back to checking the global ``mcpServers`` section for
+    backwards compatibility.
 
     :param str server_name: The MCP server registration name to check.
-    :return: True if already registered.
+    :return: True if already registered in either project or global scope.
     :rtype: bool
     """
     if not os.path.isfile(_CLAUDE_CONFIG_PATH):
@@ -707,18 +709,30 @@ def _is_registered(server_name):
     except (json.JSONDecodeError, OSError):
         return False
 
-    # Check for the server in the mcpServers section.
-    mcp_servers = config.get("mcpServers", {})
-    return server_name in mcp_servers
+    # Check project-scoped registration first (preferred location).
+    project_key = _get_project_key(config)
+    if project_key:
+        project_entry = config.get("projects", {}).get(project_key, {})
+        project_servers = project_entry.get("mcpServers", {})
+        if server_name in project_servers:
+            return True
+
+    # Fall back to checking global scope (legacy registrations).
+    global_servers = config.get("mcpServers", {})
+    return server_name in global_servers
 
 
 def _register_server_with_claude_code(server_name, server_script_path):
     """
-    Register an MCP server with Claude Code.
+    Register an MCP server with Claude Code at project scope.
+
+    Registers into the project-scoped section of ``~/.claude.json`` so the
+    MCP servers only appear when Claude Code is opened in the MCAEditor
+    project directory, not globally across all projects.
 
     Strategy:
-        1. Try ``claude mcp add-json`` CLI command (preferred — handles all config)
-        2. Fallback: write directly to ``~/.claude.json``
+        1. Try ``claude mcp add-json`` CLI command with ``--scope project``
+        2. Fallback: write directly to the project entry in ``~/.claude.json``
 
     The registration tells Claude Code how to start the MCP server:
     use MayaMCP's venv Python to run the server script.
@@ -737,33 +751,36 @@ def _register_server_with_claude_code(server_name, server_script_path):
         "args": [server_script_path.replace("\\", "/")],
     }
 
-    # Try the Claude CLI first.
+    # Try the Claude CLI first with project scope.
     claude_cli = _find_claude_code()
     if claude_cli:
         config_json = json.dumps(server_config)
         try:
             subprocess.run(
                 [claude_cli, "mcp", "add-json", server_name, config_json,
-                 "--scope", "user"],
+                 "--scope", "project"],
                 check=True,
                 timeout=30,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=_CREATION_FLAGS,
             )
-            logger.info("Registered MCP server via Claude CLI: %s", server_name)
+            logger.info("Registered MCP server via Claude CLI (project scope): %s", server_name)
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("Claude CLI registration for %s failed, falling back to direct write: %s",
                            server_name, exc)
 
-    # Fallback: write directly to ~/.claude.json.
+    # Fallback: write directly to the project entry in ~/.claude.json.
     _register_direct(server_name, server_config)
 
 
 def _register_direct(server_name, server_config):
     """
-    Register by writing directly to ``~/.claude.json``.
+    Register by writing directly to the project entry in ``~/.claude.json``.
+
+    Writes into the project-scoped ``mcpServers`` so the server only appears
+    when Claude Code is opened in the MCAEditor project directory.
 
     Creates the file if it doesn't exist, or merges into the existing config.
 
@@ -782,19 +799,84 @@ def _register_direct(server_name, server_config):
             # Start fresh rather than corrupt existing config.
             config = {}
 
-    # Ensure mcpServers section exists.
-    if "mcpServers" not in config:
-        config["mcpServers"] = {}
+    # Find or create the project entry for our project directory.
+    project_key = _get_project_key(config)
+    if not project_key:
+        # No existing entry — create one using the repo root with forward slashes.
+        project_key = _get_repo_root().replace("\\", "/")
 
-    # Add the server.
-    config["mcpServers"][server_name] = server_config
+    # Ensure the projects section and our project entry exist.
+    if "projects" not in config:
+        config["projects"] = {}
+    if project_key not in config["projects"]:
+        config["projects"][project_key] = {}
+
+    # Ensure mcpServers section exists within the project entry.
+    project_entry = config["projects"][project_key]
+    if "mcpServers" not in project_entry:
+        project_entry["mcpServers"] = {}
+
+    # Add the server to the project-scoped section.
+    project_entry["mcpServers"][server_name] = server_config
 
     try:
         with open(_CLAUDE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
-        logger.info("Registered %s via direct write to %s", server_name, _CLAUDE_CONFIG_PATH)
+        logger.info("Registered %s in project scope (%s) via direct write",
+                     server_name, project_key)
     except OSError as exc:
         logger.warning("Failed to write claude.json: %s", exc)
+
+
+# =============================================================================
+# Project Path Helpers
+# =============================================================================
+
+def _get_repo_root():
+    """
+    Get the MCAEditor repository root directory.
+
+    Resolves from this file's location — ``mca_core/`` is one level below
+    the repo root.
+
+    :return: Absolute path to the repo root.
+    :rtype: str
+    """
+    # This file lives at <repo>/mca_core/mcp_setup.py.
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_project_key(config):
+    """
+    Find the matching project key in Claude Code's config for this repo.
+
+    Claude Code stores project entries with forward-slash paths as keys
+    (e.g. ``E:/Projects/MCAEditor``).  This checks both forward-slash and
+    backslash variants since the key format may vary.
+
+    :param dict config: The parsed ``~/.claude.json`` config.
+    :return: The matching project key, or None if no entry exists.
+    :rtype: str or None
+    """
+    repo_root = _get_repo_root()
+    projects = config.get("projects", {})
+
+    # Try forward-slash variant first (most common in claude.json).
+    forward = repo_root.replace("\\", "/")
+    if forward in projects:
+        return forward
+
+    # Try backslash variant.
+    backward = repo_root.replace("/", "\\")
+    if backward in projects:
+        return backward
+
+    # Try normalized path as last resort.
+    normalized = os.path.normpath(repo_root)
+    if normalized in projects:
+        return normalized
+
+    return None
 
 
 # =============================================================================
