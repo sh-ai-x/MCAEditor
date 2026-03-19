@@ -56,8 +56,8 @@ Set `min_editor_version` to the oldest MCA Editor version your plugin supports:
 
 ---
 
-## Plugin Marketplace
+## Selling Your Plugin
 
-A plugin marketplace for MCA Editor is planned. When available, you'll be able to
-submit plugins for discovery by other MCA Editor users. Details will be published
-here when the marketplace launches.
+If you want to sell your plugin, MCA handles all licensing automatically — you don't write any license code. Set up a Gumroad product, register with MCA, and ship a signed manifest alongside your code.
+
+See [Publishing a Plugin](publishing.md) for the full walkthrough, including revenue split, registration, and getting listed in the plugin directory.

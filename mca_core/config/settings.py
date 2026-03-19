@@ -191,6 +191,7 @@ class MCASettings:
 
         # --- Plugins ---
         "disabled_plugins": [],  # Plugin IDs to skip on load.
+        "plugin_license_server_url": "https://activate.mcaeditor.com",  # Activation server for paid plugins.
 
         # --- Licensing ---
         "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).

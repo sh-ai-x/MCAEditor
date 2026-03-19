@@ -681,12 +681,60 @@ class PluginManager:
         """
         Load and activate a single plugin from its manifest.
 
+        Before importing the module, checks for a ``plugin_manifest.json``
+        monetization manifest.  If present, the manifest signature and
+        version compatibility are verified, and paid plugins are gated
+        behind a license check (currently a stub).
+
         :param dict manifest: The plugin manifest (must include _path).
         :return: True if the plugin was loaded successfully.
         :rtype: bool
         """
         plugin_id = manifest.get("id", "unknown")
         plugin_path = manifest.get("_path", "")
+
+        # --- Monetization manifest gate -----------------------------------------
+        # Check for a plugin_manifest.json alongside the regular plugin.json.
+        # If absent, this is a legacy/free plugin and we skip straight to loading.
+        from mca_core import plugin_manifest, plugin_license
+        from mca_core import __version__
+
+        pm = plugin_manifest.load(plugin_path)
+        if pm is not None:
+            # Verify the manifest signature to detect tampering.
+            sig_valid, sig_reason = plugin_manifest.verify_signature(pm)
+            if not sig_valid:
+                logger.warning(
+                    "Plugin '%s' rejected: %s", plugin_id, sig_reason
+                )
+                return False
+
+            # Check that this MCA Editor version meets the plugin's minimum.
+            if not plugin_manifest.is_compatible(pm, __version__):
+                logger.warning(
+                    "Plugin '%s' requires MCA Editor %s (current: %s) — skipping",
+                    plugin_id, pm.min_mca_version, __version__,
+                )
+                return False
+
+            # Paid plugins require a license check (currently a stub).
+            # "subscription" is treated as "paid" until subscription support ships.
+            pricing_model = pm.pricing.get("model", "")
+            if pricing_model in ("paid", "subscription"):
+                is_licensed, reason = plugin_license.check(pm)
+                if not is_licensed:
+                    logger.info(
+                        "Plugin '%s' not loaded: %s", plugin_id, reason
+                    )
+                    return False
+
+            # Free or unrecognized pricing model — proceed normally.
+            logger.debug(
+                "Plugin '%s' passed manifest checks (pricing=%s)",
+                plugin_id, pricing_model,
+            )
+
+        # --- Standard plugin loading (unchanged) --------------------------------
         entry_point = manifest.get("entry_point", "__init__.py")
         entry_path = os.path.join(plugin_path, entry_point)
 

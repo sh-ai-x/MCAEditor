@@ -57,6 +57,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Pricing: pricing.md
+  - Plugins: plugins.md
   - Getting Started:
     - Installation: getting-started/installation.md
     - First Launch: getting-started/first-launch.md
@@ -76,4 +77,5 @@ nav:
     - Examples: plugin-development/examples.md
     - Error Handling: plugin-development/error-handling.md
     - Sharing & Distribution: plugin-development/distribution.md
+    - Publishing a Plugin: plugin-development/publishing.md
   - Changelog: changelog.md
