@@ -1,12 +1,15 @@
 name: Deploy Docs
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'website/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/deploy-docs.yml'
+# DISABLED — site is hosted on Hostinger VPS, not GitHub Pages.
+# Use tools/deploy_website.py to deploy instead.
+# on:
+#   push:
+#     branches: [main]
+#     paths:
+#       - 'website/**'
+#       - 'mkdocs.yml'
+#       - '.github/workflows/deploy-docs.yml'
+on: workflow_dispatch
 
 permissions:
   contents: write

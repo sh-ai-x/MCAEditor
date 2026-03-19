@@ -1609,6 +1609,26 @@ def show_mca_editor():
     if _show_license_notice and _license_message:
         _mca_editor_window._on_status_message(_license_message, 10000)
 
+    # --- One-time update check -----------------------------------------------
+    # Check if a newer version is available (background thread, non-blocking).
+    # If online and an update exists, show a yellow warning in the output panel.
+    # If offline or up-to-date, nothing is printed.
+    try:
+        from mca_core.version_check import check_for_update
+
+        # Capture the window ref for the closure — the global may change.
+        _update_win = _mca_editor_window
+
+        def _on_update_available(version, url):
+            """Write update notification to the output panel from the main thread."""
+            QTimer.singleShot(0, lambda: _update_win._panel._output.write_warning(
+                "MCA Editor v{} is available.  Download at: {}".format(version, url)
+            ))
+
+        check_for_update(_on_update_available)
+    except Exception as exc:
+        logger.debug("Update check setup failed: %s", exc)
+
     logger.info("MCA Editor dockable window created")
 
 
