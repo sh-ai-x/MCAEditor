@@ -57,6 +57,11 @@ _PREFS_DIR = get_prefs_dir()
 # Each gets its own venv:  .venv-3.10/  .venv-3.11/  etc.
 _VENV_DIR_BASE = ".venv"
 
+# Version marker file placed inside the venv.  When the MCA Editor
+# version changes (user installs a new plugin build), the venv is
+# wiped and rebuilt so no stale packages linger.
+_VENV_VERSION_FILE = ".mca_venv_version"
+
 # Packages required for v1 of MCA Editor.
 # Maps pip package name (for install) → importable module name (for checking).
 # These don't always match (e.g. pywinpty installs as "winpty").
@@ -707,6 +712,70 @@ def _pip_install_via_host(missing):
 
 # --- Convenience: Full Setup --------------------------------------------------
 
+def _check_venv_version():
+    """
+    Wipe the managed venv if it was built by a different MCA Editor version.
+
+    Reads the ``.mca_venv_version`` marker file inside the venv directory
+    and compares it to the current ``__version__``.  If they differ (or the
+    marker is missing from an older install), the entire venv is deleted so
+    that ``ensure_venv()`` + ``ensure_packages()`` rebuild it from scratch.
+
+    This prevents stale or incompatible packages from lingering across
+    plugin updates.
+    """
+    from mca_core import __version__
+
+    venv_dir = get_venv_dir()
+    if not os.path.isdir(venv_dir):
+        # No venv yet — nothing to wipe.
+        return
+
+    version_file = os.path.join(venv_dir, _VENV_VERSION_FILE)
+
+    # Read the stored version (if any).
+    stored_version = ""
+    if os.path.isfile(version_file):
+        try:
+            with open(version_file, "r") as f:
+                stored_version = f.read().strip()
+        except (IOError, OSError):
+            pass
+
+    if stored_version == __version__:
+        # Same version — venv is current.
+        return
+
+    # Version mismatch — wipe the venv for a clean slate.
+    logger.info(
+        "MCA Editor version changed (%s -> %s) — rebuilding venv",
+        stored_version or "unknown", __version__,
+    )
+    try:
+        shutil.rmtree(venv_dir)
+        logger.info("Old venv removed: %s", venv_dir)
+    except (OSError, shutil.Error) as exc:
+        logger.warning("Failed to remove old venv: %s", exc)
+
+
+def _stamp_venv_version():
+    """
+    Write the current MCA Editor version into the venv's marker file.
+
+    Called after ``ensure_packages()`` succeeds so that subsequent launches
+    see the venv as current and skip the wipe.
+    """
+    from mca_core import __version__
+
+    venv_dir = get_venv_dir()
+    version_file = os.path.join(venv_dir, _VENV_VERSION_FILE)
+    try:
+        with open(version_file, "w") as f:
+            f.write(__version__)
+    except (IOError, OSError) as exc:
+        logger.warning("Failed to write venv version marker: %s", exc)
+
+
 def setup_venv(requirements=None, status_callback=None):
     """
     One-call convenience: ensure venv exists, install packages, inject path.
@@ -734,6 +803,11 @@ def setup_venv(requirements=None, status_callback=None):
 
     all_ok = True
 
+    # Step 0: Wipe stale venv on version change.
+    # When the user installs a new plugin build, nuke the old venv so
+    # all packages are reinstalled fresh — prevents stale dependency bugs.
+    _check_venv_version()
+
     # Step 1: Ensure venv exists.
     _status("Creating Python environment...")
     if not ensure_venv():
@@ -751,6 +825,11 @@ def setup_venv(requirements=None, status_callback=None):
             all_ok = False
     else:
         all_ok = False
+
+    # Stamp the venv with the current version so future launches know
+    # this venv is up-to-date and skip the wipe.
+    if all_ok:
+        _stamp_venv_version()
 
     # Step 3: Inject path (even if package install failed — previously
     # installed packages should still be usable).

@@ -195,6 +195,7 @@ class MCASettings:
         # --- Licensing ---
         "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).
         "first_launch_date": "",         # ISO datetime of first launch (trial start).
+        "trial_version": "",             # Version that started the current trial period.
 
         # --- Session Persistence ---
         "editor_was_open": False,        # Whether the editor was open when Maya last shut down.

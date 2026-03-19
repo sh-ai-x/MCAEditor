@@ -100,18 +100,24 @@ class LicenseDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(8)
 
-        # QLineEdit with input mask — handles uppercase + dash insertion
-        # natively without custom keystroke handling.
-        # Mask format: >NNN-NNNN-NNNN-NNNN-NNNN;_
-        #   > = force uppercase
-        #   N = required alphanumeric (A-Z, 0-9)
+        # QLineEdit with input mask for the MCA-XXXX-XXXX-XXXX-XXXX format.
+        # NOTE: Do NOT use the '>' (force-uppercase) mask modifier — it
+        # causes digits to be silently rejected on some PySide/Qt builds
+        # because the uppercase conversion logic drops characters that
+        # "can't be uppercased."  We handle uppercase manually via the
+        # textEdited signal instead.
+        # Mask format: NNN-NNNN-NNNN-NNNN-NNNN;_
+        #   N = required alphanumeric (A-Z, a-z, 0-9)
         #   - = literal dash
         #   ;_ = placeholder character
         self._key_input = QLineEdit()
-        self._key_input.setInputMask(">NNN-NNNN-NNNN-NNNN-NNNN;_")
+        self._key_input.setInputMask("NNN-NNNN-NNNN-NNNN-NNNN;_")
         self._key_input.setPlaceholderText("MCA-XXXX-XXXX-XXXX-XXXX")
         self._key_input.setFont(self._key_input.font())
         self._key_input.setStyleSheet("font-family: Consolas; font-size: 14px; padding: 4px;")
+
+        # Force uppercase as the user types (replaces the broken '>' mask modifier).
+        self._key_input.textEdited.connect(self._force_uppercase)
         form.addRow("Key:", self._key_input)
 
         layout.addLayout(form)
@@ -145,6 +151,23 @@ class LicenseDialog(QDialog):
 
         # Connect Enter key in the input field to activate.
         self._key_input.returnPressed.connect(self._on_activate)
+
+    def _force_uppercase(self, text):
+        """
+        Force the key input text to uppercase as the user types.
+
+        Connected to ``textEdited`` because Qt's '>' input mask modifier
+        silently rejects digits on some PySide builds.  This manual
+        approach handles uppercase without breaking numeric input.
+
+        :param str text: The current text in the QLineEdit.
+        """
+        # Block signals to avoid recursive textEdited firing.
+        self._key_input.blockSignals(True)
+        cursor_pos = self._key_input.cursorPosition()
+        self._key_input.setText(text.upper())
+        self._key_input.setCursorPosition(cursor_pos)
+        self._key_input.blockSignals(False)
 
     def _mask_key(self, key_str):
         """
