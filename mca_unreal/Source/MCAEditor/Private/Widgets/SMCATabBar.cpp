@@ -7,9 +7,11 @@
 #include "MCAEditorStyle.h"
 
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SMenuAnchor.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformApplicationMisc.h"
 
 #define LOCTEXT_NAMESPACE "SMCATabBar"
 
@@ -167,27 +169,32 @@ void SMCATabBar::RebuildTabBar()
 		.AutoWidth()
 		.Padding(1.0f, 0.0f)
 		[
-			SNew(SHorizontalBox)
-
-			// Tab name button.
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
+			SNew(SMenuAnchor)
+			.OnGetMenuContent(FOnGetContent::CreateSP(this, &SMCATabBar::BuildTabContextMenu, TabIndex))
+			.Method(EPopupMethod::UseCurrentWindow)
 			[
-				SNew(SButton)
-				.Text(FText::FromString(DisplayText))
-				.OnClicked(FOnClicked::CreateSP(this, &SMCATabBar::OnTabClicked, TabIndex))
-				.ButtonColorAndOpacity(BgColor)
-			]
+				SNew(SHorizontalBox)
 
-			// Close button (x).
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("CloseTab", "x"))
-				.OnClicked(FOnClicked::CreateSP(this, &SMCATabBar::OnTabCloseClicked, TabIndex))
-				.ButtonColorAndOpacity(BgColor)
+				// Tab name button.
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SButton)
+					.Text(FText::FromString(DisplayText))
+					.OnClicked(FOnClicked::CreateSP(this, &SMCATabBar::OnTabClicked, TabIndex))
+					.ButtonColorAndOpacity(BgColor)
+				]
+
+				// Close button (x).
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(0.0f)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("CloseTabX", "x"))
+					.OnClicked(FOnClicked::CreateSP(this, &SMCATabBar::OnTabCloseClicked, TabIndex))
+					.ButtonColorAndOpacity(BgColor)
+				]
 			]
 		];
 	}
@@ -236,8 +243,83 @@ FReply SMCATabBar::OnNewTabClicked()
 
 TSharedRef<SWidget> SMCATabBar::BuildTabContextMenu(int32 TabIndex)
 {
-	// TODO Phase 2: Build right-click menu (Close Others, Close All, Copy Path).
-	return SNullWidget::NullWidget;
+	FMenuBuilder MenuBuilder(true, nullptr);
+
+	// Close this tab.
+	MenuBuilder.AddMenuEntry(
+		LOCTEXT("CloseTab", "Close"),
+		LOCTEXT("CloseTabTooltip", "Close this tab"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SMCATabBar::OnContextMenuClose, TabIndex))
+	);
+
+	// Close Other Tabs.
+	MenuBuilder.AddMenuEntry(
+		LOCTEXT("CloseOtherTabs", "Close Others"),
+		LOCTEXT("CloseOtherTabsTooltip", "Close all tabs except this one"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SMCATabBar::OnContextMenuCloseOthers, TabIndex))
+	);
+
+	// Close All Tabs.
+	MenuBuilder.AddMenuEntry(
+		LOCTEXT("CloseAllTabs", "Close All"),
+		LOCTEXT("CloseAllTabsTooltip", "Close all open tabs"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SMCATabBar::OnContextMenuCloseAll))
+	);
+
+	MenuBuilder.AddMenuSeparator();
+
+	// Copy File Path (only if file has been saved).
+	if (Tabs.IsValidIndex(TabIndex) && !Tabs[TabIndex].FilePath.IsEmpty())
+	{
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("CopyPath", "Copy Path"),
+			LOCTEXT("CopyPathTooltip", "Copy the full file path to the clipboard"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SMCATabBar::OnContextMenuCopyPath, TabIndex))
+		);
+	}
+
+	return MenuBuilder.MakeWidget();
+}
+
+
+void SMCATabBar::OnContextMenuClose(int32 TabIndex)
+{
+	OnTabCloseRequestedDelegate.ExecuteIfBound(TabIndex);
+}
+
+
+void SMCATabBar::OnContextMenuCloseOthers(int32 KeepTabIndex)
+{
+	// Close tabs from the end backwards to avoid index shifting.
+	for (int32 i = Tabs.Num() - 1; i >= 0; --i)
+	{
+		if (i != KeepTabIndex)
+		{
+			OnTabCloseRequestedDelegate.ExecuteIfBound(i);
+		}
+	}
+}
+
+
+void SMCATabBar::OnContextMenuCloseAll()
+{
+	for (int32 i = Tabs.Num() - 1; i >= 0; --i)
+	{
+		OnTabCloseRequestedDelegate.ExecuteIfBound(i);
+	}
+}
+
+
+void SMCATabBar::OnContextMenuCopyPath(int32 TabIndex)
+{
+	if (Tabs.IsValidIndex(TabIndex) && !Tabs[TabIndex].FilePath.IsEmpty())
+	{
+		FPlatformApplicationMisc::ClipboardCopy(*Tabs[TabIndex].FilePath);
+	}
 }
 
 

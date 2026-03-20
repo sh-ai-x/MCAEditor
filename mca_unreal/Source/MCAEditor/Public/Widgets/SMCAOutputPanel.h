@@ -17,8 +17,6 @@
  *   - Color-coded output (info=white, warning=yellow, error=red, result=cyan)
  *   - Timestamps (toggleable)
  *   - Clear / copy buttons
- *   - Ctrl+F search within output
- *   - Right-click context menu
  *   - Auto-scroll to bottom on new output
  */
 class SMCAOutputPanel : public SCompoundWidget
@@ -62,11 +60,11 @@ private:
 
 	// --- Child Widgets -----------------------------------------------------
 
-	/** Rich text block for colored output display. */
-	TSharedPtr<class SRichTextBlock> OutputTextBlock;
-
-	/** Scroll box wrapping the output text. */
+	/** Scroll box containing individual output line widgets. */
 	TSharedPtr<class SScrollBox> ScrollBox;
+
+	/** Vertical box inside the scroll box holding per-line STextBlocks. */
+	TSharedPtr<class SVerticalBox> OutputLinesContainer;
 
 	// --- State -------------------------------------------------------------
 

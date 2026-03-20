@@ -114,6 +114,20 @@ private:
 	/** Build context menu for right-clicking a tab. */
 	TSharedRef<SWidget> BuildTabContextMenu(int32 TabIndex);
 
+	// --- Context Menu Actions ----------------------------------------------
+
+	/** Close the specified tab via context menu. */
+	void OnContextMenuClose(int32 TabIndex);
+
+	/** Close all tabs except the specified one. */
+	void OnContextMenuCloseOthers(int32 KeepTabIndex);
+
+	/** Close all open tabs. */
+	void OnContextMenuCloseAll();
+
+	/** Copy the file path of the specified tab to the clipboard. */
+	void OnContextMenuCopyPath(int32 TabIndex);
+
 	// --- Child Widgets -----------------------------------------------------
 
 	/** Container for the tab buttons. */

@@ -10,6 +10,7 @@
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Text/SMultiLineEditableTextBox.h"
+#include "Framework/Text/TextLayout.h"
 
 class FMCAPythonSyntaxMarshaller;
 
@@ -108,6 +109,12 @@ private:
 
 	/** Called when the text is committed (Enter key, etc.). */
 	void HandleTextCommitted(const FText& NewText, ETextCommit::Type CommitType);
+
+	/** Called when the cursor position changes in the text box. */
+	void HandleCursorMoved(const FTextLocation& NewCursorPosition);
+
+	/** Rebuild the line numbers gutter text to match the current line count. */
+	void UpdateLineNumbers();
 
 	// --- Child Widgets -----------------------------------------------------
 

@@ -87,6 +87,9 @@ private:
 
 	// --- Status Bar Updates ------------------------------------------------
 
+	/** Called when the code editor cursor position changes. */
+	void OnCursorPositionChanged(int32 Line, int32 Column);
+
 	/** Update the status bar text (cursor position, file info). */
 	void UpdateStatusBar();
 

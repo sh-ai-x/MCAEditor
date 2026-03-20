@@ -104,6 +104,7 @@ void SMCAEditorPanel::Construct(const FArguments& InArgs)
 						[
 							SAssignNew(CodeEditor, SMCACodeEditor)
 							.OnExecuteRequested(FSimpleDelegate::CreateSP(this, &SMCAEditorPanel::OnExecuteClicked))
+							.OnCursorMoved(FOnCursorPositionChanged::CreateSP(this, &SMCAEditorPanel::OnCursorPositionChanged))
 						]
 
 						// Output panel (bottom, 30%).
@@ -502,6 +503,16 @@ void SMCAEditorPanel::OnTabClosed(int32 TabIndex)
 	if (TabBar->GetTabCount() == 0)
 	{
 		OnNewFileClicked();
+	}
+}
+
+
+void SMCAEditorPanel::OnCursorPositionChanged(int32 Line, int32 Column)
+{
+	if (StatusBarText.IsValid())
+	{
+		FString StatusText = FString::Printf(TEXT("Ln %d, Col %d"), Line, Column);
+		StatusBarText->SetText(FText::FromString(StatusText));
 	}
 }
 

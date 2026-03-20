@@ -1,7 +1,8 @@
 // MCA Output Panel — Execution output display implementation.
 //
-// Shows Python execution output with color-coded severity.
-// Equivalent to mca_qt/widgets/output_window.py.
+// Shows Python execution output with color-coded severity using
+// individual STextBlock widgets per line. Equivalent to
+// mca_qt/widgets/output_window.py.
 
 #include "Widgets/SMCAOutputPanel.h"
 #include "MCAEditorStyle.h"
@@ -9,7 +10,6 @@
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Text/SRichTextBlock.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Misc/DateTime.h"
 
@@ -24,7 +24,7 @@ void SMCAOutputPanel::Construct(const FArguments& InArgs)
 	[
 		SNew(SVerticalBox)
 
-		// --- Toolbar (Clear, Copy, Timestamps toggle) ----------------------
+		// --- Toolbar (Clear, Copy) ------------------------------------------
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(4.0f, 2.0f)
@@ -69,15 +69,14 @@ void SMCAOutputPanel::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// --- Output Text Area -----------------------------------------------
+		// --- Output Lines Container -----------------------------------------
 		+ SVerticalBox::Slot()
 		.FillHeight(1.0f)
 		[
 			SAssignNew(ScrollBox, SScrollBox)
 			+ SScrollBox::Slot()
 			[
-				SAssignNew(OutputTextBlock, SRichTextBlock)
-				.DecoratorStyleSet(&FMCAEditorStyle::Get())
+				SAssignNew(OutputLinesContainer, SVerticalBox)
 			]
 		]
 	];
@@ -101,41 +100,37 @@ void SMCAOutputPanel::AppendOutput(const FString& Text, const FString& Severity)
 	// Store for GetAllText().
 	OutputLines.Add(DisplayText);
 
-	// Determine the style name based on severity.
-	FString StyleName;
+	// Determine the color based on severity.
+	FSlateColor TextColor;
 	if (Severity == TEXT("Error"))
 	{
-		StyleName = TEXT("MCAEditor.OutputError");
+		TextColor = FSlateColor(FMCAEditorStyle::ErrorColor);
 	}
 	else if (Severity == TEXT("Warning"))
 	{
-		StyleName = TEXT("MCAEditor.OutputWarning");
+		TextColor = FSlateColor(FMCAEditorStyle::WarningColor);
 	}
 	else if (Severity == TEXT("Result"))
 	{
-		StyleName = TEXT("MCAEditor.OutputResult");
+		TextColor = FSlateColor(FMCAEditorStyle::ResultColor);
 	}
 	else
 	{
-		StyleName = TEXT("MCAEditor.OutputInfo");
+		TextColor = FSlateColor(FMCAEditorStyle::TextColor);
 	}
 
-	// TODO: Append to the rich text block with the appropriate style.
-	// SRichTextBlock uses a markup format — for now, append as plain text.
-	// In Phase 2, use proper rich text runs for color coding.
-	if (OutputTextBlock.IsValid())
+	// Add a new STextBlock for this output line.
+	if (OutputLinesContainer.IsValid())
 	{
-		// Build accumulated text for display.
-		FString AllText;
-		for (const FString& Line : OutputLines)
-		{
-			if (!AllText.IsEmpty())
-			{
-				AllText += TEXT("\n");
-			}
-			AllText += Line;
-		}
-		OutputTextBlock->SetText(FText::FromString(AllText));
+		OutputLinesContainer->AddSlot()
+		.AutoHeight()
+		.Padding(8.0f, 1.0f)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(DisplayText))
+			.ColorAndOpacity(TextColor)
+			.Font(FCoreStyle::GetDefaultFontStyle("Mono", 11))
+		];
 	}
 
 	// Auto-scroll to bottom.
@@ -149,9 +144,9 @@ void SMCAOutputPanel::AppendOutput(const FString& Text, const FString& Severity)
 void SMCAOutputPanel::ClearOutput()
 {
 	OutputLines.Empty();
-	if (OutputTextBlock.IsValid())
+	if (OutputLinesContainer.IsValid())
 	{
-		OutputTextBlock->SetText(FText::GetEmpty());
+		OutputLinesContainer->ClearChildren();
 	}
 }
 
