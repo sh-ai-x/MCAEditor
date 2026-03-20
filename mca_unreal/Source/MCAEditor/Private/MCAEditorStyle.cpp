@@ -10,6 +10,7 @@
 #include "Styling/SlateStyleRegistry.h"
 #include "Styling/SlateTypes.h"
 #include "Styling/CoreStyle.h"
+#include "Styling/SlateStyleMacros.h"
 
 // --- Color Constants (ported from mca_qt/theme.py) ---------------------
 
@@ -130,10 +131,11 @@ TSharedRef<FSlateStyleSet> FMCAEditorStyle::Create()
 	Style->Set("MCAEditor.LineNumber", FTextBlockStyle(EditorTextStyle)
 		.SetColorAndOpacity(FSlateColor(LineNumberColor)));
 
-	// --- Icon Placeholders -------------------------------------------------
-	// These use a default icon until real icons are provided in Resources/.
-	Style->Set("MCAEditor.TabIcon", new FSlateNoResource());
-	Style->Set("MCAEditor.ToolbarIcon", new FSlateNoResource());
+	// --- Icons -------------------------------------------------------------
+	Style->Set("MCAEditor.TabIcon", new FSlateImageBrush(
+		Style->RootToContentDir(TEXT("Icon16"), TEXT(".png")), FVector2D(16.0f, 16.0f)));
+	Style->Set("MCAEditor.ToolbarIcon", new FSlateImageBrush(
+		Style->RootToContentDir(TEXT("Icon40"), TEXT(".png")), FVector2D(40.0f, 40.0f)));
 
 	return Style;
 }

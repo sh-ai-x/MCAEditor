@@ -13,6 +13,7 @@
 #include "Framework/Text/TextLayout.h"
 
 class FMCAPythonSyntaxMarshaller;
+class SMCAEditableTextBox;
 
 /** Delegate fired when the editor text changes. */
 DECLARE_DELEGATE(FOnCodeEditorTextChanged);
@@ -125,7 +126,7 @@ private:
 	// --- Child Widgets -----------------------------------------------------
 
 	/** The underlying multi-line text box. */
-	TSharedPtr<SMultiLineEditableTextBox> TextBox;
+	TSharedPtr<SMCAEditableTextBox> TextBox;
 
 	/** Python syntax marshaller for highlighting. */
 	TSharedPtr<FMCAPythonSyntaxMarshaller> SyntaxMarshaller;

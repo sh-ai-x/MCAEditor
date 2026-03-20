@@ -17,6 +17,56 @@
 #include "Widgets/Layout/SGridPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
+// --- Editable Text Box Subclass ----------------------------------------
+// SMultiLineEditableTextBox hides the inner SMultiLineEditableText as
+// protected. We need SelectText() for find/replace highlighting, so this
+// thin subclass exposes it.
+
+class SMCAEditableTextBox : public SMultiLineEditableTextBox
+{
+public:
+	using SMultiLineEditableTextBox::SMultiLineEditableTextBox;
+
+	/** Select a range of text (forwarded to the inner editable text). */
+	void SelectText(const FTextLocation& InStart, const FTextLocation& InEnd)
+	{
+		if (EditableText.IsValid())
+		{
+			EditableText->SelectText(InStart, InEnd);
+		}
+	}
+
+	/** Get the currently selected text. */
+	FText GetSelectedText() const
+	{
+		if (EditableText.IsValid())
+		{
+			return EditableText->GetSelectedText();
+		}
+		return FText::GetEmpty();
+	}
+
+	/** Check if any text is currently selected. */
+	bool AnyTextSelected() const
+	{
+		if (EditableText.IsValid())
+		{
+			return EditableText->AnyTextSelected();
+		}
+		return false;
+	}
+
+	/** Clear the current selection. */
+	void ClearSelection()
+	{
+		if (EditableText.IsValid())
+		{
+			EditableText->ClearSelection();
+		}
+	}
+};
+
+
 // --- Python Syntax Marshaller ------------------------------------------
 
 /**
@@ -614,7 +664,7 @@ void SMCACodeEditor::Construct(const FArguments& InArgs)
 		+ SHorizontalBox::Slot()
 		.FillWidth(1.0f)
 		[
-			SAssignNew(TextBox, SMultiLineEditableTextBox)
+			SAssignNew(TextBox, SMCAEditableTextBox)
 			.Marshaller(StaticCastSharedPtr<ITextLayoutMarshaller>(SyntaxMarshaller))
 			.Text(InArgs._InitialText)
 			.AutoWrapText(false)
@@ -748,11 +798,9 @@ void SMCACodeEditor::SelectRange(int32 StartOffset, int32 Length)
 
 	FTextLocation EndLoc(Line, Col);
 
-	// Scroll to the match location.
-	// Note: SMultiLineEditableTextBox does not expose SelectText() publicly
-	// (it's on the inner SMultiLineEditableText which is protected).
-	// GoTo scrolls to the start of the match so the user can see it.
+	// Select the range — scroll to start and highlight the match.
 	TextBox->GoTo(StartLoc);
+	TextBox->SelectText(StartLoc, EndLoc);
 }
 
 
