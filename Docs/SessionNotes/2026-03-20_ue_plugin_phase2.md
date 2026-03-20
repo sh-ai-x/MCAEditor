@@ -151,8 +151,7 @@ not the Remote Execution TCP protocol.
 - On failure: shows validation error in red status text
 
 ### `MCAEditor.Build.cs` — Updated Dependencies
-- Added `DesktopPlatform` module
-- Added `OpenSSL` via `AddEngineThirdPartyPrivateStaticDependencies`
+- Added `DesktopPlatform`, `DeveloperSettings`, `ApplicationCore` modules
 
 ## Files Modified (Phase 4)
 - `Source/MCAEditor/Public/MCALicenseCheck.h` — NEW: license validation header
@@ -177,6 +176,26 @@ not the Remote Execution TCP protocol.
 - **Status**: All 19 compilation/linking actions succeeded
 - Plugin DLL: `UnrealEditor-MCAEditor.dll` built successfully
 
+## Phase 6 — Find/Replace Selection Fix + Icons
+
+### `SMCACodeEditor.cpp` — SMCAEditableTextBox Subclass
+- Created `SMCAEditableTextBox` inheriting from `SMultiLineEditableTextBox`
+- Exposes `SelectText()`, `GetSelectedText()`, `AnyTextSelected()`, `ClearSelection()` by forwarding to the protected `EditableText` member
+- Find/replace now highlights matches with real text selection (was GoTo-only)
+
+### `MCAEditorStyle.cpp` — Plugin Icons
+- Generated placeholder icons: Icon16.png (tab), Icon40.png (toolbar), Icon128.png (plugin browser)
+- Replaced `FSlateNoResource()` with `FSlateImageBrush` pointing to Resources/
+
+## Phase 7 — Runtime Test (UE 5.6)
+
+### Test Result
+- **UE 5.6** launched with MCA Editor plugin — **no errors, no crashes**
+- Plugin mounts cleanly: `LogPluginManager: Mounting Project plugin MCAEditor`
+- Tab spawner registered (Window menu + toolbar button available)
+- 1177 lines of log output, zero MCA-related warnings or errors
+
 ## Next Steps
-1. Plugin icon / branding resources
-2. Test runtime behavior in UE editor
+1. Replace placeholder icons with proper artwork
+2. Test tab spawning + code editing + Python execution interactively
+3. Test license dialog flow (trial expiry → key entry → activation)
