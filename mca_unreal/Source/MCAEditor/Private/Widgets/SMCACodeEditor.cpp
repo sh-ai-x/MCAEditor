@@ -9,6 +9,7 @@
 #include "MCAEditorSettings.h"
 
 #include "Framework/Text/IRun.h"
+#include "Framework/Text/ITextLayoutMarshaller.h"
 #include "Framework/Text/TextLayout.h"
 #include "Framework/Text/SlateTextRun.h"
 #include "Widgets/Layout/SScrollBox.h"
@@ -35,7 +36,8 @@ class FMCAPythonSyntaxMarshaller : public ITextLayoutMarshaller
 public:
 
 	FMCAPythonSyntaxMarshaller()
-		: bInMultiLineString(false)
+		: bDirty(false)
+		, bInMultiLineString(false)
 		, MultiLineQuoteChar(TEXT('"'))
 	{
 		// Python keywords for highlighting.
@@ -64,6 +66,12 @@ public:
 
 	// --- ITextLayoutMarshaller Interface -----------------------------------
 
+	// Syntax highlighting needs live updates so SetText fires on every change.
+	virtual bool RequiresLiveUpdate() const override { return true; }
+	virtual void MakeDirty() override { bDirty = true; }
+	virtual void ClearDirty() override { bDirty = false; }
+	virtual bool IsDirty() const override { return bDirty; }
+
 	virtual void SetText(const FString& SourceString, FTextLayout& TargetTextLayout) override
 	{
 		// Split the source string into lines and highlight each one.
@@ -80,7 +88,9 @@ public:
 			TArray<TSharedRef<IRun>> Runs;
 			TokenizeLine(Line, Runs, TargetTextLayout);
 
-			LinesToAdd.Emplace(MoveTemp(Runs));
+			// FNewLineData requires both the line text and the runs array.
+			TSharedRef<FString> LineText = MakeShared<FString>(Line);
+			LinesToAdd.Emplace(LineText, MoveTemp(Runs));
 		}
 
 		TargetTextLayout.AddLines(LinesToAdd);
@@ -556,6 +566,9 @@ private:
 	/** Python built-in functions. */
 	TSet<FString> Builtins;
 
+	/** Dirty flag for the ITextLayoutMarshaller interface. */
+	bool bDirty;
+
 	/** Tracks whether we're inside a multi-line string (''' or """). */
 	bool bInMultiLineString;
 
@@ -602,7 +615,7 @@ void SMCACodeEditor::Construct(const FArguments& InArgs)
 		.FillWidth(1.0f)
 		[
 			SAssignNew(TextBox, SMultiLineEditableTextBox)
-			.Marshaller(SyntaxMarshaller.ToSharedRef())
+			.Marshaller(StaticCastSharedPtr<ITextLayoutMarshaller>(SyntaxMarshaller))
 			.Text(InArgs._InitialText)
 			.AutoWrapText(false)
 			.Margin(FMargin(8.0f, 4.0f))
@@ -735,9 +748,11 @@ void SMCACodeEditor::SelectRange(int32 StartOffset, int32 Length)
 
 	FTextLocation EndLoc(Line, Col);
 
-	// Select the range — scroll to and highlight.
+	// Scroll to the match location.
+	// Note: SMultiLineEditableTextBox does not expose SelectText() publicly
+	// (it's on the inner SMultiLineEditableText which is protected).
+	// GoTo scrolls to the start of the match so the user can see it.
 	TextBox->GoTo(StartLoc);
-	TextBox->SelectText(StartLoc, EndLoc);
 }
 
 

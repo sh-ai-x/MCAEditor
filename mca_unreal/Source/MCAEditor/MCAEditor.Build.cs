@@ -38,11 +38,10 @@ public class MCAEditor : ModuleRules
 				"EditorSubsystem",
 				"DirectoryWatcher",
 				"DesktopPlatform",
+				"DeveloperSettings",
+				"ApplicationCore",
 			}
 		);
-
-		// OpenSSL for HMAC-SHA256 license key validation.
-		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
 
 		// Soft dependency on PythonScriptPlugin — warn if not available but
 		// don't prevent compilation. Users must enable it for execution.

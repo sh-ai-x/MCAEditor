@@ -9,7 +9,7 @@
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/Text/SMultiLineEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Framework/Text/TextLayout.h"
 
 class FMCAPythonSyntaxMarshaller;

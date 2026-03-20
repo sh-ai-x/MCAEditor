@@ -108,7 +108,7 @@ void SMCAEditorPanel::Construct(const FArguments& InArgs)
 						.Value(0.7f)
 						[
 							SAssignNew(CodeEditor, SMCACodeEditor)
-							.OnExecuteRequested(FSimpleDelegate::CreateSP(this, &SMCAEditorPanel::OnExecuteClicked))
+							.OnExecuteRequested(FSimpleDelegate::CreateLambda([this]() { OnExecuteClicked(); }))
 							.OnCursorMoved(FOnCursorPositionChanged::CreateSP(this, &SMCAEditorPanel::OnCursorPositionChanged))
 						]
 

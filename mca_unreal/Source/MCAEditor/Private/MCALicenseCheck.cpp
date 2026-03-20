@@ -1,19 +1,14 @@
 // MCA License Check — Offline license validation implementation.
 //
 // Ports the HMAC-SHA256 key validation from mca_core/license.py to C++.
-// Uses OpenSSL (bundled with UE) for HMAC-SHA256 and UE's config system
-// for persistence. No external dependencies beyond what UE ships.
+// SHA-256 and HMAC are implemented inline (no OpenSSL dependency) to avoid
+// header conflicts with UE's namespace definitions.
 
 #include "MCALicenseCheck.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/DateTime.h"
 #include "Misc/ConfigCacheIni.h"
-
-THIRD_PARTY_INCLUDES_START
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
-THIRD_PARTY_INCLUDES_END
 
 
 // --- HMAC Secret ---
@@ -29,37 +24,177 @@ const int32 FMCALicenseCheck::HMACSecretLen = 40;
 
 
 // ============================================================================
+// Inline SHA-256 Implementation (FIPS 180-4)
+// ============================================================================
+// Self-contained to avoid OpenSSL header conflicts with UE's `namespace UI`.
+
+namespace
+{
+
+// SHA-256 round constants.
+static const uint32 K256[64] = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+FORCEINLINE uint32 RotR(uint32 X, int N) { return (X >> N) | (X << (32 - N)); }
+FORCEINLINE uint32 Ch(uint32 X, uint32 Y, uint32 Z) { return (X & Y) ^ (~X & Z); }
+FORCEINLINE uint32 Maj(uint32 X, uint32 Y, uint32 Z) { return (X & Y) ^ (X & Z) ^ (Y & Z); }
+FORCEINLINE uint32 Sigma0(uint32 X) { return RotR(X, 2) ^ RotR(X, 13) ^ RotR(X, 22); }
+FORCEINLINE uint32 Sigma1(uint32 X) { return RotR(X, 6) ^ RotR(X, 11) ^ RotR(X, 25); }
+FORCEINLINE uint32 sigma0(uint32 X) { return RotR(X, 7) ^ RotR(X, 18) ^ (X >> 3); }
+FORCEINLINE uint32 sigma1(uint32 X) { return RotR(X, 17) ^ RotR(X, 19) ^ (X >> 10); }
+
+// Compute SHA-256 of an arbitrary-length message.
+void ComputeSHA256(const uint8* Data, int32 DataLen, uint8 OutDigest[32])
+{
+	// Initial hash values (first 32 bits of the fractional parts of the
+	// square roots of the first 8 primes).
+	uint32 H[8] = {
+		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+	};
+
+	// Pre-processing: pad the message to a multiple of 64 bytes.
+	// Layout: message + 0x80 + zeros + 8-byte big-endian bit length.
+	uint64 BitLen = (uint64)DataLen * 8;
+	int32 PaddedLen = ((DataLen + 9 + 63) / 64) * 64;
+
+	TArray<uint8> Padded;
+	Padded.SetNumZeroed(PaddedLen);
+	FMemory::Memcpy(Padded.GetData(), Data, DataLen);
+	Padded[DataLen] = 0x80;
+
+	// Append bit length as big-endian uint64 at the end.
+	for (int32 i = 0; i < 8; ++i)
+	{
+		Padded[PaddedLen - 1 - i] = (uint8)(BitLen >> (i * 8));
+	}
+
+	// Process each 64-byte block.
+	for (int32 Block = 0; Block < PaddedLen; Block += 64)
+	{
+		const uint8* M = Padded.GetData() + Block;
+
+		// Prepare the message schedule (W[0..63]).
+		uint32 W[64];
+		for (int32 t = 0; t < 16; ++t)
+		{
+			W[t] = ((uint32)M[t * 4] << 24) | ((uint32)M[t * 4 + 1] << 16) |
+			        ((uint32)M[t * 4 + 2] << 8) | (uint32)M[t * 4 + 3];
+		}
+		for (int32 t = 16; t < 64; ++t)
+		{
+			W[t] = sigma1(W[t - 2]) + W[t - 7] + sigma0(W[t - 15]) + W[t - 16];
+		}
+
+		// Initialize working variables.
+		uint32 a = H[0], b = H[1], c = H[2], d = H[3];
+		uint32 e = H[4], f = H[5], g = H[6], h = H[7];
+
+		// 64 rounds.
+		for (int32 t = 0; t < 64; ++t)
+		{
+			uint32 T1 = h + Sigma1(e) + Ch(e, f, g) + K256[t] + W[t];
+			uint32 T2 = Sigma0(a) + Maj(a, b, c);
+			h = g; g = f; f = e; e = d + T1;
+			d = c; c = b; b = a; a = T1 + T2;
+		}
+
+		// Update hash values.
+		H[0] += a; H[1] += b; H[2] += c; H[3] += d;
+		H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+	}
+
+	// Produce the 32-byte digest.
+	for (int32 i = 0; i < 8; ++i)
+	{
+		OutDigest[i * 4 + 0] = (uint8)(H[i] >> 24);
+		OutDigest[i * 4 + 1] = (uint8)(H[i] >> 16);
+		OutDigest[i * 4 + 2] = (uint8)(H[i] >> 8);
+		OutDigest[i * 4 + 3] = (uint8)(H[i]);
+	}
+}
+
+} // anonymous namespace
+
+
+// ============================================================================
 // Crypto Helpers
 // ============================================================================
 
 TArray<uint8> FMCALicenseCheck::SHA256Hash(const TArray<uint8>& Data)
 {
-	// Full SHA-256 hash using OpenSSL.
-	uint8 Digest[SHA256_DIGEST_LENGTH];
-	SHA256(Data.GetData(), Data.Num(), Digest);
+	uint8 Digest[32];
+	ComputeSHA256(Data.GetData(), Data.Num(), Digest);
 
 	TArray<uint8> Result;
-	Result.Append(Digest, SHA256_DIGEST_LENGTH);
+	Result.Append(Digest, 32);
 	return Result;
 }
 
 
 TArray<uint8> FMCALicenseCheck::ComputeHMAC(const TArray<uint8>& Data)
 {
-	// HMAC-SHA256 using OpenSSL, truncated to first 6 bytes.
-	unsigned int DigestLen = 0;
-	uint8 Digest[EVP_MAX_MD_SIZE];
+	// HMAC-SHA256 per RFC 2104.
+	// Block size for SHA-256 is 64 bytes.
+	constexpr int32 BlockSize = 64;
 
-	HMAC(
-		EVP_sha256(),
-		HMACSecret, HMACSecretLen,
-		Data.GetData(), Data.Num(),
-		Digest, &DigestLen
-	);
+	// Prepare the key block (zero-padded to BlockSize).
+	// Our key is 40 bytes, fits directly.
+	TArray<uint8> KeyBlock;
+	KeyBlock.SetNumZeroed(BlockSize);
+
+	if (HMACSecretLen <= BlockSize)
+	{
+		FMemory::Memcpy(KeyBlock.GetData(), HMACSecret, HMACSecretLen);
+	}
+	else
+	{
+		// Key > block size: hash it first.
+		TArray<uint8> KeyBytes;
+		KeyBytes.Append(HMACSecret, HMACSecretLen);
+		TArray<uint8> HashedKey = SHA256Hash(KeyBytes);
+		FMemory::Memcpy(KeyBlock.GetData(), HashedKey.GetData(), FMath::Min(HashedKey.Num(), BlockSize));
+	}
+
+	// Inner hash: SHA256( (key XOR ipad) || data ).
+	TArray<uint8> InnerInput;
+	InnerInput.Reserve(BlockSize + Data.Num());
+	for (int32 i = 0; i < BlockSize; ++i)
+	{
+		InnerInput.Add(KeyBlock[i] ^ 0x36);
+	}
+	InnerInput.Append(Data);
+	TArray<uint8> InnerHash = SHA256Hash(InnerInput);
+
+	// Outer hash: SHA256( (key XOR opad) || inner_hash ).
+	TArray<uint8> OuterInput;
+	OuterInput.Reserve(BlockSize + 32);
+	for (int32 i = 0; i < BlockSize; ++i)
+	{
+		OuterInput.Add(KeyBlock[i] ^ 0x5c);
+	}
+	OuterInput.Append(InnerHash);
+	TArray<uint8> FullHMAC = SHA256Hash(OuterInput);
 
 	// Return only the first 6 bytes (48 bits), matching the Python implementation.
 	TArray<uint8> Truncated;
-	Truncated.Append(Digest, 6);
+	Truncated.Append(FullHMAC.GetData(), 6);
 	return Truncated;
 }
 
