@@ -82,12 +82,12 @@ class SessionManager:
         """
         Initialize the session manager and compute directory paths.
 
-        When *dcc_version* is provided (e.g. ``"Maya2024"``), session
-        state (``session.json``, ``output.log``) is stored in a
-        version-specific subdirectory so different Maya versions don't
-        overwrite each other's sessions.  The ``scripts/`` workspace
-        remains shared across all versions so users have one set of
-        buffer files.
+        When *dcc_version* is provided (e.g. ``"Maya2024"``, ``"UE5"``),
+        session state (``session.json``, ``output.log``) is stored in a
+        version-specific subdirectory so different DCC versions don't
+        overwrite each other's sessions.  Maya versions share
+        ``scripts/`` workspace; UE versions get a separate ``ue_scripts/``
+        directory since Maya and UE work in different environments.
 
         Directories are NOT created until the first write operation
         (lazy creation via ``_ensure_dirs``).
@@ -111,10 +111,15 @@ class SessionManager:
 
         # Default workspace directories inside mca_preferences.
         # "scripts" is for user scripts AND buffer storage (unified).
-        # SHARED across all DCC versions — one set of buffer files.
-        # "site-packages" is added to sys.path so third-party packages
-        # can be imported from there.
-        self._scripts_dir = os.path.join(self._prefs_dir, "scripts")
+        # UE gets its own "ue_scripts/" directory because Maya and UE work
+        # in completely different environments — shared defaults make no sense.
+        # Maya versions (2024, 2025, 2026) share "scripts/" since they all
+        # target the same Maya Python environment.
+        if dcc_version and dcc_version.startswith("UE"):
+            scripts_name = "ue_scripts"
+        else:
+            scripts_name = "scripts"
+        self._scripts_dir = os.path.join(self._prefs_dir, scripts_name)
         self._site_packages_dir = os.path.join(self._scripts_dir, "site-packages")
 
         # Buffers now live in scripts/ so they're visible in the workspace tree

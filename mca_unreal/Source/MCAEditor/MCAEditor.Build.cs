@@ -1,8 +1,8 @@
 // MCA Editor — Unreal Build Tool module rules.
 //
 // Defines dependencies, include paths, and compiler settings for the
-// MCA Editor plugin. Mirrors the Python/PySide6 Maya version's architecture
-// but uses Slate widgets and UE's built-in Python interpreter.
+// MCA Editor plugin. Embeds the PySide6/Qt MCA Editor inside a Slate
+// tab via Win32 native window hosting (same codebase as Maya version).
 
 using UnrealBuildTool;
 
@@ -30,15 +30,10 @@ public class MCAEditor : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
-				"InputCore",
 				"UnrealEd",
 				"EditorStyle",
 				"ToolMenus",
 				"Projects",
-				"EditorSubsystem",
-				"DirectoryWatcher",
-				"DesktopPlatform",
-				"DeveloperSettings",
 				"ApplicationCore",
 			}
 		);

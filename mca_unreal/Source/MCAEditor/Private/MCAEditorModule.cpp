@@ -1,14 +1,14 @@
 // MCA Editor Module — Plugin entry point and tab registration.
 //
 // Registers the MCA Editor nomad tab spawner, toolbar button, and
-// Window menu entry. This is the C++ equivalent of plugin_main.py
-// in the Maya version.
+// Window menu entry. The tab content is an SMCANativeHost which
+// embeds the full PySide6/Qt editor (same codebase as Maya version).
 
 #include "MCAEditorModule.h"
 #include "MCAEditorCommands.h"
 #include "MCAEditorStyle.h"
 #include "MCALicenseCheck.h"
-#include "Widgets/SMCAEditorPanel.h"
+#include "Widgets/SMCANativeHost.h"
 
 #include "Framework/Docking/TabManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
@@ -31,7 +31,7 @@ const FName FMCAEditorModule::MCAEditorTabName(TEXT("MCAEditor"));
 
 void FMCAEditorModule::StartupModule()
 {
-	// Initialize the Slate style set (dark theme colors, fonts).
+	// Initialize the Slate style set (dark theme colors, fonts, icons).
 	FMCAEditorStyle::Initialize();
 	FMCAEditorStyle::ReloadTextures();
 
@@ -81,15 +81,15 @@ TSharedRef<SDockTab> FMCAEditorModule::SpawnMCAEditorTab(const FSpawnTabArgs& Ar
 
 	if (LicenseStatus.bNeedsKey)
 	{
-		// Trial expired and no valid key — show license entry UI instead of editor.
+		// Trial expired and no valid key — show license entry UI.
 		Tab->SetContent(BuildLicensePanel(Tab));
 	}
 	else
 	{
-		// Licensed or trial active — show the full editor.
-		Tab->SetContent(SNew(SMCAEditorPanel));
+		// Licensed or trial active — show the Qt-embedded editor.
+		// SMCANativeHost handles all the PySide6 embedding on first tick.
+		Tab->SetContent(SNew(SMCANativeHost));
 
-		// Log license status for diagnostics.
 		UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: %s"), *LicenseStatus.Message);
 	}
 
@@ -176,14 +176,13 @@ TSharedRef<SWidget> FMCAEditorModule::BuildLicensePanel(TSharedRef<SDockTab> Own
 
 					if (Result.bValid)
 					{
-						// Key accepted — replace the license panel with the full editor.
-						OwnerTab->SetContent(SNew(SMCAEditorPanel));
+						// Key accepted — replace the license panel with the Qt editor.
+						OwnerTab->SetContent(SNew(SMCANativeHost));
 
 						UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: License activated (expires: %s)"), *Result.ExpiryDate);
 					}
 					else
 					{
-						// Show the error message.
 						if (StatusText.IsValid())
 						{
 							StatusText->SetText(FText::FromString(Result.Error));
@@ -199,7 +198,7 @@ TSharedRef<SWidget> FMCAEditorModule::BuildLicensePanel(TSharedRef<SDockTab> Own
 
 void FMCAEditorModule::RegisterToolbarExtension()
 {
-	// Add a toolbar button to the main editor toolbar under the "Misc" section.
+	// Add a toolbar button to the main editor toolbar.
 	UToolMenu* ToolbarMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.PlayToolBar");
 	if (ToolbarMenu)
 	{
@@ -235,12 +234,10 @@ void FMCAEditorModule::RegisterMenuExtension()
 
 void FMCAEditorModule::OnToolbarButtonClicked()
 {
-	// Invoke the tab — if it already exists, focus it; otherwise spawn it.
 	FGlobalTabmanager::Get()->TryInvokeTab(MCAEditorTabName);
 }
 
 
 #undef LOCTEXT_NAMESPACE
 
-// Register the module with UE's module system.
 IMPLEMENT_MODULE(FMCAEditorModule, MCAEditor)

@@ -3614,6 +3614,14 @@ class MCAEditorPanel(QWidget):
         if site_pkg_dir not in sys.path:
             sys.path.insert(0, site_pkg_dir)
 
+        # In UE, use unreal.PythonScriptLibrary.execute_python_command_ex()
+        # instead of plain exec(). UE intercepts print() at the C level and
+        # routes it to the Output Log — our sys.stdout redirect misses it.
+        # The UE API returns (result, log_entries) with captured output.
+        if self._dcc_version and self._dcc_version.startswith("UE"):
+            self._execute_via_unreal(code)
+            return
+
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = io.StringIO()
@@ -3636,6 +3644,66 @@ class MCAEditorPanel(QWidget):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+
+    def _execute_via_unreal(self, code):
+        """
+        Execute Python code through UE's Python scripting API.
+
+        UE's ``PythonScriptLibrary.execute_python_command_ex()`` captures all
+        Python output (including ``print()`` calls intercepted at the C level)
+        and returns it as structured log entries.  This is the only reliable
+        way to capture output in UE's embedded Python — ``sys.stdout``
+        redirection alone misses output routed through UE's C-level hooks.
+
+        Returns ``(command_result_str, Array[PythonLogOutputEntry])`` or
+        ``None`` on failure.
+
+        :param str code: Python code to execute.
+        """
+        try:
+            import unreal
+        except ImportError:
+            # Fallback if unreal module not available (shouldn't happen in UE).
+            self._output.write_error("Cannot import unreal module.")
+            return
+
+        try:
+            result = unreal.PythonScriptLibrary.execute_python_command_ex(
+                python_command=code,
+                execution_mode=unreal.PythonCommandExecutionMode.EXECUTE_FILE,
+                file_execution_scope=unreal.PythonFileExecutionScope.PUBLIC,
+            )
+
+            # Returns (command_result_str, log_entries) or None on failure.
+            if result is None:
+                self._output.write_error("Execution returned None.")
+                return
+
+            command_result, log_entries = result
+
+            # Display each log entry with appropriate formatting.
+            # INFO entries contain print() output. ERROR/WARNING entries
+            # contain exceptions and warnings from UE's Python runtime.
+            for entry in log_entries:
+                if entry.type == unreal.PythonLogOutputType.ERROR:
+                    self._output.write_error(entry.output)
+                elif entry.type == unreal.PythonLogOutputType.WARNING:
+                    self._output.write_warning(entry.output)
+                else:
+                    # INFO type — this is where print() output appears.
+                    if self._verbosity_level != "minimal":
+                        self._output.write_output(entry.output)
+
+            # Show success message unless in minimal mode or errors occurred.
+            has_errors = any(
+                e.type == unreal.PythonLogOutputType.ERROR for e in log_entries
+            )
+            if not has_errors and self._verbosity_level != "minimal":
+                self._output.write_success("Executed in UE")
+
+        except Exception:
+            tb = traceback.format_exc()
+            self._output.write_error(tb.rstrip())
 
     def _api_execute_code(self, code, language="python"):
         """

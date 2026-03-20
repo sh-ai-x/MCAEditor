@@ -237,6 +237,8 @@ def ensure_venv():
     # Inside Maya, sys.executable is the Maya app binary which doesn't
     # support "-m venv".  We need "mayapy" which is the real Python
     # interpreter in Maya's bin dir.
+    # Inside UE, sys.executable is UnrealEditor.exe or UnrealEditor-Cmd.exe
+    # which also can't run "-m venv" and may flash a console window.
     python_exe = sys.executable
     exe_name = os.path.basename(python_exe).lower()
     if exe_name.startswith("maya") and not exe_name.startswith("mayapy"):
@@ -250,6 +252,14 @@ def ensure_venv():
         if os.path.isfile(mayapy):
             python_exe = mayapy
             logger.debug("Using mayapy for venv creation: %s", mayapy)
+    elif exe_name.startswith("unreal"):
+        # Running inside UE — sys.executable is the UE editor binary.
+        # Find a system Python 3 interpreter to create the venv instead.
+        python_exe = _find_system_python()
+        if python_exe is None:
+            logger.warning("No system Python found for venv creation in UE.")
+            return False
+        logger.debug("Using system Python for venv creation in UE: %s", python_exe)
 
     # Create the venv without pip first — ensurepip often fails when the
     # venv executable is named mayapy.exe (Maya's Python interpreter).
@@ -425,6 +435,73 @@ def inject_venv_path():
 
 
 # --- Internal Helpers ---------------------------------------------------------
+
+def _find_system_python():
+    """
+    Find a system Python 3.10+ interpreter on PATH.
+
+    Used when running inside a host application (UE, Maya) where
+    ``sys.executable`` is the host binary rather than a Python interpreter.
+    We need a real Python to run ``-m venv``, ``-m ensurepip``, etc.
+
+    Search order on Windows: ``py -3`` launcher, ``python``, ``python3``.
+    Search order on POSIX: ``python3``, ``python``.
+
+    :return: Path to a suitable Python executable, or *None* if not found.
+    :rtype: str or None
+    """
+    candidates = []
+    if platform.system() == "Windows":
+        candidates.append(["py", "-3"])
+        candidates.append(["python"])
+        candidates.append(["python3"])
+    else:
+        candidates.append(["python3"])
+        candidates.append(["python"])
+
+    for cmd in candidates:
+        try:
+            result = subprocess.run(
+                cmd + ["--version"],
+                check=True,
+                timeout=10,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=_CREATION_FLAGS,
+            )
+            version_str = result.stdout.decode(errors="replace").strip()
+
+            # Parse version to ensure 3.10+. Output format: "Python 3.X.Y".
+            parts = version_str.split()
+            if len(parts) >= 2:
+                version_parts = parts[1].split(".")
+                major = int(version_parts[0])
+                minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+
+                if major >= 3 and minor >= 10:
+                    # For multi-arg commands like "py -3", resolve the
+                    # actual executable path for subprocess.run() calls.
+                    if len(cmd) == 1:
+                        return shutil.which(cmd[0]) or cmd[0]
+                    else:
+                        py_result = subprocess.run(
+                            cmd + ["-c", "import sys; print(sys.executable)"],
+                            check=True,
+                            timeout=10,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            creationflags=_CREATION_FLAGS,
+                        )
+                        exe = py_result.stdout.decode(errors="replace").strip()
+                        if os.path.isfile(exe):
+                            return exe
+
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError, FileNotFoundError, ValueError):
+            continue
+
+    return None
+
 
 def _pip_name(requirement):
     """
