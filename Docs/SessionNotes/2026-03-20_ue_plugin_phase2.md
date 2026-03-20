@@ -79,9 +79,56 @@ not the Remote Execution TCP protocol.
 - `Source/MCAEditor/Private/Widgets/SMCATabBar.cpp` — context menu + SMenuAnchor
 - `Source/MCAEditor/Public/Widgets/SMCATabBar.h` — context menu declarations
 
+## Phase 3 (same session)
+
+### `SMCAEditorPanel.cpp/.h` — Keyboard Shortcut Binding
+- Added `FUICommandList` member and `BindCommands()` wiring all 8 shortcuts
+- `OnKeyDown()` override routes through command list, plus Tab/Shift+Tab and Escape
+- Lambdas wrap FReply-returning methods for FExecuteAction compatibility
+- `SupportsKeyboardFocus()` returns true so shortcuts fire when panel is focused
+
+### `SMCAEditorPanel.cpp/.h` — Go To Line Dialog
+- `OnGoToLine()` spawns modal `SWindow` with line number input
+- Enter commits and calls `CodeEditor->GoToLine()`, then closes dialog
+
+### `SMCAEditorPanel.cpp/.h` — Quick Open Panel
+- `SMCAQuickOpen` added as centered overlay on the code editor area
+- `OnQuickOpen()` calls `QuickOpenPanel->Show()` (Ctrl+P)
+- Wired `OnFileSelected` to `OnSidebarFileSelected()` (reused open logic)
+
+### `SMCACodeEditor.cpp/.h` — SelectRange / ReplaceSelectedText
+- `SelectRange(StartOffset, Length)` converts char offset to FTextLocation and selects
+- `ReplaceSelectedText(NewText)` calculates selection start and does string replacement
+
+### `SMCAFindReplace.cpp/.h` — Full Find/Replace Implementation
+- `DoSearch()` now stores `MatchOffsets` array and `MatchLength`
+- Selects current match in the editor after each search
+- `OnFindNext()`/`OnFindPrev()` navigate through matches with selection
+- `OnReplace()` replaces current match then re-runs search
+- `OnReplaceAll()` replaces all matches (working backwards to preserve offsets)
+- Whole-word mode implemented (boundary checks at match start/end)
+
+### `SMCASidebar.cpp/.h` — Context Menu
+- `OnContextMenuOpening()` builds `FMenuBuilder` menu from selected tree item
+- 6 actions: New File, New Folder, Rename, Delete, Reveal in Explorer, Copy Path
+- `OnContextMenuNewFile()` creates `untitled.py` with auto-numbering
+- `OnContextMenuNewFolder()` creates `new_folder` with auto-numbering
+- `OnContextMenuRename()` spawns modal dialog with current name
+- `OnContextMenuDelete()` removes file or directory recursively
+- `OnContextMenuRevealInExplorer()` uses `FPlatformProcess::ExploreFolder()`
+- `OnContextMenuCopyPath()` copies to clipboard
+
+## Additional Files Modified (Phase 3)
+- `Source/MCAEditor/Private/Widgets/SMCAEditorPanel.cpp` — shortcuts, overlays, actions
+- `Source/MCAEditor/Public/Widgets/SMCAEditorPanel.h` — command list, new methods
+- `Source/MCAEditor/Private/Widgets/SMCACodeEditor.cpp` — SelectRange, ReplaceSelectedText
+- `Source/MCAEditor/Public/Widgets/SMCACodeEditor.h` — new declarations
+- `Source/MCAEditor/Private/Widgets/SMCAFindReplace.cpp` — full replace logic
+- `Source/MCAEditor/Public/Widgets/SMCAFindReplace.h` — match tracking members
+- `Source/MCAEditor/Private/Widgets/SMCASidebar.cpp` — context menu + 6 actions
+- `Source/MCAEditor/Public/Widgets/SMCASidebar.h` — context menu declarations
+
 ## Next Steps
 1. Copy `mca_unreal/` to a UE project's Plugins/ and compile with UBT
-2. Phase 3: Sidebar context menu (New File, Rename, Delete, Reveal in Explorer)
-3. Phase 3: Find/Replace actual selection highlighting and Replace/Replace All
-4. Phase 3: Keyboard shortcut command bindings (Shift+Enter, Ctrl+/, Tab, Shift+Tab)
-5. License check integration in `SpawnMCAEditorTab()`
+2. License check integration in `SpawnMCAEditorTab()`
+3. Plugin icon / branding resources

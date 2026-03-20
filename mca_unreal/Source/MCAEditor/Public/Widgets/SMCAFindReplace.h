@@ -91,6 +91,12 @@ private:
 	/** Total match count. */
 	int32 TotalMatches;
 
+	/** Character offsets of all found matches. */
+	TArray<int32> MatchOffsets;
+
+	/** Length of the search query (for selection). */
+	int32 MatchLength;
+
 	// --- Child Widgets -----------------------------------------------------
 
 	/** Search input field. */

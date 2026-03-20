@@ -44,6 +44,12 @@ public:
 	/** Construct the widget. */
 	void Construct(const FArguments& InArgs);
 
+	/** Panel accepts keyboard focus so shortcuts work when docked. */
+	virtual bool SupportsKeyboardFocus() const override { return true; }
+
+	/** Route keyboard input through the command list. */
+	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+
 private:
 
 	// --- Toolbar Actions ---------------------------------------------------
@@ -123,4 +129,32 @@ private:
 
 	/** Connection status indicator. */
 	TSharedPtr<STextBlock> ConnectionStatusText;
+
+	// --- Command Binding ---------------------------------------------------
+
+	/** Command list mapping keyboard shortcuts to actions. */
+	TSharedPtr<FUICommandList> CommandList;
+
+	/** Bind all keyboard shortcuts to their handler functions. */
+	void BindCommands();
+
+	// --- Shortcut Actions --------------------------------------------------
+
+	/** Toggle the find bar (Ctrl+F). */
+	void OnToggleFind();
+
+	/** Toggle the find+replace bar (Ctrl+H). */
+	void OnToggleFindReplace();
+
+	/** Open quick-open dialog (Ctrl+P). */
+	void OnQuickOpen();
+
+	/** Open go-to-line dialog (Ctrl+G). */
+	void OnGoToLine();
+
+	/** Toggle comment on current line (Ctrl+/). */
+	void OnToggleComment();
+
+	/** Quick-open panel widget. */
+	TSharedPtr<class SMCAQuickOpen> QuickOpenPanel;
 };

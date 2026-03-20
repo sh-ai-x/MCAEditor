@@ -9,9 +9,16 @@
 #include "DirectoryWatcherModule.h"
 #include "IDirectoryWatcher.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/FileHelper.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Application/SlateApplication.h"
+#include "DesktopPlatformModule.h"
+#include "HAL/PlatformApplicationMisc.h"
 
 #define LOCTEXT_NAMESPACE "SMCASidebar"
 
@@ -202,8 +209,201 @@ void SMCASidebar::OnItemDoubleClicked(TSharedPtr<FMCAFileItem> Item)
 
 TSharedPtr<SWidget> SMCASidebar::OnContextMenuOpening()
 {
-	// TODO Phase 3: Build context menu (New File, Rename, Delete, Reveal in Explorer).
-	return nullptr;
+	// Get the currently selected item from the tree view.
+	TArray<TSharedPtr<FMCAFileItem>> SelectedItems = TreeView->GetSelectedItems();
+	TSharedPtr<FMCAFileItem> SelectedItem = SelectedItems.Num() > 0 ? SelectedItems[0] : nullptr;
+
+	FMenuBuilder MenuBuilder(true, nullptr);
+
+	// --- New File (always available) ---
+	MenuBuilder.AddMenuEntry(
+		LOCTEXT("NewFile", "New File"),
+		LOCTEXT("NewFileTooltip", "Create a new file in this directory"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuNewFile, SelectedItem))
+	);
+
+	// --- New Folder (always available) ---
+	MenuBuilder.AddMenuEntry(
+		LOCTEXT("NewFolder", "New Folder"),
+		LOCTEXT("NewFolderTooltip", "Create a new folder in this directory"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuNewFolder, SelectedItem))
+	);
+
+	if (SelectedItem.IsValid())
+	{
+		MenuBuilder.AddMenuSeparator();
+
+		// --- Rename ---
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("Rename", "Rename"),
+			LOCTEXT("RenameTooltip", "Rename this file or folder"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuRename, SelectedItem))
+		);
+
+		// --- Delete ---
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("Delete", "Delete"),
+			LOCTEXT("DeleteTooltip", "Delete this file or folder"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuDelete, SelectedItem))
+		);
+
+		MenuBuilder.AddMenuSeparator();
+
+		// --- Reveal in Explorer ---
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("RevealInExplorer", "Reveal in Explorer"),
+			LOCTEXT("RevealInExplorerTooltip", "Open the containing folder in the file browser"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuRevealInExplorer, SelectedItem))
+		);
+
+		// --- Copy Path ---
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("CopyPath", "Copy Path"),
+			LOCTEXT("CopyPathTooltip", "Copy the full path to the clipboard"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SMCASidebar::OnContextMenuCopyPath, SelectedItem))
+		);
+	}
+
+	return MenuBuilder.MakeWidget();
+}
+
+
+void SMCASidebar::OnContextMenuNewFile(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	// Determine the target directory.
+	FString TargetDir = RootPath;
+	if (ContextItem.IsValid())
+	{
+		TargetDir = ContextItem->bIsDirectory ? ContextItem->FullPath : FPaths::GetPath(ContextItem->FullPath);
+	}
+
+	// Create a new untitled file.
+	FString NewFilePath = TargetDir / TEXT("untitled.py");
+	int32 Counter = 1;
+	while (IFileManager::Get().FileExists(*NewFilePath))
+	{
+		NewFilePath = TargetDir / FString::Printf(TEXT("untitled_%d.py"), Counter++);
+	}
+
+	FFileHelper::SaveStringToFile(TEXT(""), *NewFilePath);
+	RefreshTree();
+
+	// Open the new file.
+	OnFileSelectedDelegate.ExecuteIfBound(NewFilePath);
+}
+
+
+void SMCASidebar::OnContextMenuNewFolder(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	FString TargetDir = RootPath;
+	if (ContextItem.IsValid())
+	{
+		TargetDir = ContextItem->bIsDirectory ? ContextItem->FullPath : FPaths::GetPath(ContextItem->FullPath);
+	}
+
+	FString NewFolderPath = TargetDir / TEXT("new_folder");
+	int32 Counter = 1;
+	while (IFileManager::Get().DirectoryExists(*NewFolderPath))
+	{
+		NewFolderPath = TargetDir / FString::Printf(TEXT("new_folder_%d"), Counter++);
+	}
+
+	IFileManager::Get().MakeDirectory(*NewFolderPath, true);
+	RefreshTree();
+}
+
+
+void SMCASidebar::OnContextMenuRename(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	if (!ContextItem.IsValid())
+	{
+		return;
+	}
+
+	// Open a small modal dialog for the new name.
+	TSharedRef<SWindow> RenameWindow = SNew(SWindow)
+		.Title(LOCTEXT("RenameTitle", "Rename"))
+		.SizingRule(ESizingRule::Autosized)
+		.SupportsMaximize(false)
+		.SupportsMinimize(false);
+
+	TSharedPtr<SEditableTextBox> NameInput;
+
+	RenameWindow->SetContent(
+		SNew(SBox)
+		.Padding(16.0f)
+		.WidthOverride(300.0f)
+		[
+			SAssignNew(NameInput, SEditableTextBox)
+			.Text(FText::FromString(ContextItem->DisplayName))
+			.OnTextCommitted_Lambda([this, ContextItem, &RenameWindow](const FText& Text, ETextCommit::Type CommitType)
+			{
+				if (CommitType == ETextCommit::OnEnter)
+				{
+					FString NewName = Text.ToString();
+					if (!NewName.IsEmpty() && NewName != ContextItem->DisplayName)
+					{
+						FString ParentDir = FPaths::GetPath(ContextItem->FullPath);
+						FString NewPath = ParentDir / NewName;
+						IFileManager::Get().Move(*NewPath, *ContextItem->FullPath);
+						RefreshTree();
+					}
+					RenameWindow->RequestDestroyWindow();
+				}
+			})
+		]
+	);
+
+	FSlateApplication::Get().AddModalWindow(RenameWindow, AsShared());
+}
+
+
+void SMCASidebar::OnContextMenuDelete(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	if (!ContextItem.IsValid())
+	{
+		return;
+	}
+
+	// Delete the file or directory.
+	if (ContextItem->bIsDirectory)
+	{
+		IFileManager::Get().DeleteDirectory(*ContextItem->FullPath, false, true);
+	}
+	else
+	{
+		IFileManager::Get().Delete(*ContextItem->FullPath);
+	}
+
+	RefreshTree();
+}
+
+
+void SMCASidebar::OnContextMenuRevealInExplorer(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	if (!ContextItem.IsValid())
+	{
+		return;
+	}
+
+	FPlatformProcess::ExploreFolder(*ContextItem->FullPath);
+}
+
+
+void SMCASidebar::OnContextMenuCopyPath(TSharedPtr<FMCAFileItem> ContextItem)
+{
+	if (!ContextItem.IsValid())
+	{
+		return;
+	}
+
+	FPlatformApplicationMisc::ClipboardCopy(*ContextItem->FullPath);
 }
 
 

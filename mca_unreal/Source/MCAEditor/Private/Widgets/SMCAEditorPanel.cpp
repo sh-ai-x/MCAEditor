@@ -15,14 +15,19 @@
 #include "MCAEditorStyle.h"
 #include "MCAEditorSettings.h"
 
+#include "Widgets/SMCAQuickOpen.h"
+#include "MCAEditorCommands.h"
+
 #include "DesktopPlatformModule.h"
 #include "Misc/FileHelper.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SOverlay.h"
+#include "Framework/Application/SlateApplication.h"
 
 #define LOCTEXT_NAMESPACE "SMCAEditorPanel"
 
@@ -124,6 +129,17 @@ void SMCAEditorPanel::Construct(const FArguments& InArgs)
 						SAssignNew(FindReplaceBar, SMCAFindReplace)
 						.CodeEditor(CodeEditor)
 					]
+
+					// Quick-open overlay (centered).
+					+ SOverlay::Slot()
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Top)
+					.Padding(0.0f, 40.0f, 0.0f, 0.0f)
+					[
+						SAssignNew(QuickOpenPanel, SMCAQuickOpen)
+						.RootDirectory(FPaths::ProjectDir())
+						.OnFileSelected(FOnQuickOpenFileSelected::CreateSP(this, &SMCAEditorPanel::OnSidebarFileSelected))
+					]
 				]
 			]
 
@@ -154,6 +170,9 @@ void SMCAEditorPanel::Construct(const FArguments& InArgs)
 	NewTab.CursorLine = 1;
 	NewTab.CursorColumn = 1;
 	TabBar->AddTab(NewTab);
+
+	// Bind keyboard shortcuts to panel actions.
+	BindCommands();
 }
 
 
@@ -527,6 +546,199 @@ void SMCAEditorPanel::UpdateStatusBar()
 			CodeEditor->GetCursorColumn()
 		);
 		StatusBarText->SetText(FText::FromString(StatusText));
+	}
+}
+
+
+// --- Command Binding -------------------------------------------------------
+
+void SMCAEditorPanel::BindCommands()
+{
+	CommandList = MakeShared<FUICommandList>();
+
+	const FMCAEditorCommands& Commands = FMCAEditorCommands::Get();
+
+	// Shift+Enter — Execute code.
+	CommandList->MapAction(Commands.ExecuteCode,
+		FExecuteAction::CreateLambda([this]() { OnExecuteClicked(); }),
+		FCanExecuteAction());
+
+	// Ctrl+S — Save file.
+	CommandList->MapAction(Commands.SaveFile,
+		FExecuteAction::CreateLambda([this]() { OnSaveClicked(); }),
+		FCanExecuteAction());
+
+	// Ctrl+O — Open file.
+	CommandList->MapAction(Commands.OpenFile,
+		FExecuteAction::CreateLambda([this]() { OnOpenClicked(); }),
+		FCanExecuteAction());
+
+	// Ctrl+N — New file.
+	CommandList->MapAction(Commands.NewFile,
+		FExecuteAction::CreateLambda([this]() { OnNewFileClicked(); }),
+		FCanExecuteAction());
+
+	// Ctrl+F — Toggle find bar.
+	CommandList->MapAction(Commands.FindReplace,
+		FExecuteAction::CreateSP(this, &SMCAEditorPanel::OnToggleFind),
+		FCanExecuteAction());
+
+	// Ctrl+P — Quick open.
+	CommandList->MapAction(Commands.QuickOpen,
+		FExecuteAction::CreateSP(this, &SMCAEditorPanel::OnQuickOpen),
+		FCanExecuteAction());
+
+	// Ctrl+G — Go to line.
+	CommandList->MapAction(Commands.GoToLine,
+		FExecuteAction::CreateSP(this, &SMCAEditorPanel::OnGoToLine),
+		FCanExecuteAction());
+
+	// Ctrl+/ — Toggle comment.
+	CommandList->MapAction(Commands.ToggleComment,
+		FExecuteAction::CreateSP(this, &SMCAEditorPanel::OnToggleComment),
+		FCanExecuteAction());
+}
+
+
+FReply SMCAEditorPanel::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	// Let the command list try to process the shortcut first.
+	if (CommandList.IsValid() && CommandList->ProcessCommandBindings(InKeyEvent))
+	{
+		return FReply::Handled();
+	}
+
+	// Tab / Shift+Tab — Indent / Dedent.
+	if (InKeyEvent.GetKey() == EKeys::Tab && CodeEditor.IsValid())
+	{
+		if (InKeyEvent.IsShiftDown())
+		{
+			CodeEditor->DedentSelection();
+		}
+		else
+		{
+			CodeEditor->IndentSelection();
+		}
+		return FReply::Handled();
+	}
+
+	// Escape — Close find bar if open.
+	if (InKeyEvent.GetKey() == EKeys::Escape && FindReplaceBar.IsValid() && FindReplaceBar->IsBarVisible())
+	{
+		FindReplaceBar->Hide();
+		return FReply::Handled();
+	}
+
+	return SCompoundWidget::OnKeyDown(MyGeometry, InKeyEvent);
+}
+
+
+// --- Shortcut Actions ------------------------------------------------------
+
+void SMCAEditorPanel::OnToggleFind()
+{
+	if (FindReplaceBar.IsValid())
+	{
+		if (FindReplaceBar->IsBarVisible())
+		{
+			FindReplaceBar->Hide();
+		}
+		else
+		{
+			FindReplaceBar->ShowFind();
+		}
+	}
+}
+
+
+void SMCAEditorPanel::OnToggleFindReplace()
+{
+	if (FindReplaceBar.IsValid())
+	{
+		if (FindReplaceBar->IsBarVisible())
+		{
+			FindReplaceBar->Hide();
+		}
+		else
+		{
+			FindReplaceBar->ShowFindReplace();
+		}
+	}
+}
+
+
+void SMCAEditorPanel::OnQuickOpen()
+{
+	if (QuickOpenPanel.IsValid())
+	{
+		QuickOpenPanel->Show();
+	}
+}
+
+
+void SMCAEditorPanel::OnGoToLine()
+{
+	if (!CodeEditor.IsValid())
+	{
+		return;
+	}
+
+	// Create a simple inline input dialog for the line number.
+	// Uses a modal popup window with a single text field.
+	TSharedRef<SWindow> GoToWindow = SNew(SWindow)
+		.Title(LOCTEXT("GoToLineTitle", "Go To Line"))
+		.SizingRule(ESizingRule::Autosized)
+		.SupportsMaximize(false)
+		.SupportsMinimize(false)
+		.HasCloseButton(true);
+
+	TSharedPtr<SEditableTextBox> LineInput;
+
+	GoToWindow->SetContent(
+		SNew(SBox)
+		.Padding(16.0f)
+		.WidthOverride(250.0f)
+		[
+			SNew(SVerticalBox)
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("GoToLineLabel", "Line Number:"))
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SAssignNew(LineInput, SEditableTextBox)
+				.HintText(LOCTEXT("GoToLineHint", "Enter line number..."))
+				.OnTextCommitted_Lambda([this, &GoToWindow](const FText& Text, ETextCommit::Type CommitType)
+				{
+					if (CommitType == ETextCommit::OnEnter)
+					{
+						int32 LineNumber = FCString::Atoi(*Text.ToString());
+						if (LineNumber > 0 && CodeEditor.IsValid())
+						{
+							CodeEditor->GoToLine(LineNumber);
+						}
+						GoToWindow->RequestDestroyWindow();
+					}
+				})
+			]
+		]
+	);
+
+	FSlateApplication::Get().AddModalWindow(GoToWindow, SharedThis(this));
+}
+
+
+void SMCAEditorPanel::OnToggleComment()
+{
+	if (CodeEditor.IsValid())
+	{
+		CodeEditor->ToggleComment();
 	}
 }
 

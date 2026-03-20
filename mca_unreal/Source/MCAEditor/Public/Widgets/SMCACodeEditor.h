@@ -81,6 +81,12 @@ public:
 	/** Go to a specific line number (1-based). */
 	void GoToLine(int32 LineNumber);
 
+	/** Select a range of text by character offset and length. */
+	void SelectRange(int32 StartOffset, int32 Length);
+
+	/** Replace the current selection with new text. */
+	void ReplaceSelectedText(const FString& NewText);
+
 	// --- Edit Operations ---------------------------------------------------
 
 	/** Toggle line comment (Ctrl+/) on the current line or selection. */

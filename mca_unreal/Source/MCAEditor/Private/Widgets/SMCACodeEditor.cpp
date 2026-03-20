@@ -690,6 +690,104 @@ void SMCACodeEditor::GoToLine(int32 LineNumber)
 }
 
 
+void SMCACodeEditor::SelectRange(int32 StartOffset, int32 Length)
+{
+	if (!TextBox.IsValid())
+	{
+		return;
+	}
+
+	// Convert character offset to line/column FTextLocation.
+	FString Content = TextBox->GetText().ToString();
+	int32 Line = 0;
+	int32 Col = 0;
+
+	// Find start position.
+	for (int32 i = 0; i < StartOffset && i < Content.Len(); ++i)
+	{
+		if (Content[i] == TEXT('\n'))
+		{
+			Line++;
+			Col = 0;
+		}
+		else
+		{
+			Col++;
+		}
+	}
+
+	FTextLocation StartLoc(Line, Col);
+
+	// Find end position.
+	int32 EndOffset = StartOffset + Length;
+	for (int32 i = StartOffset; i < EndOffset && i < Content.Len(); ++i)
+	{
+		if (Content[i] == TEXT('\n'))
+		{
+			Line++;
+			Col = 0;
+		}
+		else
+		{
+			Col++;
+		}
+	}
+
+	FTextLocation EndLoc(Line, Col);
+
+	// Select the range — scroll to and highlight.
+	TextBox->GoTo(StartLoc);
+	TextBox->SelectText(StartLoc, EndLoc);
+}
+
+
+void SMCACodeEditor::ReplaceSelectedText(const FString& NewText)
+{
+	if (!TextBox.IsValid())
+	{
+		return;
+	}
+
+	// Get the full text, find the selection, and replace.
+	FString Selected = TextBox->GetSelectedText().ToString();
+	if (Selected.IsEmpty())
+	{
+		return;
+	}
+
+	FString FullText = TextBox->GetText().ToString();
+
+	// Find the selection start offset by scanning the text.
+	// Use the cursor location as a hint.
+	FTextLocation CursorLoc = TextBox->GetCursorLocation();
+	int32 CursorOffset = 0;
+	FString ContentSoFar = FullText;
+	TArray<FString> Lines;
+	FullText.ParseIntoArrayLines(Lines);
+
+	// Calculate cursor offset from line/column.
+	for (int32 i = 0; i < CursorLoc.GetLineIndex() && i < Lines.Num(); ++i)
+	{
+		CursorOffset += Lines[i].Len() + 1; // +1 for newline
+	}
+	CursorOffset += CursorLoc.GetOffset();
+
+	// The selection starts before the cursor. Search backwards for the selected text.
+	int32 SelectionStart = FullText.Find(Selected, ESearchCase::CaseSensitive, ESearchDir::FromEnd, CursorOffset);
+	if (SelectionStart == INDEX_NONE)
+	{
+		// Fallback: search from the start.
+		SelectionStart = FullText.Find(Selected, ESearchCase::CaseSensitive);
+	}
+
+	if (SelectionStart != INDEX_NONE)
+	{
+		FString NewFullText = FullText.Left(SelectionStart) + NewText + FullText.Mid(SelectionStart + Selected.Len());
+		TextBox->SetText(FText::FromString(NewFullText));
+	}
+}
+
+
 void SMCACodeEditor::ToggleComment()
 {
 	if (!TextBox.IsValid())

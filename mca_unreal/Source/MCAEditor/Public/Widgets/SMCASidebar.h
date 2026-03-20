@@ -75,6 +75,26 @@ private:
 	/** Build right-click context menu. */
 	TSharedPtr<SWidget> OnContextMenuOpening();
 
+	// --- Context Menu Actions ----------------------------------------------
+
+	/** Create a new file in the selected directory. */
+	void OnContextMenuNewFile(TSharedPtr<FMCAFileItem> ContextItem);
+
+	/** Create a new folder in the selected directory. */
+	void OnContextMenuNewFolder(TSharedPtr<FMCAFileItem> ContextItem);
+
+	/** Rename the selected item. */
+	void OnContextMenuRename(TSharedPtr<FMCAFileItem> ContextItem);
+
+	/** Delete the selected item. */
+	void OnContextMenuDelete(TSharedPtr<FMCAFileItem> ContextItem);
+
+	/** Open the containing folder in the system file browser. */
+	void OnContextMenuRevealInExplorer(TSharedPtr<FMCAFileItem> ContextItem);
+
+	/** Copy the full path to the clipboard. */
+	void OnContextMenuCopyPath(TSharedPtr<FMCAFileItem> ContextItem);
+
 	// --- File System -------------------------------------------------------
 
 	/** Recursively scan a directory and populate the tree. */

@@ -25,6 +25,7 @@ void SMCAFindReplace::Construct(const FArguments& InArgs)
 	bWholeWord = false;
 	CurrentMatchIndex = 0;
 	TotalMatches = 0;
+	MatchLength = 0;
 
 	// Start hidden.
 	SetVisibility(EVisibility::Collapsed);
@@ -210,32 +211,48 @@ void SMCAFindReplace::DoSearch()
 	{
 		TotalMatches = 0;
 		CurrentMatchIndex = 0;
+		MatchOffsets.Empty();
+		MatchLength = 0;
 		MatchCountText->SetText(LOCTEXT("NoMatches", "0 matches"));
 		return;
 	}
 
-	// Get the editor text and count matches.
-	FString EditorText = CodeEditorRef->GetText().ToString();
+	MatchLength = Query.Len();
 
-	// Simple substring search (TODO: regex and case-sensitive modes).
-	TotalMatches = 0;
+	// Get the editor text and find all match positions.
+	FString EditorText = CodeEditorRef->GetText().ToString();
+	ESearchCase::Type SearchCase = bCaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase;
+
+	MatchOffsets.Empty();
 	int32 SearchStart = 0;
 	while (true)
 	{
-		int32 FoundIndex = bCaseSensitive
-			? EditorText.Find(Query, ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchStart)
-			: EditorText.Find(Query, ESearchCase::IgnoreCase, ESearchDir::FromStart, SearchStart);
-
+		int32 FoundIndex = EditorText.Find(Query, SearchCase, ESearchDir::FromStart, SearchStart);
 		if (FoundIndex == INDEX_NONE)
 		{
 			break;
 		}
 
-		TotalMatches++;
+		// Whole-word check: ensure match is at word boundaries.
+		if (bWholeWord)
+		{
+			bool bStartOk = (FoundIndex == 0) || !FChar::IsAlnum(EditorText[FoundIndex - 1]);
+			int32 EndIdx = FoundIndex + MatchLength;
+			bool bEndOk = (EndIdx >= EditorText.Len()) || !FChar::IsAlnum(EditorText[EndIdx]);
+			if (!bStartOk || !bEndOk)
+			{
+				SearchStart = FoundIndex + 1;
+				continue;
+			}
+		}
+
+		MatchOffsets.Add(FoundIndex);
 		SearchStart = FoundIndex + 1;
 	}
 
-	// Update match count display.
+	TotalMatches = MatchOffsets.Num();
+
+	// Update match count display and select the current match.
 	if (TotalMatches > 0)
 	{
 		CurrentMatchIndex = FMath::Clamp(CurrentMatchIndex, 1, TotalMatches);
@@ -244,6 +261,10 @@ void SMCAFindReplace::DoSearch()
 			FText::AsNumber(CurrentMatchIndex),
 			FText::AsNumber(TotalMatches)
 		));
+
+		// Highlight the current match in the editor.
+		int32 Offset = MatchOffsets[CurrentMatchIndex - 1];
+		CodeEditorRef->SelectRange(Offset, MatchLength);
 	}
 	else
 	{
@@ -255,10 +276,19 @@ void SMCAFindReplace::DoSearch()
 
 FReply SMCAFindReplace::OnFindNext()
 {
-	if (TotalMatches > 0)
+	if (TotalMatches > 0 && CodeEditorRef.IsValid())
 	{
 		CurrentMatchIndex = (CurrentMatchIndex % TotalMatches) + 1;
-		DoSearch();
+
+		// Update display and select the match.
+		MatchCountText->SetText(FText::Format(
+			LOCTEXT("MatchCountNext", "{0} of {1}"),
+			FText::AsNumber(CurrentMatchIndex),
+			FText::AsNumber(TotalMatches)
+		));
+
+		int32 Offset = MatchOffsets[CurrentMatchIndex - 1];
+		CodeEditorRef->SelectRange(Offset, MatchLength);
 	}
 	return FReply::Handled();
 }
@@ -266,10 +296,19 @@ FReply SMCAFindReplace::OnFindNext()
 
 FReply SMCAFindReplace::OnFindPrev()
 {
-	if (TotalMatches > 0)
+	if (TotalMatches > 0 && CodeEditorRef.IsValid())
 	{
 		CurrentMatchIndex = CurrentMatchIndex > 1 ? CurrentMatchIndex - 1 : TotalMatches;
-		DoSearch();
+
+		// Update display and select the match.
+		MatchCountText->SetText(FText::Format(
+			LOCTEXT("MatchCountPrev", "{0} of {1}"),
+			FText::AsNumber(CurrentMatchIndex),
+			FText::AsNumber(TotalMatches)
+		));
+
+		int32 Offset = MatchOffsets[CurrentMatchIndex - 1];
+		CodeEditorRef->SelectRange(Offset, MatchLength);
 	}
 	return FReply::Handled();
 }
@@ -277,14 +316,50 @@ FReply SMCAFindReplace::OnFindPrev()
 
 FReply SMCAFindReplace::OnReplace()
 {
-	// TODO Phase 3: Implement single match replacement.
+	if (TotalMatches <= 0 || !CodeEditorRef.IsValid() || !ReplaceBox.IsValid())
+	{
+		return FReply::Handled();
+	}
+
+	FString ReplaceText = ReplaceBox->GetText().ToString();
+
+	// Replace the currently selected match.
+	CodeEditorRef->ReplaceSelectedText(ReplaceText);
+
+	// Re-run search to update match positions (offsets shift after replacement).
+	DoSearch();
+
 	return FReply::Handled();
 }
 
 
 FReply SMCAFindReplace::OnReplaceAll()
 {
-	// TODO Phase 3: Implement replace all.
+	if (TotalMatches <= 0 || !CodeEditorRef.IsValid() || !SearchBox.IsValid() || !ReplaceBox.IsValid())
+	{
+		return FReply::Handled();
+	}
+
+	FString Query = SearchBox->GetText().ToString();
+	FString ReplaceText = ReplaceBox->GetText().ToString();
+	FString EditorText = CodeEditorRef->GetText().ToString();
+	ESearchCase::Type SearchCase = bCaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase;
+
+	// Replace all occurrences in the text.
+	// Work backwards through match offsets to avoid invalidating earlier positions.
+	for (int32 i = MatchOffsets.Num() - 1; i >= 0; --i)
+	{
+		int32 Offset = MatchOffsets[i];
+		EditorText = EditorText.Left(Offset) + ReplaceText + EditorText.Mid(Offset + MatchLength);
+	}
+
+	// Set the updated text.
+	CodeEditorRef->SetText(FText::FromString(EditorText));
+
+	// Re-run search to update (should find zero matches now if queries differ).
+	CurrentMatchIndex = 1;
+	DoSearch();
+
 	return FReply::Handled();
 }
 
