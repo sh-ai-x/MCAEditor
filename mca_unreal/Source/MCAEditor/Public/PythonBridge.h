@@ -4,16 +4,12 @@
 //   1. In-Process: Direct execution via IPythonScriptPlugin (like InternalMayaAdapter)
 //   2. Remote: TCP via UE Remote Execution protocol (like MayaAdapter)
 //
-// Output capture strategy is determined by the Phase 0 spike
-// (tools/ue_remote_exec_spike.py). If ExecPythonCommand doesn't return
-// stdout, we wrap code in a StringIO redirect pattern.
+// Output is captured synchronously via ExecPythonCommandEx's LogOutput
+// array. This avoids the async timing issues of GEngine->Exec("py ...").
 
 #pragma once
 
 #include "CoreMinimal.h"
-
-// Forward declare the output device.
-class FMCAOutputDevice;
 
 /** Delegate fired when Python produces output (print, warnings, errors). */
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnPythonOutput, const FString& /* Output */, const FString& /* Severity */, bool /* bIsError */);
@@ -36,12 +32,12 @@ public:
 	/**
 	 * Execute Python code in-process via UE's Python plugin.
 	 *
-	 * Uses IPythonScriptPlugin::ExecPythonCommand internally.
-	 * Output is captured via a custom FOutputDevice and broadcast
-	 * through the OnPythonOutput delegate.
+	 * Uses IPythonScriptPlugin::ExecPythonCommandEx internally.
+	 * Output is captured synchronously in the LogOutput array and
+	 * broadcast through the OnPythonOutput delegate.
 	 *
 	 * @param Code      The Python code string to execute.
-	 * @param OutResult The captured stdout/result text (if any).
+	 * @param OutResult The command result text (if any).
 	 * @return True if execution succeeded without errors.
 	 */
 	bool ExecuteCode(const FString& Code, FString& OutResult);
@@ -72,29 +68,4 @@ public:
 
 	/** Broadcast delegate for Python output. UI widgets bind to this. */
 	FOnPythonOutput OnPythonOutput;
-
-private:
-
-	// --- Output Capture ---------------------------------------------------
-
-	/** Custom output device that intercepts Python log messages. */
-	TUniquePtr<FMCAOutputDevice> OutputDevice;
-
-	/** Install the output device to capture Python prints. */
-	void InstallOutputCapture();
-
-	/** Remove the output device. */
-	void RemoveOutputCapture();
-
-	/**
-	 * Wrap code in a stdout redirect if needed.
-	 *
-	 * If the Phase 0 spike determined that ExecPythonCommand doesn't
-	 * return print() output in a capturable way, this method wraps
-	 * the code in a StringIO redirect pattern.
-	 *
-	 * @param Code The original code to potentially wrap.
-	 * @return The (possibly wrapped) code string.
-	 */
-	FString WrapCodeIfNeeded(const FString& Code) const;
 };

@@ -255,7 +255,38 @@ LogPython: MCA_TEST_9: unreal module works
 LogPython: MCA_TEST_10: 42
 ```
 
+## Phase 10 — Icons + Output Capture Fix
+
+### Plugin Icons
+- Replaced placeholder blue "M" icons with branded `</>` code bracket design
+- Dark background (#1E1E1E) with orange (#E8922A) border and Consolas text
+- 16px: geometric angle brackets, 40px/128px: `</>` text with rounded corners
+
+### Output Capture — Refactored to ExecPythonCommandEx
+- **Root cause**: `GEngine->Exec("py ...")` returns immediately; Python output arrives async via `GLog` 33ms later. Synchronous `GetAllText()` checks after `ExecuteCode()` always see stale data.
+- **Fix**: Replaced `GEngine->Exec` + `FMCAOutputDevice` (custom `FOutputDevice` registered on `GLog`) with `IPythonScriptPlugin::ExecPythonCommandEx()`.
+- **ExecPythonCommandEx** executes Python synchronously and captures all output in `FPythonCommandEx::LogOutput` (array of `FPythonLogOutputEntry` with `Type` + `Output` fields).
+- **Error routing**: Exceptions (e.g., `raise ValueError(...)`) go to `CommandResult`, NOT `LogOutput`. Added explicit broadcast of `CommandResult` as `Error` severity when `!bSuccess`.
+- **Removed**: `FMCAOutputDevice` class, `InstallOutputCapture()`, `RemoveOutputCapture()`, `WrapCodeIfNeeded()`, `GLog->AddOutputDevice()` registration.
+- **Added**: `IPythonScriptPlugin.h` include, `FileExecutionScope::Public` for variable persistence across calls.
+- **GetPythonVersion()**: Now uses `ExecPythonCommandEx` to capture `sys.version` synchronously (was returning hardcoded `"3.11+"`).
+
+### Output Capture Test Results (5/5 PASS)
+| Test | Description | Result |
+|------|-------------|--------|
+| 1 | print() capture → output panel | PASS |
+| 2 | Error/exception capture (ValueError) | PASS |
+| 3 | Multi-line output (for loop with 3 prints) | PASS |
+| 4 | Warning capture (warnings.warn) | PASS |
+| 5 | Noise filter (non-Python logs excluded) | PASS |
+
+### Files Modified
+- `Source/MCAEditor/Private/PythonBridge.cpp` — full rewrite (ExecPythonCommandEx)
+- `Source/MCAEditor/Public/PythonBridge.h` — simplified (removed FMCAOutputDevice, capture methods)
+- `Resources/Icon16.png`, `Icon40.png`, `Icon128.png` — branded icons
+
 ## Next Steps
-1. Replace placeholder icons with proper artwork
-2. Test output capture routing (Python print → output panel display)
+1. ~~Replace placeholder icons~~ — Done
+2. ~~Test output capture routing~~ — Done (5/5 PASS)
 3. Test license dialog flow (trial expiry → key entry → activation)
+4. Layout overhaul — match Maya editor layout (output on top, left+right stripes)

@@ -1,82 +1,23 @@
 // Python Bridge — UE Python interpreter interface implementation.
 //
 // Provides in-process Python execution via IPythonScriptPlugin and
-// output capture via a custom FOutputDevice. The output capture
-// strategy was informed by the Phase 0 spike (tools/ue_remote_exec_spike.py).
+// synchronous output capture via ExecPythonCommandEx. The LogOutput
+// array in FPythonCommandEx captures all print/warning/error output
+// inline, avoiding the async timing issues of GEngine->Exec("py ...").
 
 #include "PythonBridge.h"
-#include "Misc/OutputDeviceRedirector.h"
-#include "HAL/PlatformProcess.h"
-
-// --- Custom Output Device for Capturing Python Output ------------------
-
-/**
- * Custom FOutputDevice that intercepts log messages from Python execution.
- *
- * UE's Python plugin writes print() output through the log system.
- * We intercept it here and route it to the output panel via delegate.
- * This is the C++ equivalent of Maya's _StdoutTee / _StderrTee.
- */
-class FMCAOutputDevice : public FOutputDevice
-{
-public:
-
-	/** Delegate to broadcast captured output. */
-	FOnPythonOutput* OutputDelegate;
-
-	/** Whether we're currently capturing (prevents recursive capture). */
-	bool bCapturing;
-
-	FMCAOutputDevice()
-		: OutputDelegate(nullptr)
-		, bCapturing(false)
-	{
-	}
-
-	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override
-	{
-		// Only capture Python-related log messages.
-		if (!bCapturing || !OutputDelegate)
-		{
-			return;
-		}
-
-		// Determine severity string for color coding in the output panel.
-		FString Severity;
-		bool bIsError = false;
-
-		if (Verbosity == ELogVerbosity::Error || Verbosity == ELogVerbosity::Fatal)
-		{
-			Severity = TEXT("Error");
-			bIsError = true;
-		}
-		else if (Verbosity == ELogVerbosity::Warning)
-		{
-			Severity = TEXT("Warning");
-		}
-		else
-		{
-			Severity = TEXT("Info");
-		}
-
-		// Broadcast the captured output.
-		OutputDelegate->Broadcast(FString(V), Severity, bIsError);
-	}
-};
+#include "IPythonScriptPlugin.h"
 
 
 // --- FPythonBridge Implementation --------------------------------------
 
 FPythonBridge::FPythonBridge()
 {
-	OutputDevice = MakeUnique<FMCAOutputDevice>();
-	InstallOutputCapture();
 }
 
 
 FPythonBridge::~FPythonBridge()
 {
-	RemoveOutputCapture();
 }
 
 
@@ -89,20 +30,55 @@ bool FPythonBridge::ExecuteCode(const FString& Code, FString& OutResult)
 		return false;
 	}
 
-	// Optionally wrap the code in a stdout redirect if the Phase 0 spike
-	// determined that ExecPythonCommand doesn't return print() output.
-	FString ExecutableCode = WrapCodeIfNeeded(Code);
+	IPythonScriptPlugin* PythonPlugin = IPythonScriptPlugin::Get();
+	if (!PythonPlugin)
+	{
+		OutResult = TEXT("Error: Could not get IPythonScriptPlugin instance.");
+		OnPythonOutput.Broadcast(OutResult, TEXT("Error"), true);
+		return false;
+	}
 
-	// Enable output capture before execution.
-	OutputDevice->bCapturing = true;
+	// Build the extended command struct for synchronous execution + output capture.
+	FPythonCommandEx PythonCommand;
+	PythonCommand.Command = Code;
+	PythonCommand.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+	PythonCommand.FileExecutionScope = EPythonFileExecutionScope::Public;
 
-	// Execute via UE's Python plugin.
-	// IPythonScriptPlugin::Get()->ExecPythonCommand(*ExecutableCode) is the
-	// primary execution path — equivalent to InternalMayaAdapter.execute().
-	bool bSuccess = GEngine->Exec(nullptr, *FString::Printf(TEXT("py %s"), *ExecutableCode));
+	// Execute synchronously — LogOutput is populated inline, no async delay.
+	bool bSuccess = PythonPlugin->ExecPythonCommandEx(PythonCommand);
 
-	// Disable capture after execution.
-	OutputDevice->bCapturing = false;
+	// Route captured log output to the output panel via delegate.
+	for (const FPythonLogOutputEntry& Entry : PythonCommand.LogOutput)
+	{
+		FString Severity;
+		bool bIsError = false;
+
+		switch (Entry.Type)
+		{
+		case EPythonLogOutputType::Error:
+			Severity = TEXT("Error");
+			bIsError = true;
+			break;
+		case EPythonLogOutputType::Warning:
+			Severity = TEXT("Warning");
+			break;
+		default:
+			Severity = TEXT("Info");
+			break;
+		}
+
+		OnPythonOutput.Broadcast(Entry.Output, Severity, bIsError);
+	}
+
+	// If execution failed, the error (traceback) is in CommandResult, not LogOutput.
+	// Broadcast it as an error so it appears in the output panel.
+	if (!bSuccess && !PythonCommand.CommandResult.IsEmpty())
+	{
+		OnPythonOutput.Broadcast(PythonCommand.CommandResult, TEXT("Error"), true);
+	}
+
+	// Store the command result for callers that need it.
+	OutResult = PythonCommand.CommandResult;
 
 	return bSuccess;
 }
@@ -111,8 +87,6 @@ bool FPythonBridge::ExecuteCode(const FString& Code, FString& OutResult)
 bool FPythonBridge::ExecuteRemote(const FString& Code, const FString& Host, int32 Port, FString& OutResult)
 {
 	// TODO: Phase 1+ — Implement TCP Remote Execution protocol.
-	// This mirrors MayaAdapter's TCP socket communication.
-	// The protocol is validated by tools/ue_remote_exec_spike.py.
 	// For now, fall back to in-process execution.
 	return ExecuteCode(Code, OutResult);
 }
@@ -120,7 +94,6 @@ bool FPythonBridge::ExecuteRemote(const FString& Code, const FString& Host, int3
 
 bool FPythonBridge::IsPythonAvailable() const
 {
-	// Check if the PythonScriptPlugin module is loaded.
 	return FModuleManager::Get().IsModuleLoaded("PythonScriptPlugin");
 }
 
@@ -132,52 +105,22 @@ FString FPythonBridge::GetPythonVersion() const
 		return TEXT("N/A");
 	}
 
-	// Query the Python version via the interpreter.
-	FString VersionResult;
-	GEngine->Exec(nullptr, TEXT("py import sys; print(sys.version)"));
-
-	// TODO: Capture the output from the above command.
-	return TEXT("3.11+");
-}
-
-
-void FPythonBridge::InstallOutputCapture()
-{
-	// Wire up the output delegate so captured messages route to our panel.
-	OutputDevice->OutputDelegate = &OnPythonOutput;
-
-	// Register with the global output device redirector.
-	GLog->AddOutputDevice(OutputDevice.Get());
-}
-
-
-void FPythonBridge::RemoveOutputCapture()
-{
-	if (OutputDevice.IsValid())
+	IPythonScriptPlugin* PythonPlugin = IPythonScriptPlugin::Get();
+	if (!PythonPlugin)
 	{
-		GLog->RemoveOutputDevice(OutputDevice.Get());
-		OutputDevice->OutputDelegate = nullptr;
+		return TEXT("N/A");
 	}
-}
 
+	// Use ExecPythonCommandEx to capture the version output synchronously.
+	FPythonCommandEx VersionCmd;
+	VersionCmd.Command = TEXT("import sys; print(sys.version.split()[0])");
+	VersionCmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+	VersionCmd.FileExecutionScope = EPythonFileExecutionScope::Public;
 
-FString FPythonBridge::WrapCodeIfNeeded(const FString& Code) const
-{
-	// TODO: Based on Phase 0 spike findings, determine if we need to wrap
-	// the code in a stdout redirect pattern (like Maya's StringIO trick).
-	//
-	// If ExecPythonCommand returns print() output via GLog, we don't need
-	// wrapping — our FMCAOutputDevice captures it directly.
-	//
-	// If it doesn't, wrap the code like this:
-	//   import sys, io
-	//   _buf = io.StringIO()
-	//   sys.stdout = _buf
-	//   exec(user_code)
-	//   sys.stdout = sys.__stdout__
-	//   print(_buf.getvalue())  # This goes through GLog
-	//
-	// For now, pass through unchanged — UE's Python plugin typically
-	// routes print() through GLog, so direct capture should work.
-	return Code;
+	if (PythonPlugin->ExecPythonCommandEx(VersionCmd) && VersionCmd.LogOutput.Num() > 0)
+	{
+		return VersionCmd.LogOutput[0].Output;
+	}
+
+	return TEXT("3.11+");
 }
