@@ -96,6 +96,19 @@ _MAYAMCP_VENV_DIR = os.path.join(_MAYAMCP_DIR, ".venv")
 # Claude Code registration names.
 _MCP_SERVER_NAME = "MCAMayaMCP"
 _EDITOR_MCP_SERVER_NAME = "MCAEditorMCP"
+_UNREAL_MCP_SERVER_NAME = "MCAUnrealMCP"
+
+# Unreal MCP server deployment paths.
+_UNREAL_SERVER_DEPLOY_PATH = os.path.join(_MCP_DIR, "mca_unreal_server.py")
+_UNREAL_SERVER_SOURCE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "mcp_unreal_server.py"
+)
+
+# Unreal MCP tool source files — deployed alongside the server.
+_UNREAL_TOOLS_SOURCE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "unreal_tools"
+)
+_UNREAL_TOOLS_DEPLOY_DIR = os.path.join(_MCP_DIR, "unreal_tools")
 
 # Subprocess timeout for git/pip operations (seconds).
 _SUBPROCESS_TIMEOUT = 120
@@ -143,6 +156,33 @@ def ensure_maya_mcp(background=True, status_callback=None):
         _run_setup(status_callback)
 
 
+def ensure_unreal_mcp(background=True, status_callback=None):
+    """
+    Ensure the MCA Unreal MCP server is deployed and registered.
+
+    Deploys the Unreal MCP server and tool files to the MCP servers
+    directory and registers with Claude Code.  Reuses the same venv
+    as the Maya MCP server (both need the ``mcp`` pip package).
+
+    The entire setup is idempotent.  No git clone is needed — the
+    Unreal tools are in-repo, not from an external repo.
+
+    :param bool background: If True, run setup in a background thread.
+    :param callable status_callback: Optional ``fn(str)`` for progress.
+    """
+    if background:
+        thread = threading.Thread(
+            target=_run_unreal_setup,
+            args=(status_callback,),
+            name="MCP-Unreal-Setup",
+            daemon=True,
+        )
+        thread.start()
+        logger.info("Unreal MCP setup started in background thread.")
+    else:
+        _run_unreal_setup(status_callback)
+
+
 def get_mcp_server_status():
     """
     Return the current status of both MCP server deployments.
@@ -186,6 +226,17 @@ def get_mcp_server_status():
             "installed": editor_installed,
             "registered": editor_registered,
             "server_path": _EDITOR_SERVER_DEPLOY_PATH if os.path.isfile(_EDITOR_SERVER_DEPLOY_PATH) else None,
+        },
+        "unreal": {
+            "name": _UNREAL_MCP_SERVER_NAME,
+            "description": "MCP server for Unreal Engine scene manipulation",
+            "installed": (
+                os.path.isfile(_UNREAL_SERVER_DEPLOY_PATH)
+                and os.path.isdir(_UNREAL_TOOLS_DEPLOY_DIR)
+                and venv_ready
+            ),
+            "registered": _is_registered(_UNREAL_MCP_SERVER_NAME),
+            "server_path": _UNREAL_SERVER_DEPLOY_PATH if os.path.isfile(_UNREAL_SERVER_DEPLOY_PATH) else None,
         },
     }
 
@@ -247,6 +298,116 @@ def _run_setup(status_callback=None):
     except Exception as exc:
         logger.warning("MCP setup failed with unexpected error: %s", exc, exc_info=True)
         _status("MCP setup: unexpected error (check logs)")
+
+
+def _run_unreal_setup(status_callback=None):
+    """
+    Run the Unreal MCP setup sequence.  Idempotent.
+
+    Steps:
+        1. Deploy the Unreal MCP server script to mcp_servers/
+        2. Deploy the Unreal tool files to mcp_servers/unreal_tools/
+        3. Ensure the shared MCP venv is ready (reuses Maya's venv)
+        4. Register the Unreal MCP server with Claude Code
+
+    :param callable status_callback: Optional ``fn(str)`` for progress.
+    """
+    def _status(msg):
+        logger.info(msg)
+        if status_callback:
+            try:
+                status_callback(msg)
+            except Exception:
+                pass
+
+    try:
+        os.makedirs(_MCP_DIR, exist_ok=True)
+
+        # Step 1: Deploy the Unreal MCP server script.
+        _status("Deploying Unreal MCP server...")
+        if os.path.isfile(_UNREAL_SERVER_SOURCE_PATH):
+            try:
+                shutil.copy2(_UNREAL_SERVER_SOURCE_PATH, _UNREAL_SERVER_DEPLOY_PATH)
+                logger.info("Deployed Unreal MCP server to %s", _UNREAL_SERVER_DEPLOY_PATH)
+            except OSError as exc:
+                logger.warning("Failed to copy Unreal server: %s", exc)
+                _status("Unreal MCP: failed to deploy server script")
+                return
+        else:
+            logger.warning("Unreal server source not found at %s", _UNREAL_SERVER_SOURCE_PATH)
+            _status("Unreal MCP: server source not found")
+            return
+
+        # Step 2: Deploy the Unreal tool files.
+        _status("Deploying Unreal MCP tools...")
+        if os.path.isdir(_UNREAL_TOOLS_SOURCE_DIR):
+            try:
+                # Remove stale tools directory and replace with fresh copy.
+                if os.path.isdir(_UNREAL_TOOLS_DEPLOY_DIR):
+                    shutil.rmtree(_UNREAL_TOOLS_DEPLOY_DIR, ignore_errors=True)
+                shutil.copytree(_UNREAL_TOOLS_SOURCE_DIR, _UNREAL_TOOLS_DEPLOY_DIR)
+                logger.info("Deployed Unreal tools to %s", _UNREAL_TOOLS_DEPLOY_DIR)
+            except OSError as exc:
+                logger.warning("Failed to copy Unreal tools: %s", exc)
+        else:
+            logger.warning("Unreal tools source not found at %s", _UNREAL_TOOLS_SOURCE_DIR)
+
+        # Step 3: Ensure the shared MCP venv is ready.
+        # The Unreal server reuses the same venv as Maya MCP.
+        if not _is_venv_ready():
+            _status("Setting up MCP server venv...")
+            # If Maya MCP isn't set up yet, we need the venv.
+            # Try to create it — this requires the MayaMCP clone for the
+            # requirements.txt, or we can install mcp directly.
+            if not _is_maya_mcp_present():
+                # Minimal setup: just ensure we have a venv with mcp.
+                logger.info("MayaMCP not present — creating minimal venv for Unreal MCP")
+                system_python = _find_system_python()
+                if system_python:
+                    os.makedirs(_MAYAMCP_VENV_DIR, exist_ok=True)
+                    try:
+                        subprocess.run(
+                            [system_python, "-m", "venv", _MAYAMCP_VENV_DIR],
+                            check=True,
+                            timeout=_SUBPROCESS_TIMEOUT,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            creationflags=_CREATION_FLAGS,
+                        )
+                        venv_python = _get_venv_python()
+                        if venv_python:
+                            subprocess.run(
+                                [venv_python, "-m", "pip", "install", "--quiet", "mcp"],
+                                check=True,
+                                timeout=_SUBPROCESS_TIMEOUT,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                creationflags=_CREATION_FLAGS,
+                            )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                            OSError) as exc:
+                        logger.warning("Venv setup for Unreal MCP failed: %s", exc)
+                        _status("Unreal MCP: venv setup failed")
+                        return
+            else:
+                if not _setup_venv():
+                    _status("Unreal MCP: venv creation failed")
+                    return
+
+        # Step 4: Register the Unreal MCP server with Claude Code.
+        if not _is_registered(_UNREAL_MCP_SERVER_NAME):
+            _status("Registering Unreal MCP server with Claude Code...")
+            _register_server_with_claude_code(
+                _UNREAL_MCP_SERVER_NAME, _UNREAL_SERVER_DEPLOY_PATH
+            )
+
+        _status("Unreal MCP setup complete!")
+        logger.info("Unreal MCP setup complete. Server: %s, Tools: %s",
+                     _UNREAL_SERVER_DEPLOY_PATH, _UNREAL_TOOLS_DEPLOY_DIR)
+
+    except Exception as exc:
+        logger.warning("Unreal MCP setup failed: %s", exc, exc_info=True)
+        _status("Unreal MCP setup: unexpected error (check logs)")
 
 
 # =============================================================================

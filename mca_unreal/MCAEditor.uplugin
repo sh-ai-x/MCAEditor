@@ -1,0 +1,31 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "MCA Editor",
+	"Description": "Professional Python code editor for Unreal Engine with syntax highlighting, multi-file tabs, integrated terminal, and MCP server for Claude Code integration.",
+	"Category": "Editor",
+	"CreatedBy": "MechanicalArt",
+	"CreatedByURL": "https://mcaeditor.com",
+	"DocsURL": "https://mcaeditor.com/docs",
+	"MarketplaceURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"EnabledByDefault": true,
+	"Modules": [
+		{
+			"Name": "MCAEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true,
+			"Optional": true
+		}
+	]
+}
