@@ -128,7 +128,39 @@ not the Remote Execution TCP protocol.
 - `Source/MCAEditor/Private/Widgets/SMCASidebar.cpp` — context menu + 6 actions
 - `Source/MCAEditor/Public/Widgets/SMCASidebar.h` — context menu declarations
 
+## Phase 4 — License Check System
+
+### `MCALicenseCheck.h` / `MCALicenseCheck.cpp` — Offline License Validation
+- Ported from `mca_core/license.py` to C++ (same HMAC secret, same key format)
+- `FMCALicenseResult` struct: bValid, bPerpetual, ExpiryDate, DaysRemaining, Error
+- `FMCALicenseStatus` struct: bLicensed, bTrial, DaysRemaining, bNeedsKey, Message
+- `ValidateKey()`: base32 decode → HMAC-SHA256 verify → expiry check
+- `CheckLicense()`: stored key → trial period → needs_key fallthrough
+- `StoreKey()`: validates then persists to UE config
+- HMAC-SHA256 via OpenSSL (bundled with UE), added `AddEngineThirdPartyPrivateStaticDependencies`
+- Base32 decode implemented inline (RFC 4648)
+- Trial period: 14 days from first launch, stored in `GEditorPerProjectIni`
+- Date epoch: 2025-01-01 UTC (unix 1735689600), matching Python implementation
+
+### `MCAEditorModule.cpp` — License Gate in SpawnMCAEditorTab
+- `SpawnMCAEditorTab()` now calls `FMCALicenseCheck::CheckLicense()` before creating editor
+- If `bNeedsKey`: shows `BuildLicensePanel()` (key input + Activate button) instead of editor
+- If licensed/trial active: shows full `SMCAEditorPanel` as before
+- `BuildLicensePanel()`: centered UI with title, message, key input, status label, activate button
+- On successful activation: replaces license panel with `SMCAEditorPanel` in-place
+- On failure: shows validation error in red status text
+
+### `MCAEditor.Build.cs` — Updated Dependencies
+- Added `DesktopPlatform` module
+- Added `OpenSSL` via `AddEngineThirdPartyPrivateStaticDependencies`
+
+## Files Modified (Phase 4)
+- `Source/MCAEditor/Public/MCALicenseCheck.h` — NEW: license validation header
+- `Source/MCAEditor/Private/MCALicenseCheck.cpp` — NEW: full implementation
+- `Source/MCAEditor/Private/MCAEditorModule.cpp` — license gate + license panel
+- `Source/MCAEditor/Public/MCAEditorModule.h` — BuildLicensePanel declaration
+- `Source/MCAEditor/MCAEditor.Build.cs` — OpenSSL + DesktopPlatform deps
+
 ## Next Steps
 1. Copy `mca_unreal/` to a UE project's Plugins/ and compile with UBT
-2. License check integration in `SpawnMCAEditorTab()`
-3. Plugin icon / branding resources
+2. Plugin icon / branding resources

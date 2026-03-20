@@ -36,6 +36,9 @@ private:
 	/** Spawns the MCA Editor tab when the user opens it. */
 	TSharedRef<class SDockTab> SpawnMCAEditorTab(const class FSpawnTabArgs& Args);
 
+	/** Builds the license key entry UI shown when trial has expired. */
+	TSharedRef<SWidget> BuildLicensePanel(TSharedRef<class SDockTab> OwnerTab);
+
 	// --- Toolbar / Menu Registration ---------------------------------------
 
 	/** Registers the toolbar extension button. */

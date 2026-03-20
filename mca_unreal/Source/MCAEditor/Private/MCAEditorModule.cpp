@@ -7,6 +7,7 @@
 #include "MCAEditorModule.h"
 #include "MCAEditorCommands.h"
 #include "MCAEditorStyle.h"
+#include "MCALicenseCheck.h"
 #include "Widgets/SMCAEditorPanel.h"
 
 #include "Framework/Docking/TabManager.h"
@@ -14,6 +15,10 @@
 #include "LevelEditor.h"
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Layout/SBox.h"
 
 #define LOCTEXT_NAMESPACE "FMCAEditorModule"
 
@@ -65,15 +70,126 @@ void FMCAEditorModule::ShutdownModule()
 
 TSharedRef<SDockTab> FMCAEditorModule::SpawnMCAEditorTab(const FSpawnTabArgs& Args)
 {
-	// TODO: Activation check — validate license before creating editor panel.
-	// Mirror the pattern from mca_core/license.py (HMAC-SHA256 offline validation).
-	// Until implemented, the plugin is unprotected.
-	// See: mca_core/license.py for the key format and validation logic.
+	// --- License check — gate editor access behind valid key or trial ---
+	FMCALicenseStatus LicenseStatus = FMCALicenseCheck::CheckLicense();
 
-	return SNew(SDockTab)
-		.TabRole(NomadTab)
+	TSharedRef<SDockTab> Tab = SNew(SDockTab)
+		.TabRole(NomadTab);
+
+	if (LicenseStatus.bNeedsKey)
+	{
+		// Trial expired and no valid key — show license entry UI instead of editor.
+		Tab->SetContent(BuildLicensePanel(Tab));
+	}
+	else
+	{
+		// Licensed or trial active — show the full editor.
+		Tab->SetContent(SNew(SMCAEditorPanel));
+
+		// Log license status for diagnostics.
+		UE_LOG(LogTemp, Log, TEXT("MCAEditor: %s"), *LicenseStatus.Message);
+	}
+
+	return Tab;
+}
+
+
+TSharedRef<SWidget> FMCAEditorModule::BuildLicensePanel(TSharedRef<SDockTab> OwnerTab)
+{
+	// Build a centered license key entry panel shown when the trial has expired.
+	TSharedPtr<SEditableTextBox> KeyInput;
+	TSharedPtr<STextBlock> StatusText;
+
+	return SNew(SBox)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		.Padding(40.0f)
 		[
-			SNew(SMCAEditorPanel)
+			SNew(SVerticalBox)
+
+			// --- Title ---
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("LicenseTitle", "MCA Editor — License Required"))
+				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 16))
+				.Justification(ETextJustify::Center)
+			]
+
+			// --- Message ---
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 16.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("LicenseMessage", "Your 14-day trial has expired. Please enter a license key to continue."))
+				.Justification(ETextJustify::Center)
+				.AutoWrapText(true)
+			]
+
+			// --- Key Input ---
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(400.0f)
+				.HAlign(HAlign_Center)
+				[
+					SAssignNew(KeyInput, SEditableTextBox)
+					.HintText(LOCTEXT("KeyHint", "MCA-XXXX-XXXX-XXXX-XXXX"))
+				]
+			]
+
+			// --- Status label (shows validation result) ---
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SAssignNew(StatusText, STextBlock)
+				.Text(FText::GetEmpty())
+				.Justification(ETextJustify::Center)
+				.ColorAndOpacity(FLinearColor::Red)
+			]
+
+			// --- Activate Button ---
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.HAlign(HAlign_Center)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("ActivateButton", "Activate"))
+				.OnClicked_Lambda([KeyInput, StatusText, OwnerTab]() -> FReply
+				{
+					if (!KeyInput.IsValid())
+					{
+						return FReply::Handled();
+					}
+
+					FString Key = KeyInput->GetText().ToString();
+					FMCALicenseResult Result = FMCALicenseCheck::StoreKey(Key);
+
+					if (Result.bValid)
+					{
+						// Key accepted — replace the license panel with the full editor.
+						OwnerTab->SetContent(SNew(SMCAEditorPanel));
+
+						UE_LOG(LogTemp, Log, TEXT("MCAEditor: License activated (expires: %s)"), *Result.ExpiryDate);
+					}
+					else
+					{
+						// Show the error message.
+						if (StatusText.IsValid())
+						{
+							StatusText->SetText(FText::FromString(Result.Error));
+						}
+					}
+
+					return FReply::Handled();
+				})
+			]
 		];
 }
 
