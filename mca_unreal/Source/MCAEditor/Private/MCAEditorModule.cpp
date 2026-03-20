@@ -20,6 +20,9 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
 
+// Define our custom log category.
+DEFINE_LOG_CATEGORY(LogMCAEditor);
+
 #define LOCTEXT_NAMESPACE "FMCAEditorModule"
 
 // Tab name constant — used for spawner registration and invocation.
@@ -87,7 +90,7 @@ TSharedRef<SDockTab> FMCAEditorModule::SpawnMCAEditorTab(const FSpawnTabArgs& Ar
 		Tab->SetContent(SNew(SMCAEditorPanel));
 
 		// Log license status for diagnostics.
-		UE_LOG(LogTemp, Log, TEXT("MCAEditor: %s"), *LicenseStatus.Message);
+		UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: %s"), *LicenseStatus.Message);
 	}
 
 	return Tab;
@@ -176,7 +179,7 @@ TSharedRef<SWidget> FMCAEditorModule::BuildLicensePanel(TSharedRef<SDockTab> Own
 						// Key accepted — replace the license panel with the full editor.
 						OwnerTab->SetContent(SNew(SMCAEditorPanel));
 
-						UE_LOG(LogTemp, Log, TEXT("MCAEditor: License activated (expires: %s)"), *Result.ExpiryDate);
+						UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: License activated (expires: %s)"), *Result.ExpiryDate);
 					}
 					else
 					{

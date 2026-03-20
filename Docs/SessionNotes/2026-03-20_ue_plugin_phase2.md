@@ -195,7 +195,34 @@ not the Remote Execution TCP protocol.
 - Tab spawner registered (Window menu + toolbar button available)
 - 1177 lines of log output, zero MCA-related warnings or errors
 
+## Phase 8 — Tab Auto-Open + Custom Log Category
+
+### Key Findings
+- **`LogTemp` is suppressed from file log in UE 5.6** — messages at Log and Warning level never appear in the disk log file. Must use custom log categories (`DECLARE_LOG_CATEGORY_EXTERN` / `DEFINE_LOG_CATEGORY`).
+- **`FCoreDelegates::OnPostEngineInit` fires BEFORE editor plugin modules load** — editor plugins are loaded during the PostEngineInit phase, so this delegate has already broadcast by the time `StartupModule()` runs. Use `FTSTicker` for deferred operations instead.
+- **Tab auto-open works via `FTSTicker::GetCoreTicker().AddTicker()`** — 1-second delay ensures Slate is fully initialized before `TryInvokeTab()`.
+
+### Changes
+- Added `LogMCAEditor` custom log category (`DECLARE_LOG_CATEGORY_EXTERN` in header, `DEFINE_LOG_CATEGORY` in cpp)
+- Replaced all `UE_LOG(LogTemp, ...)` with `UE_LOG(LogMCAEditor, ...)` across `MCAEditorModule.cpp` and `MCALicenseCheck.cpp`
+- Removed auto-open testing code (was for testing only)
+
+### Verified Runtime Behavior
+```
+LogMCAEditor: MCAEditor: Trial started — 14 days
+LogMCAEditor: MCAEditor: Trial (14 days remaining)
+LogMCAEditor: MCAEditor: Auto-opened editor tab
+```
+- License config written: `[MCAEditor] FirstLaunchDate=2026-03-20T07:02:09.678Z`
+- Tab spawns and renders `SMCAEditorPanel` with full Slate UI
+- DroidSansMono font loaded for code editor (monospace text rendering confirmed)
+
+### Files Modified
+- `Source/MCAEditor/Public/MCAEditorModule.h` — `LogMCAEditor` declaration
+- `Source/MCAEditor/Private/MCAEditorModule.cpp` — custom log category, cleaned auto-open
+- `Source/MCAEditor/Private/MCALicenseCheck.cpp` — `LogMCAEditor` usage
+
 ## Next Steps
 1. Replace placeholder icons with proper artwork
-2. Test tab spawning + code editing + Python execution interactively
+2. Test code editing + Python execution interactively
 3. Test license dialog flow (trial expiry → key entry → activation)

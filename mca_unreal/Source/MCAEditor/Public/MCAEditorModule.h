@@ -8,6 +8,10 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
+// Custom log category for the MCA Editor plugin.
+// NOTE: LogTemp is suppressed from the file log in UE 5.6 — always use this.
+DECLARE_LOG_CATEGORY_EXTERN(LogMCAEditor, Log, All);
+
 class FToolBarBuilder;
 class FExtender;
 

@@ -5,6 +5,7 @@
 // header conflicts with UE's namespace definitions.
 
 #include "MCALicenseCheck.h"
+#include "MCAEditorModule.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/DateTime.h"
@@ -470,7 +471,7 @@ FMCALicenseStatus FMCALicenseCheck::CheckLicense()
 		}
 
 		// Stored key is invalid or expired — fall through to trial check.
-		UE_LOG(LogTemp, Warning, TEXT("MCAEditor: Stored license key invalid: %s"), *KeyResult.Error);
+		UE_LOG(LogMCAEditor, Warning, TEXT("MCAEditor: Stored license key invalid: %s"), *KeyResult.Error);
 	}
 
 	// --- No valid key — check trial period ---
@@ -483,7 +484,7 @@ FMCALicenseStatus FMCALicenseCheck::CheckLicense()
 		FirstLaunchStr = Now.ToIso8601();
 		SetConfigString(TEXT("FirstLaunchDate"), FirstLaunchStr);
 
-		UE_LOG(LogTemp, Log, TEXT("MCAEditor: Trial started — %d days"), TrialDays);
+		UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: Trial started — %d days"), TrialDays);
 
 		Status.bLicensed = false;
 		Status.bTrial = true;
@@ -498,7 +499,7 @@ FMCALicenseStatus FMCALicenseCheck::CheckLicense()
 	if (!FDateTime::ParseIso8601(*FirstLaunchStr, FirstLaunch))
 	{
 		// Corrupted date — treat as expired for safety.
-		UE_LOG(LogTemp, Warning, TEXT("MCAEditor: Corrupted FirstLaunchDate: %s"), *FirstLaunchStr);
+		UE_LOG(LogMCAEditor, Warning, TEXT("MCAEditor: Corrupted FirstLaunchDate: %s"), *FirstLaunchStr);
 
 		Status.bLicensed = false;
 		Status.bTrial = false;
@@ -550,11 +551,11 @@ FMCALicenseResult FMCALicenseCheck::StoreKey(const FString& KeyString)
 		FString CleanKey = KeyString.TrimStartAndEnd().ToUpper();
 		SetConfigString(TEXT("LicenseKey"), CleanKey);
 
-		UE_LOG(LogTemp, Log, TEXT("MCAEditor: License key stored (expires: %s)"), *Result.ExpiryDate);
+		UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: License key stored (expires: %s)"), *Result.ExpiryDate);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MCAEditor: Attempted to store invalid key: %s"), *Result.Error);
+		UE_LOG(LogMCAEditor, Warning, TEXT("MCAEditor: Attempted to store invalid key: %s"), *Result.Error);
 	}
 
 	return Result;
