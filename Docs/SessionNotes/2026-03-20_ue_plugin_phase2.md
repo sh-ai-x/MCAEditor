@@ -161,6 +161,22 @@ not the Remote Execution TCP protocol.
 - `Source/MCAEditor/Public/MCAEditorModule.h` — BuildLicensePanel declaration
 - `Source/MCAEditor/MCAEditor.Build.cs` — OpenSSL + DesktopPlatform deps
 
+## Phase 5 — Test Compile (UE 5.6)
+
+### Compile Fixes for UE 5.6 Compatibility
+- `SMultiLineEditableTextBox.h` moved from `Widgets/Text/` to `Widgets/Input/` in 5.6
+- `ITextLayoutMarshaller` gained 4 new abstract methods: `RequiresLiveUpdate()`, `MakeDirty()`, `ClearDirty()`, `IsDirty()`
+- `FTextLayout::FNewLineData` constructor now requires `TSharedRef<FString>` + runs (was just runs)
+- `SelectText()` removed from `SMultiLineEditableTextBox` (only on inner `SMultiLineEditableText`, which is protected)
+- OpenSSL `namespace UI` conflict with `typedef UI` in `ossl_typ.h` — replaced with inline SHA-256 implementation
+- `FSimpleDelegate::CreateSP` can't take methods returning `FReply` — wrapped in lambda
+- Missing linker symbols: added `DeveloperSettings` and `ApplicationCore` to module deps
+
+### Build Result
+- **Target**: UE56Test project (UE 5.6, Win64, Development)
+- **Status**: All 19 compilation/linking actions succeeded
+- Plugin DLL: `UnrealEditor-MCAEditor.dll` built successfully
+
 ## Next Steps
-1. Copy `mca_unreal/` to a UE project's Plugins/ and compile with UBT
-2. Plugin icon / branding resources
+1. Plugin icon / branding resources
+2. Test runtime behavior in UE editor
