@@ -173,6 +173,7 @@ void SMCAEditorPanel::Construct(const FArguments& InArgs)
 
 	// Bind keyboard shortcuts to panel actions.
 	BindCommands();
+
 }
 
 

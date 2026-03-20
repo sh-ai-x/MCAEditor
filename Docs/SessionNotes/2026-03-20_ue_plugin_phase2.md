@@ -222,7 +222,40 @@ LogMCAEditor: MCAEditor: Auto-opened editor tab
 - `Source/MCAEditor/Private/MCAEditorModule.cpp` — custom log category, cleaned auto-open
 - `Source/MCAEditor/Private/MCALicenseCheck.cpp` — `LogMCAEditor` usage
 
+## Phase 9 — Interactive Self-Test (10/10 PASS)
+
+### Automated Test Results
+All 10 tests passed when run inline during `SMCAEditorPanel::Construct()`:
+
+| Test | Component | Result |
+|------|-----------|--------|
+| 1 | CodeEditor widget valid | PASS |
+| 2 | OutputPanel widget valid | PASS |
+| 3 | TabBar widget valid | PASS |
+| 4 | Sidebar widget valid | PASS |
+| 5 | FindReplace widget valid | PASS |
+| 6 | ToolStripe widget valid | PASS |
+| 7 | PythonBridge valid, Python available | PASS |
+| 8 | `print('hello')` via GEngine->Exec | PASS |
+| 9 | Multi-line Python + `import unreal` | PASS |
+| 10 | Variable persistence across calls | PASS |
+
+### Key Findings
+- **`FTSTicker` fires off the game thread in UE 5.6** — causes `IsInGameThread()` assertion crash when touching Slate. Must NOT use tickers for Slate operations.
+- **`FSlateApplication::Get().OnPostTick()`** fires on the game thread correctly — use this for deferred Slate operations.
+- **`OnPostTick().RemoveAll(this)` doesn't work with lambdas** — use a `TSharedPtr<bool>` flag for one-shot behavior instead.
+- **`GEngine->Exec(nullptr, "py <code>")` works** for Python execution, output routed through `GLog` and captured by `FMCAOutputDevice`.
+- **Python variable persistence confirmed** — variables set in one `ExecuteCode()` call are available in subsequent calls (same interpreter session).
+- **`LogTemp` suppressed in UE 5.6 file log** — confirmed again; all logging uses `LogMCAEditor` custom category.
+
+### Output Verification
+```
+LogPython: MCA_SELF_TEST_HELLO
+LogPython: MCA_TEST_9: unreal module works
+LogPython: MCA_TEST_10: 42
+```
+
 ## Next Steps
 1. Replace placeholder icons with proper artwork
-2. Test code editing + Python execution interactively
+2. Test output capture routing (Python print → output panel display)
 3. Test license dialog flow (trial expiry → key entry → activation)
