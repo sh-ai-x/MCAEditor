@@ -40,6 +40,11 @@ PROCESS_NAMES = {
 
 PROCESS_DETECT_TIMEOUT_SECS = 5  # Timeout for tasklist/ps commands
 
+# Suppress CMD window flash on Windows when spawning subprocess.
+# Every subprocess.run() call flashes a visible console window unless
+# CREATE_NO_WINDOW is set.  On non-Windows platforms this is zero (no-op).
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+
 
 # --- Adapter Manager --------------------------------------------------------
 
@@ -319,14 +324,16 @@ class AdapterManager:
                 result = subprocess.run(
                     ["tasklist", "/FO", "CSV", "/NH"],
                     capture_output=True, text=True,
-                    timeout=PROCESS_DETECT_TIMEOUT_SECS
+                    timeout=PROCESS_DETECT_TIMEOUT_SECS,
+                    creationflags=_CREATION_FLAGS,
                 )
                 running = result.stdout.lower()
             else:
                 result = subprocess.run(
                     ["ps", "aux"],
                     capture_output=True, text=True,
-                    timeout=PROCESS_DETECT_TIMEOUT_SECS
+                    timeout=PROCESS_DETECT_TIMEOUT_SECS,
+                    creationflags=_CREATION_FLAGS,
                 )
                 running = result.stdout.lower()
 

@@ -10,6 +10,7 @@
 #include "MCALicenseCheck.h"
 #include "Widgets/SMCANativeHost.h"
 
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "LevelEditor.h"
@@ -55,11 +56,44 @@ void FMCAEditorModule::StartupModule()
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FMCAEditorModule::RegisterToolbarExtension)
 	);
 	RegisterMenuExtension();
+
+	// --- Auto-open if the editor was open in the previous session ----------
+	// Defer to OnPostTick so Slate layout is fully initialized before we
+	// spawn the tab.  CRITICAL: Do NOT use FTSTicker — it fires off the
+	// game thread in UE 5.6 and causes Slate assertion crashes.
+	// Use a TSharedPtr<bool> for one-shot pattern because RemoveAll
+	// doesn't work reliably with lambdas in UE delegates.
+	if (GetConfigString(TEXT("EditorWasOpen")) == TEXT("true"))
+	{
+		TSharedPtr<bool> bFired = MakeShared<bool>(false);
+		PostTickHandle = FSlateApplication::Get().OnPostTick().AddLambda(
+			[this, bFired](float DeltaTime)
+			{
+				if (*bFired) return;
+				*bFired = true;
+
+				// Remove ourselves from the post-tick delegate.
+				FSlateApplication::Get().OnPostTick().Remove(PostTickHandle);
+
+				// Invoke the tab — UE's layout system automatically
+				// restores the last known dock position.
+				FGlobalTabmanager::Get()->TryInvokeTab(MCAEditorTabName);
+
+				UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: Auto-opened (was open in previous session)"));
+			}
+		);
+	}
 }
 
 
 void FMCAEditorModule::ShutdownModule()
 {
+	// Remove auto-open delegate if it hasn't fired yet.
+	if (PostTickHandle.IsValid() && FSlateApplication::IsInitialized())
+	{
+		FSlateApplication::Get().OnPostTick().Remove(PostTickHandle);
+	}
+
 	// Clean up in reverse order of registration.
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
@@ -92,6 +126,14 @@ TSharedRef<SDockTab> FMCAEditorModule::SpawnMCAEditorTab(const FSpawnTabArgs& Ar
 
 		UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: %s"), *LicenseStatus.Message);
 	}
+
+	// Persist that the editor is now open — survives UE restarts.
+	SetConfigString(TEXT("EditorWasOpen"), TEXT("true"));
+
+	// Register close callback so we clear the flag when the user
+	// explicitly closes the tab (prevents unwanted auto-open).
+	Tab->SetOnTabClosed(SDockTab::FOnTabClosedCallback::CreateRaw(
+		this, &FMCAEditorModule::OnTabClosed));
 
 	return Tab;
 }
@@ -235,6 +277,36 @@ void FMCAEditorModule::RegisterMenuExtension()
 void FMCAEditorModule::OnToolbarButtonClicked()
 {
 	FGlobalTabmanager::Get()->TryInvokeTab(MCAEditorTabName);
+}
+
+
+void FMCAEditorModule::OnTabClosed(TSharedRef<SDockTab> ClosedTab)
+{
+	// Mark that the user explicitly closed the editor tab.
+	// This prevents auto-open on the next UE launch.
+	SetConfigString(TEXT("EditorWasOpen"), TEXT("false"));
+	UE_LOG(LogMCAEditor, Log, TEXT("MCAEditor: Tab closed, will not auto-open next launch"));
+}
+
+
+FString FMCAEditorModule::GetConfigString(const FString& Key, const FString& Default)
+{
+	FString Value;
+	if (GConfig && GConfig->GetString(TEXT("MCAEditor"), *Key, Value, GEditorPerProjectIni))
+	{
+		return Value;
+	}
+	return Default;
+}
+
+
+void FMCAEditorModule::SetConfigString(const FString& Key, const FString& Value)
+{
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("MCAEditor"), *Key, *Value, GEditorPerProjectIni);
+		GConfig->Flush(false, GEditorPerProjectIni);
+	}
 }
 
 

@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
+#include "Delegates/IDelegateInstance.h"
 
 // Custom log category for the MCA Editor plugin.
 // NOTE: LogTemp is suppressed from the file log in UE 5.6 — always use this.
@@ -54,10 +55,24 @@ private:
 	/** Callback when the toolbar button is clicked. */
 	void OnToolbarButtonClicked();
 
+	/** Called when the MCA Editor tab is closed by the user. */
+	void OnTabClosed(TSharedRef<SDockTab> ClosedTab);
+
+	// --- Config Helpers ----------------------------------------------------
+
+	/** Read a string from the MCAEditor config section. */
+	static FString GetConfigString(const FString& Key, const FString& Default = TEXT(""));
+
+	/** Write a string to the MCAEditor config section and flush. */
+	static void SetConfigString(const FString& Key, const FString& Value);
+
 	// --- Members -----------------------------------------------------------
 
 	/** Toolbar extender handle for cleanup on shutdown. */
 	TSharedPtr<FExtender> ToolbarExtender;
+
+	/** Delegate handle for the OnPostTick auto-open callback. */
+	FDelegateHandle PostTickHandle;
 
 	/** Tab ID constant — matches the spawner registration. */
 	static const FName MCAEditorTabName;

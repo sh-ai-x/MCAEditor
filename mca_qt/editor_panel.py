@@ -3606,6 +3606,9 @@ class MCAEditorPanel(QWidget):
 
     def _execute_locally(self, code):
         """Execute Python code locally when no DCC is connected."""
+        # [UE_OUTPUT_DEBUG] Log entry with DCC context for debugging output routing.
+        logger.info("[UE_OUTPUT_DEBUG] _execute_locally called, dcc_version=%s", self._dcc_version)
+
         # Ensure scripts/ and site-packages/ are on sys.path so imports work.
         scripts_dir = self._session_manager.scripts_dir
         site_pkg_dir = self._session_manager.site_packages_dir
@@ -3614,18 +3617,20 @@ class MCAEditorPanel(QWidget):
         if site_pkg_dir not in sys.path:
             sys.path.insert(0, site_pkg_dir)
 
-        # In UE, use unreal.PythonScriptLibrary.execute_python_command_ex()
-        # instead of plain exec(). UE intercepts print() at the C level and
-        # routes it to the Output Log — our sys.stdout redirect misses it.
-        # The UE API returns (result, log_entries) with captured output.
-        if self._dcc_version and self._dcc_version.startswith("UE"):
-            self._execute_via_unreal(code)
-            return
-
+        # Use plain exec() with stdout/stderr redirection for ALL local
+        # execution — including UE.  We previously tried UE's
+        # execute_python_command_ex() API, but it does NOT capture print()
+        # output reliably (log_entries come back empty for print calls).
+        # Since we're already inside UE's Python interpreter, exec()
+        # works and `import unreal` is available in the namespace.
+        # Redirecting sys.stdout BEFORE exec() captures print() at the
+        # Python level before UE's C-level hook can intercept it.
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = io.StringIO()
         sys.stderr = io.StringIO()
+        # [UE_OUTPUT_DEBUG] Log the execution path being taken.
+        logger.info("[UE_OUTPUT_DEBUG] Executing via exec(), dcc_version=%s", self._dcc_version)
         try:
             exec(code, self._local_namespace)
             output = sys.stdout.getvalue()
@@ -3636,74 +3641,27 @@ class MCAEditorPanel(QWidget):
             if errors:
                 self._output.write_warning(errors.rstrip())
             # Show success message unless in minimal mode.
+            # Indicate which environment ran the code.
             if self._verbosity_level != "minimal":
-                self._output.write_success("Executed locally (no DCC)")
+                if self._dcc_version and self._dcc_version.startswith("UE"):
+                    self._output.write_success("Executed in UE")
+                else:
+                    self._output.write_success("Executed locally (no DCC)")
+            # [UE_OUTPUT_DEBUG] Log captured output length.
+            logger.info(
+                "[UE_OUTPUT_DEBUG] Captured stdout=%d chars, stderr=%d chars",
+                len(output), len(errors),
+            )
         except Exception:
             tb = traceback.format_exc()
             self._output.write_error(tb.rstrip())
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-
-    def _execute_via_unreal(self, code):
-        """
-        Execute Python code through UE's Python scripting API.
-
-        UE's ``PythonScriptLibrary.execute_python_command_ex()`` captures all
-        Python output (including ``print()`` calls intercepted at the C level)
-        and returns it as structured log entries.  This is the only reliable
-        way to capture output in UE's embedded Python — ``sys.stdout``
-        redirection alone misses output routed through UE's C-level hooks.
-
-        Returns ``(command_result_str, Array[PythonLogOutputEntry])`` or
-        ``None`` on failure.
-
-        :param str code: Python code to execute.
-        """
-        try:
-            import unreal
-        except ImportError:
-            # Fallback if unreal module not available (shouldn't happen in UE).
-            self._output.write_error("Cannot import unreal module.")
-            return
-
-        try:
-            result = unreal.PythonScriptLibrary.execute_python_command_ex(
-                python_command=code,
-                execution_mode=unreal.PythonCommandExecutionMode.EXECUTE_FILE,
-                file_execution_scope=unreal.PythonFileExecutionScope.PUBLIC,
-            )
-
-            # Returns (command_result_str, log_entries) or None on failure.
-            if result is None:
-                self._output.write_error("Execution returned None.")
-                return
-
-            command_result, log_entries = result
-
-            # Display each log entry with appropriate formatting.
-            # INFO entries contain print() output. ERROR/WARNING entries
-            # contain exceptions and warnings from UE's Python runtime.
-            for entry in log_entries:
-                if entry.type == unreal.PythonLogOutputType.ERROR:
-                    self._output.write_error(entry.output)
-                elif entry.type == unreal.PythonLogOutputType.WARNING:
-                    self._output.write_warning(entry.output)
-                else:
-                    # INFO type — this is where print() output appears.
-                    if self._verbosity_level != "minimal":
-                        self._output.write_output(entry.output)
-
-            # Show success message unless in minimal mode or errors occurred.
-            has_errors = any(
-                e.type == unreal.PythonLogOutputType.ERROR for e in log_entries
-            )
-            if not has_errors and self._verbosity_level != "minimal":
-                self._output.write_success("Executed in UE")
-
-        except Exception:
-            tb = traceback.format_exc()
-            self._output.write_error(tb.rstrip())
+            # Force-flush in UE so output appears immediately instead of
+            # waiting for the next Qt event pump from the UE tick cycle.
+            if self._dcc_version and self._dcc_version.startswith("UE"):
+                self._output.flush()
 
     def _api_execute_code(self, code, language="python"):
         """
