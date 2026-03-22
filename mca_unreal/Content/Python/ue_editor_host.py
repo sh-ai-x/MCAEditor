@@ -162,10 +162,16 @@ class UELogTailer:
             return
 
         try:
-            # Read any new content.
+            # On Windows, a file handle that has reached EOF won't see new
+            # data appended by another process (UE) unless we re-check the
+            # file size. Seek to our last known position to reset the EOF
+            # flag, then read whatever UE has appended since.
+            self._file.seek(self._position)
             new_data = self._file.read()
             if not new_data:
                 return
+            # Update our position to the new end.
+            self._position = self._file.tell()
 
             for line in new_data.splitlines():
                 line = line.strip()

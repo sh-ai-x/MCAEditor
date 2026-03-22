@@ -54,8 +54,10 @@ Pivoted the UE plugin from native Slate C++ widgets to embedding the existing Py
 7. MEL tabs restored from session.json → cleaned session, removed MEL_2.mel
 8. "No DCC connected" indicator visible → set `_embedded_in_dcc = True`
 
+## Bugs Fixed (continued, 2026-03-22)
+9. UE log tailing not showing in MCA Editor output panel — Python's `file.read()` on Windows caches EOF state after initial seek-to-end. Subsequent `read()` returns empty even though UE has appended data. Fix: `self._file.seek(self._position)` before each `read()` to reset the EOF flag and re-check the file's actual size on disk.
+
 ## Known Issues / TODO
-- UE log tailing not showing in MCA Editor output panel yet — tailer starts but tick may not be pumping poll() frequently enough, or the log file read isn't picking up new lines
-- Qt tick pump runs every other frame (~30fps) — may need to tune frequency
-- Session restore may recreate MEL buffers if session.json isn't cleaned
+- Session restore may recreate MEL buffers if session.json isn't cleaned — need to guard `_new_mel_buffer()` in editor_panel.py `__init__` with `dcc_version` check
 - No UE adapter for remote execution — all code runs locally via `exec()` in UE's Python interpreter
+- Qt tick pump runs every other frame (~30fps) — may need to tune frequency for log tailing responsiveness
