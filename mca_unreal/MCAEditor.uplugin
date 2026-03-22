@@ -9,7 +9,7 @@
 	"CreatedByURL": "https://mcaeditor.com",
 	"DocsURL": "https://mcaeditor.com/docs",
 	"MarketplaceURL": "",
-	"CanContainContent": false,
+	"CanContainContent": true,
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,

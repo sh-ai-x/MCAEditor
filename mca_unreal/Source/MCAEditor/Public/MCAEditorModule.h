@@ -1,7 +1,9 @@
 // MCA Editor Module — Public header.
 //
-// Declares the editor module that registers the MCA Editor tab, toolbar
-// button, and menu entries. This is the entry point for the entire plugin.
+// Declares the minimal editor module that launches the PySide6 MCA Editor
+// as a free-floating Qt window owned by UE's main window. All editor UI
+// lives in PySide6/Qt — this C++ module just provides the toolbar button,
+// Window menu entry, and a periodic tick to pump Qt events.
 
 #pragma once
 
@@ -19,8 +21,12 @@ class FExtender;
 /**
  * Main module for the MCA Editor plugin.
  *
- * Handles tab spawner registration, toolbar/menu integration, and
- * module lifecycle. Mirrors the role of plugin_main.py in the Maya version.
+ * Registers a toolbar button and Window > MCA Editor menu entry.
+ * When clicked, executes ue_editor_host.py which creates the PySide6
+ * MCA Editor as a free-floating Qt window owned by UE's main window.
+ *
+ * A periodic tick pumps Qt events so the editor stays responsive
+ * while UE owns the main loop.
  */
 class FMCAEditorModule : public IModuleInterface
 {
@@ -36,14 +42,6 @@ public:
 
 private:
 
-	// --- Tab Management ----------------------------------------------------
-
-	/** Spawns the MCA Editor tab when the user opens it. */
-	TSharedRef<class SDockTab> SpawnMCAEditorTab(const class FSpawnTabArgs& Args);
-
-	/** Builds the license key entry UI shown when trial has expired. */
-	TSharedRef<SWidget> BuildLicensePanel(TSharedRef<class SDockTab> OwnerTab);
-
 	// --- Toolbar / Menu Registration ---------------------------------------
 
 	/** Registers the toolbar extension button. */
@@ -55,25 +53,25 @@ private:
 	/** Callback when the toolbar button is clicked. */
 	void OnToolbarButtonClicked();
 
-	/** Called when the MCA Editor tab is closed by the user. */
-	void OnTabClosed(TSharedRef<SDockTab> ClosedTab);
+	// --- Python Execution --------------------------------------------------
 
-	// --- Config Helpers ----------------------------------------------------
+	/** Execute a Python statement in UE's embedded interpreter. */
+	void RunPython(const FString& Code);
 
-	/** Read a string from the MCAEditor config section. */
-	static FString GetConfigString(const FString& Key, const FString& Default = TEXT(""));
+	// --- Qt Event Pump Tick ------------------------------------------------
 
-	/** Write a string to the MCAEditor config section and flush. */
-	static void SetConfigString(const FString& Key, const FString& Value);
+	/** Start the periodic Qt event pump. */
+	void StartQtTick();
 
-	// --- Members -----------------------------------------------------------
+	/** Stop the periodic Qt event pump. */
+	void StopQtTick();
 
-	/** Toolbar extender handle for cleanup on shutdown. */
-	TSharedPtr<FExtender> ToolbarExtender;
+	/** Delegate handle for the OnPostTick Qt pump callback. */
+	FDelegateHandle QtTickHandle;
 
-	/** Delegate handle for the OnPostTick auto-open callback. */
-	FDelegateHandle PostTickHandle;
+	/** Whether the Qt tick is currently active. */
+	bool bTickActive = false;
 
-	/** Tab ID constant — matches the spawner registration. */
-	static const FName MCAEditorTabName;
+	/** Frame counter for throttling Qt event pumps. */
+	uint32 TickCounter = 0;
 };

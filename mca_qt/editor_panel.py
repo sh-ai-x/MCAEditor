@@ -3625,12 +3625,24 @@ class MCAEditorPanel(QWidget):
         # works and `import unreal` is available in the namespace.
         # Redirecting sys.stdout BEFORE exec() captures print() at the
         # Python level before UE's C-level hook can intercept it.
+
+        # Echo the executed code to UE's Output Log so the user can see
+        # what was run from both the MCA Editor and UE's log panel.
+        if self._dcc_version and self._dcc_version.startswith("UE"):
+            try:
+                import unreal as _ue
+                # Show a compact preview of the code being executed.
+                preview = code.strip().split('\n')[0]
+                if len(code.strip().split('\n')) > 1:
+                    preview += f"  (+{len(code.strip().split(chr(10))) - 1} more lines)"
+                _ue.log(f"[MCAEditor] Exec: {preview}")
+            except ImportError:
+                pass
+
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = io.StringIO()
         sys.stderr = io.StringIO()
-        # [UE_OUTPUT_DEBUG] Log the execution path being taken.
-        logger.info("[UE_OUTPUT_DEBUG] Executing via exec(), dcc_version=%s", self._dcc_version)
         try:
             exec(code, self._local_namespace)
             output = sys.stdout.getvalue()
@@ -3647,14 +3659,26 @@ class MCAEditorPanel(QWidget):
                     self._output.write_success("Executed in UE")
                 else:
                     self._output.write_success("Executed locally (no DCC)")
-            # [UE_OUTPUT_DEBUG] Log captured output length.
-            logger.info(
-                "[UE_OUTPUT_DEBUG] Captured stdout=%d chars, stderr=%d chars",
-                len(output), len(errors),
-            )
+            # Echo output/errors to UE's Output Log for cross-reference.
+            if self._dcc_version and self._dcc_version.startswith("UE"):
+                try:
+                    import unreal as _ue
+                    if output:
+                        _ue.log(f"[MCAEditor] Output: {output.rstrip()}")
+                    if errors:
+                        _ue.log_warning(f"[MCAEditor] StdErr: {errors.rstrip()}")
+                except ImportError:
+                    pass
         except Exception:
             tb = traceback.format_exc()
             self._output.write_error(tb.rstrip())
+            # Echo traceback to UE's Output Log.
+            if self._dcc_version and self._dcc_version.startswith("UE"):
+                try:
+                    import unreal as _ue
+                    _ue.log_error(f"[MCAEditor] {tb.rstrip()}")
+                except ImportError:
+                    pass
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr

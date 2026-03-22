@@ -1,7 +1,7 @@
 // MCA Editor Commands — UI command definitions.
 //
-// Declares the command set for toolbar buttons and menu entries.
-// Keyboard shortcuts are handled by the embedded Qt editor directly.
+// Declares the command set for the toolbar button. Only one command
+// is needed — OpenMCAEditor. All editor actions live in PySide6.
 
 #pragma once
 
@@ -12,9 +12,8 @@
 /**
  * UI command set for MCA Editor actions.
  *
- * Only the tab-open command is registered here. All editor keyboard
- * shortcuts (Ctrl+S, Ctrl+F, etc.) are handled by the embedded
- * PySide6/Qt editor widget internally.
+ * Only registers OpenMCAEditor — all other editor functionality
+ * (execute, save, find, etc.) is handled by the PySide6 Qt editor.
  */
 class FMCAEditorCommands : public TCommands<FMCAEditorCommands>
 {
@@ -31,6 +30,6 @@ public:
 
 	// --- Command Definitions -----------------------------------------------
 
-	/** Open the MCA Editor tab. */
+	/** Open the MCA Editor window. */
 	TSharedPtr<FUICommandInfo> OpenMCAEditor;
 };

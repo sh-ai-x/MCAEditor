@@ -1,8 +1,7 @@
 // MCA Editor Commands — UI command registration.
 //
-// Defines command metadata for editor actions. Keyboard shortcuts are
-// handled by the embedded Qt editor, so only the tab-open command is
-// registered here for the toolbar/menu button.
+// Only registers the "Open MCA Editor" command. All other editor actions
+// (execute, save, find, etc.) live in the PySide6 Qt editor.
 
 #include "MCAEditorCommands.h"
 
@@ -22,7 +21,7 @@ FMCAEditorCommands::FMCAEditorCommands()
 
 void FMCAEditorCommands::RegisterCommands()
 {
-	// Open the MCA Editor tab (toolbar/menu button, no keyboard shortcut).
+	// Open the MCA Editor window.
 	UI_COMMAND(OpenMCAEditor, "Open MCA Editor", "Open the MCA Python Code Editor",
 		EUserInterfaceActionType::Button, FInputChord());
 }

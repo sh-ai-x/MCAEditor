@@ -1,8 +1,8 @@
 // MCA Editor — Unreal Build Tool module rules.
 //
-// Defines dependencies, include paths, and compiler settings for the
-// MCA Editor plugin. Embeds the PySide6/Qt MCA Editor inside a Slate
-// tab via Win32 native window hosting (same codebase as Maya version).
+// Minimal dependencies for the PySide6 launcher plugin. The C++ side
+// only provides a toolbar button, menu entry, and Qt event pump tick.
+// All editor UI lives in PySide6/Qt, launched via IPythonScriptPlugin.
 
 using UnrealBuildTool;
 
@@ -13,7 +13,6 @@ public class MCAEditor : ModuleRules
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		// --- Public Dependencies -------------------------------------------
-		// Core UE modules needed for Slate UI and editor integration.
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -22,7 +21,7 @@ public class MCAEditor : ModuleRules
 		);
 
 		// --- Private Dependencies ------------------------------------------
-		// Modules used internally but not exposed in our public headers.
+		// Minimal set needed for toolbar registration and Python execution.
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -30,19 +29,10 @@ public class MCAEditor : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
+				"InputCore",
 				"UnrealEd",
-				"EditorStyle",
 				"ToolMenus",
 				"Projects",
-				"ApplicationCore",
-			}
-		);
-
-		// Soft dependency on PythonScriptPlugin — warn if not available but
-		// don't prevent compilation. Users must enable it for execution.
-		PrivateIncludePathModuleNames.AddRange(
-			new string[]
-			{
 				"PythonScriptPlugin",
 			}
 		);
