@@ -25,3 +25,75 @@
 .md-typeset details.question > summary::after {
     color: rgba(255, 255, 255, 0.6);
 }
+
+/* --- Download page tabs & tables ----------------------------------------- */
+
+/* Tab bar */
+.dl-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 16px;
+}
+.dl-tab {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
+}
+.dl-tab:hover {
+    color: rgba(255, 255, 255, 0.8);
+}
+.dl-tab.active {
+    color: #E8922A;
+    border-bottom-color: #E8922A;
+}
+
+/* Tab content panels */
+.dl-tab-content {
+    display: none;
+}
+.dl-tab-content.active {
+    display: block;
+}
+
+/* Download tables */
+.dl-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1em;
+}
+.dl-table th {
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: rgba(255, 255, 255, 0.45);
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.dl-table td {
+    padding: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.dl-table td:last-child {
+    text-align: right;
+}
+
+/* Compact links for previous versions */
+.dl-prev-links a {
+    display: inline-block;
+    margin: 2px 8px 2px 0;
+    color: #E8922A;
+    text-decoration: none;
+    font-size: 0.85em;
+}
+.dl-prev-links a:hover {
+    text-decoration: underline;
+}

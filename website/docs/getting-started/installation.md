@@ -6,23 +6,7 @@ MCA Editor is distributed as a single Python file that you drop into Maya's plug
 
 ## Download
 
-Download the zip for your Maya version and platform:
-
-### Windows
-
-| Maya Version | Python | Download |
-|---|---|---|
-| Maya 2024 | Python 3.10 | [MCAEditor-Maya2024.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2024-v1.0.1.zip){ .md-button } |
-| Maya 2025 | Python 3.11 | [MCAEditor-Maya2025.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2025-v1.0.1.zip){ .md-button } |
-| Maya 2026 | Python 3.11 | [MCAEditor-Maya2026.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2026-v1.0.1.zip){ .md-button } |
-
-### macOS
-
-| Maya Version | Python | Download |
-|---|---|---|
-| Maya 2024 | Python 3.10 | [MCAEditor-Maya2024-macOS.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2024-macOS-v1.0.1.zip){ .md-button } |
-| Maya 2025 | Python 3.11 | [MCAEditor-Maya2025-macOS.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2025-macOS-v1.0.1.zip){ .md-button } |
-| Maya 2026 | Python 3.11 | [MCAEditor-Maya2026-macOS.zip](https://mcaeditor.com/downloads/MCAEditor-Maya2026-macOS-v1.0.1.zip){ .md-button } |
+Download the latest version from the [Downloads page](../download.md).
 
 !!! warning "Use the correct version"
     Each Maya version requires its own build. The files are **not interchangeable** — Maya 2024 uses Python 3.10 while Maya 2025/2026 use Python 3.11. Windows and macOS builds are also not interchangeable.

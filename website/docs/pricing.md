@@ -38,7 +38,7 @@ Supports **Windows, macOS, and Linux**. Maya 2024, 2025, and 2026.
 MCA Editor includes a **14-day free trial** with full access to all features.
 No account or credit card needed — just install and run.
 
-[Download & Try Free](getting-started/installation.md){ .md-button }
+[Download & Try Free](download.md){ .md-button }
 
 ---
 

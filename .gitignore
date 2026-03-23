@@ -57,5 +57,9 @@ package-lock.json
 # --- License key generator (private, never distribute) ---
 tools/
 
+# --- MkDocs build output ---
+site/
+website/site/
+
 # --- Claude Code ---
 .claude/

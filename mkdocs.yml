@@ -19,6 +19,7 @@ theme:
   favicon: assets/images/mca.png
   features:
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.expand
     - navigation.top
@@ -56,6 +57,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Download: download.md
   - Pricing: pricing.md
   - Plugins: plugins.md
   - Getting Started:
@@ -79,4 +81,3 @@ nav:
     - Error Handling: plugin-development/error-handling.md
     - Sharing & Distribution: plugin-development/distribution.md
     - Publishing a Plugin: plugin-development/publishing.md
-  - Changelog: changelog.md

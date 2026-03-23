@@ -20,7 +20,7 @@ from mca_qt.qt_compat import (
     QLabel, QPushButton, QFileDialog, QLineEdit, QSplitter,
     QMenu, QApplication, QInputDialog, QMessageBox,
     QAbstractItemView,
-    Qt, Signal, QFileSystemWatcher,
+    Qt, Signal, QFileSystemWatcher, QTimer,
     QColor,
 )
 from mca_qt.icons import folder_closed, folder_open, python_logo, maya_logo, text_icon
@@ -537,6 +537,16 @@ class WorkspacePanel(QWidget):
 
         self._watcher = QFileSystemWatcher()
         self._watcher.directoryChanged.connect(self._on_directory_changed)
+
+        # Debounce timer for directory-change signals. When many files
+        # are added at once (e.g. pasting a batch in Explorer), the
+        # watcher fires once per file. We coalesce into a single
+        # rebuild after a short quiet period.
+        self._refresh_timer = QTimer()
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(200)  # 200 ms debounce window.
+        self._refresh_timer.timeout.connect(self._debounced_refresh)
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -589,9 +599,9 @@ class WorkspacePanel(QWidget):
         header_layout.addWidget(open_btn)
 
         # Refresh button — manually re-scan the workspace tree.
-        refresh_btn = QPushButton("R")
+        refresh_btn = QPushButton("\u21BB")
         refresh_btn.setFixedSize(22, 22)
-        refresh_btn.setToolTip("Refresh Workspace")
+        refresh_btn.setToolTip("Refresh Workspace (re-scan files)")
         refresh_btn.setStyleSheet(_header_btn_style)
         refresh_btn.clicked.connect(self._refresh_tree)
         header_layout.addWidget(refresh_btn)
@@ -691,7 +701,16 @@ class WorkspacePanel(QWidget):
 
     def _refresh_tree(self):
         """Rebuild the entire file tree from workspace folders."""
+        # Snapshot expanded paths BEFORE clearing. PySide6's
+        # QTreeWidget.clear() can fire itemCollapsed signals which
+        # would drain _expanded_paths through _on_item_collapsed.
+        restore_paths = set(self._expanded_paths)
+
         self._tree.clear()
+
+        # Collect all directories found during population so we can
+        # sync the file watcher to cover subdirectories too.
+        discovered_dirs = set()
 
         for folder in self._workspace_folders:
             folder_name = os.path.basename(folder)
@@ -701,7 +720,8 @@ class WorkspacePanel(QWidget):
             root_item.setData(0, Qt.ItemDataRole.UserRole, folder)
             root_item.setForeground(0, QColor("#cccccc"))
 
-            self._populate_folder(root_item, folder, depth=0)
+            self._populate_folder(root_item, folder, depth=0,
+                                  discovered_dirs=discovered_dirs)
             self._tree.addTopLevelItem(root_item)
 
             # Expand AFTER adding to the tree — Qt silently ignores
@@ -709,15 +729,21 @@ class WorkspacePanel(QWidget):
             root_item.setExpanded(True)
 
         # Re-expand any folders that were open before the rebuild.
-        # The itemExpanded signal fires for each one, which is fine —
-        # _on_item_expanded just does a set.add() (no-op for items
-        # already in the set) and swaps the icon.
+        # Uses the snapshot so we're immune to clear() side-effects.
+        # The itemExpanded signal fires for each, updating
+        # _expanded_paths and swapping the folder icon.
         for item in self._iter_all_items():
             path = item.data(0, Qt.ItemDataRole.UserRole)
-            if path and path in self._expanded_paths:
+            if path and path in restore_paths:
                 item.setExpanded(True)
 
-    def _populate_folder(self, parent_item, folder_path, depth):
+        # Sync the file watcher so subdirectories are watched too.
+        # This ensures files added in any visible subfolder trigger
+        # a directoryChanged signal.
+        self._sync_watcher(discovered_dirs)
+
+    def _populate_folder(self, parent_item, folder_path, depth,
+                         discovered_dirs=None):
         """
         Recursively populate folder contents in the tree.
 
@@ -727,9 +753,15 @@ class WorkspacePanel(QWidget):
         :param QTreeWidgetItem parent_item: Parent tree item.
         :param str folder_path: Path to scan.
         :param int depth: Current recursion depth.
+        :param set discovered_dirs: Accumulator for all directory paths found
+            during population (used to sync the file watcher).
         """
         if depth >= MAX_TREE_DEPTH:
             return
+
+        # Track this directory so the file watcher can cover it.
+        if discovered_dirs is not None:
+            discovered_dirs.add(folder_path)
 
         try:
             entries = sorted(os.listdir(folder_path))
@@ -752,7 +784,8 @@ class WorkspacePanel(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, full_path)
             item.setForeground(0, QColor("#cccccc"))
             parent_item.addChild(item)
-            self._populate_folder(item, full_path, depth + 1)
+            self._populate_folder(item, full_path, depth + 1,
+                                  discovered_dirs=discovered_dirs)
 
         for f in files:
             full_path = os.path.join(folder_path, f)
@@ -808,15 +841,56 @@ class WorkspacePanel(QWidget):
 
     def _on_directory_changed(self, path):
         """
-        Refresh the tree when a watched directory changes.
+        Schedule a debounced tree refresh when a watched directory changes.
 
-        Also emits ``directory_changed`` so the editor panel can trigger
-        a debounced re-index of the symbol index.
+        When many files are added/removed at once, the watcher fires a
+        signal for each change. We restart a short timer so only one
+        rebuild happens after the burst settles.
 
         :param str path: The directory that changed.
         """
+        # Store the path so _debounced_refresh can emit the signal.
+        self._pending_changed_path = path
+        self._refresh_timer.start()  # (Re)starts the 200 ms timer.
+
+    def _debounced_refresh(self):
+        """
+        Perform the actual tree rebuild after the debounce window closes.
+
+        Emits ``directory_changed`` so the editor panel can trigger
+        a re-index of the symbol index.
+        """
         self._refresh_tree()
-        self.directory_changed.emit(path)
+        path = getattr(self, "_pending_changed_path", "")
+        if path:
+            self.directory_changed.emit(path)
+
+    def _sync_watcher(self, discovered_dirs):
+        """
+        Sync the file watcher to cover all directories in the tree.
+
+        Adds any newly discovered subdirectories and removes paths
+        that are no longer in the tree (e.g. deleted folders).
+        This ensures files added in any visible subfolder trigger
+        a ``directoryChanged`` signal automatically.
+
+        :param set discovered_dirs: All directory paths found during
+            the most recent tree population.
+        """
+        currently_watched = set(self._watcher.directories())
+
+        # Add directories that aren't watched yet.
+        to_add = discovered_dirs - currently_watched
+        if to_add:
+            self._watcher.addPaths(list(to_add))
+
+        # Remove directories that are no longer in the tree (deleted
+        # or excluded), but keep the top-level workspace folders even
+        # if they're empty — they anchor the tree.
+        workspace_set = set(self._workspace_folders)
+        to_remove = currently_watched - discovered_dirs - workspace_set
+        if to_remove:
+            self._watcher.removePaths(list(to_remove))
 
     def _on_file_moved(self, old_path, new_path):
         """
