@@ -45,6 +45,10 @@ from mca_qt.qt_compat import (
     QPlainTextEdit, QComboBox,
     Qt,
 )
+try:
+    from PySide6.QtCore import QSettings
+except ImportError:
+    from PySide2.QtCore import QSettings
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_core.config.color_scheme import build_scheme_dict
 
@@ -74,7 +78,7 @@ _LIST_STYLE = """
         font-size: 12px;
     }
     QListWidget::item {
-        padding: 3px;
+        padding: 1px 4px;
     }
     QListWidget::item:selected {
         background-color: #094771;
@@ -394,6 +398,12 @@ class ProjectSettingsDialog(QDialog):
         self.setMinimumSize(640, 600)
         self.setModal(True)
         self._setup_ui()
+
+        # Restore saved geometry from QSettings (persists across sessions).
+        self._qsettings = QSettings("MCAEditor", "ProjectSettingsDialog")
+        saved = self._qsettings.value("geometry")
+        if saved is not None:
+            self.restoreGeometry(saved)
 
     def _setup_ui(self):
         """Build the top-level layout: profile selector + left-nav + pages + buttons."""
@@ -1270,3 +1280,17 @@ class ProjectSettingsDialog(QDialog):
         :rtype: dict or None
         """
         return self._result
+
+    def _save_geometry(self):
+        """Persist the current window geometry to QSettings."""
+        self._qsettings.setValue("geometry", self.saveGeometry())
+
+    def accept(self):
+        """Save geometry before accepting."""
+        self._save_geometry()
+        super().accept()
+
+    def reject(self):
+        """Save geometry before rejecting."""
+        self._save_geometry()
+        super().reject()

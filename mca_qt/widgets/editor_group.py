@@ -511,7 +511,12 @@ class EditorGroup(QWidget):
         self._tab_widget.setUsesScrollButtons(True)
         self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
         # Offset the tab bar to the right so overlay nav buttons don't overlap.
-        self._tab_widget.setStyleSheet("QTabWidget::tab-bar { left: 60px; }")
+        # Tab bar frame gets a slightly lighter background so the divide
+        # between editor and output panel is clearly visible.
+        self._tab_widget.setStyleSheet(
+            "QTabWidget::tab-bar { left: 60px; }"
+            " QTabBar { background-color: #383838; }"
+        )
         self._tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
 

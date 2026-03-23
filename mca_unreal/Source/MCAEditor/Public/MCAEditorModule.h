@@ -66,6 +66,9 @@ private:
 	/** Stop the periodic Qt event pump. */
 	void StopQtTick();
 
+	/** Get the native HWND of UE's main editor window (for Win32 ownership). */
+	uint64 GetMainWindowHWND() const;
+
 	/** Delegate handle for the OnPostTick Qt pump callback. */
 	FDelegateHandle QtTickHandle;
 

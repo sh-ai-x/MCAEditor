@@ -24,23 +24,33 @@ class NewTabDialog(QDialog):
     """
     Modal dialog for choosing a language when creating a new tab.
 
-    Displays three language buttons (Python, MEL, Text) and a Cancel button.
+    Displays language buttons and a Cancel button. By default shows
+    Python, MEL, and Text. The ``languages`` parameter can override
+    which languages are offered (e.g. UE excludes MEL).
+
     After the dialog closes, call ``get_language()`` to retrieve the
     selected language string.
 
     :param QWidget parent: Optional parent widget.
+    :param list languages: List of (display_name, language_id) tuples.
+        Defaults to [("Python", "python"), ("MEL", "mel"), ("Text", "text")].
     """
 
-    def __init__(self, parent=None):
+    # Default language choices.
+    DEFAULT_LANGUAGES = [("Python", "python"), ("MEL", "mel"), ("Text", "text")]
+
+    def __init__(self, parent=None, languages=None):
         """
         Initialize the New Tab dialog.
 
         :param QWidget parent: Optional parent widget.
+        :param list languages: Optional override for which languages to offer.
         """
         super().__init__(parent)
         self.setWindowTitle("New Tab")
         self.setMinimumWidth(320)
         self._selected_language = None
+        self._languages = languages or self.DEFAULT_LANGUAGES
         self._setup_ui()
 
     def _setup_ui(self):
@@ -79,7 +89,7 @@ class NewTabDialog(QDialog):
         """
 
         # One button per language, each stores its language string on click.
-        for display_name, language_id in [("Python", "python"), ("MEL", "mel"), ("Text", "text")]:
+        for display_name, language_id in self._languages:
             btn = QPushButton(display_name)
             btn.setStyleSheet(lang_button_style)
             # Capture language_id in the lambda via default argument.

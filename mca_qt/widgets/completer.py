@@ -134,7 +134,7 @@ class CompletionProvider:
         items = []
 
         # --- Source 1: DCC adapter (priority 0) ---
-        adapter = self._adapter_manager.get_active_adapter()
+        adapter = self._adapter_manager.get_active_adapter() if self._adapter_manager else None
         if adapter and adapter.is_connected:
             try:
                 raw = adapter.get_completions(prefix, language)

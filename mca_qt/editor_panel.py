@@ -3644,7 +3644,19 @@ class MCAEditorPanel(QWidget):
         sys.stdout = io.StringIO()
         sys.stderr = io.StringIO()
         try:
-            exec(code, self._local_namespace)
+            # Try eval mode first — if the code is a single expression
+            # (variable name, function call, etc.), eval returns its value.
+            # This lets the user highlight a variable and execute to see its
+            # value, matching UE Blueprint / Maya Script Editor behavior.
+            try:
+                compiled = compile(code, "<mca_editor>", "eval")
+                result = eval(compiled, self._local_namespace)
+                if result is not None:
+                    print("# Result: {} #".format(repr(result)))
+            except SyntaxError:
+                # Not a single expression — execute as statements.
+                exec(code, self._local_namespace)
+
             output = sys.stdout.getvalue()
             errors = sys.stderr.getvalue()
             # Respect verbosity: "minimal" suppresses normal stdout output.
@@ -3652,12 +3664,10 @@ class MCAEditorPanel(QWidget):
                 self._output.write_output(output.rstrip())
             if errors:
                 self._output.write_warning(errors.rstrip())
-            # Show success message unless in minimal mode.
-            # Indicate which environment ran the code.
+            # Show success message unless in minimal mode or running in UE
+            # (UE executions are frequent and the message adds noise).
             if self._verbosity_level != "minimal":
-                if self._dcc_version and self._dcc_version.startswith("UE"):
-                    self._output.write_success("Executed in UE")
-                else:
+                if not (self._dcc_version and self._dcc_version.startswith("UE")):
                     self._output.write_success("Executed locally (no DCC)")
             # Echo output/errors to UE's Output Log for cross-reference.
             if self._dcc_version and self._dcc_version.startswith("UE"):
@@ -5141,11 +5151,17 @@ class MCAEditorPanel(QWidget):
 
     def _show_about(self):
         """Display the About dialog with version and feature info."""
+        # Tailor the tagline to the host DCC.
+        if self._dcc_version and self._dcc_version.startswith("UE"):
+            tagline = "A Python code editor for Unreal Engine."
+        else:
+            tagline = "A better Maya script editor."
+
         QMessageBox.about(
             self, "About MCA Editor",
             f"<h3>MCA Editor v{_APP_VERSION}</h3>"
-            "<p style='font-size: 11pt; color: #ccc;'>"
-            "A better Maya script editor.</p>"
+            f"<p style='font-size: 11pt; color: #ccc;'>"
+            f"{tagline}</p>"
             "<p><b>Features</b></p>"
             "<ul style='margin-top: 0;'>"
             "<li>Dual mode &mdash; Script Editor &amp; Project Mode</li>"

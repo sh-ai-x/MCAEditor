@@ -82,9 +82,12 @@ GLOBAL_STYLESHEET = """
         background: #3f3f46;
         margin: 4px 8px;
     }
-    QTabBar::tab {
+    QTabBar {
         background-color: #2d2d30;
-        color: #969696;
+    }
+    QTabBar::tab {
+        background-color: #3c3c3c;
+        color: #b0b0b0;
         padding: 6px 16px;
         border: none;
         border-bottom: 2px solid transparent;
@@ -93,11 +96,11 @@ GLOBAL_STYLESHEET = """
     QTabBar::tab:selected {
         color: #ffffff;
         border-bottom: 2px solid #569cd6;
-        background-color: #1e1e1e;
+        background-color: #2d2d30;
     }
     QTabBar::tab:hover:!selected {
         color: #d0d0d0;
-        background-color: #383838;
+        background-color: #454545;
     }
     QStatusBar {
         background-color: #007acc;
