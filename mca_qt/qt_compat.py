@@ -384,6 +384,11 @@ else:
             "MoveAction", "IgnoreAction", "CopyAction",
         ])
 
+        _patch_enum_group(QTreeWidgetItem, "ChildIndicatorPolicy", [
+            "ShowIndicator", "DontShowIndicator",
+            "DontShowIndicatorWhenChildless",
+        ])
+
         logger.debug("PySide2 enum compatibility patches applied")
 
     def _patch_enum_group(cls, group_name, members):

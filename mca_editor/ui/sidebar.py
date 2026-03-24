@@ -37,7 +37,11 @@ FILE_ICONS = {
     ".md": "MD",
 }
 
-MAX_TREE_DEPTH = 5  # Maximum depth for recursive folder traversal
+# Sentinel value stored in UserRole on placeholder items.  Placeholder
+# items are added as the sole child of unexpanded folder items so the
+# expand arrow appears.  They are replaced with real contents when the
+# user expands the folder (lazy / on-demand loading).
+_PLACEHOLDER = "__lazy_placeholder__"
 
 
 # =============================================================================
@@ -363,6 +367,7 @@ class WorkspacePanel(QWidget):
             }
         """)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
         layout.addWidget(self._tree)
 
         # --- Empty state message ---
@@ -420,25 +425,26 @@ class WorkspacePanel(QWidget):
             root_item.setText(0, "[DIR] {}".format(folder_name))
             root_item.setData(0, Qt.ItemDataRole.UserRole, folder)
             root_item.setForeground(0, QColor("#cccccc"))
-            root_item.setExpanded(True)
 
-            self._populate_folder(root_item, folder, depth=0)
+            self._populate_folder(root_item, folder)
             self._tree.addTopLevelItem(root_item)
 
-    def _populate_folder(self, parent_item, folder_path, depth):
-        """
-        Recursively populate folder contents in the tree.
+            # Expand AFTER adding to the tree — Qt silently ignores
+            # setExpanded() on items that aren't in a tree yet.
+            root_item.setExpanded(True)
 
-        Directories are listed first, then files. Hidden entries
-        (starting with '.') are skipped.
+    def _populate_folder(self, parent_item, folder_path):
+        """
+        Populate one level of folder contents in the tree (lazy loading).
+
+        Directories are listed first, then files.  Hidden entries
+        (starting with '.') are skipped.  Sub-folders receive a
+        placeholder child so the expand arrow appears; their real
+        contents are loaded on demand via ``_ensure_populated``.
 
         :param QTreeWidgetItem parent_item: Parent tree item.
         :param str folder_path: Path to scan.
-        :param int depth: Current recursion depth.
         """
-        if depth >= MAX_TREE_DEPTH:
-            return
-
         try:
             entries = sorted(os.listdir(folder_path))
         except PermissionError:
@@ -456,8 +462,22 @@ class WorkspacePanel(QWidget):
             item.setText(0, "[DIR] {}".format(d))
             item.setData(0, Qt.ItemDataRole.UserRole, full_path)
             item.setForeground(0, QColor("#cccccc"))
+
+            # Force the expand arrow to be visible even before children
+            # are loaded.  Qt won't re-draw the arrow for items whose
+            # placeholder child is added after the item is already in
+            # the tree (during an itemExpanded signal handler).
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+
+            # Add a placeholder child so _ensure_populated knows this
+            # folder hasn't been loaded yet.  Built before addChild so
+            # the item enters the tree with a child already present.
+            placeholder = QTreeWidgetItem()
+            placeholder.setData(0, Qt.ItemDataRole.UserRole, _PLACEHOLDER)
+            item.addChild(placeholder)
+
             parent_item.addChild(item)
-            self._populate_folder(item, full_path, depth + 1)
 
         for f in files:
             full_path = os.path.join(folder_path, f)
@@ -475,6 +495,53 @@ class WorkspacePanel(QWidget):
                 item.setForeground(0, QColor("#969696"))
 
             parent_item.addChild(item)
+
+    # --- Lazy Loading Helpers ------------------------------------------------
+
+    @staticmethod
+    def _is_placeholder(item):
+        """
+        Check whether a tree item is a lazy-loading placeholder.
+
+        :param QTreeWidgetItem item: The tree item to check.
+        :return: True if this item is a placeholder sentinel.
+        :rtype: bool
+        """
+        return item.data(0, Qt.ItemDataRole.UserRole) == _PLACEHOLDER
+
+    def _ensure_populated(self, item):
+        """
+        Populate a folder item's children if it only has a placeholder.
+
+        Called when a folder is expanded for the first time.  Replaces
+        the placeholder child with real directory contents via
+        ``_populate_folder``.  If the folder was already populated
+        (no placeholder), this is a no-op.
+
+        :param QTreeWidgetItem item: A folder tree item.
+        """
+        # Check for the placeholder sentinel.
+        if item.childCount() == 1 and self._is_placeholder(item.child(0)):
+            item.removeChild(item.child(0))
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if path:
+                self._populate_folder(item, path)
+
+            # If the folder turned out to be empty, let Qt hide the
+            # arrow so it doesn't look expandable.
+            if item.childCount() == 0:
+                item.setChildIndicatorPolicy(
+                    QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+
+    def _on_item_expanded(self, item):
+        """
+        Lazy-load children when a folder is expanded for the first time.
+
+        :param QTreeWidgetItem item: The expanded tree item.
+        """
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            self._ensure_populated(item)
 
     def _on_item_double_clicked(self, item, column):
         """

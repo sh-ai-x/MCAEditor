@@ -1365,21 +1365,28 @@ class MCAEditorPanel(QWidget):
         if not project:
             return
 
-        # Unlock workspace tree to the project root.
-        self._sidebar.workspace_panel.set_locked_folder(project.project_root)
+        # Set the project root as the primary workspace folder.
+        # Use _set_locked_folder_no_refresh to avoid rebuilding the tree
+        # three times — we do a single _refresh_tree at the end after
+        # all state (folders, excluded, expanded paths) is configured.
+        wp = self._sidebar.workspace_panel
+        wp._set_locked_folder_no_refresh(project.project_root)
 
         # Update header to show project name.
         self._sidebar.set_workspace_title("PROJECT: {}".format(project.name))
 
-        # Set excluded folders so the tree hides them.
-        self._sidebar.set_excluded_folders(set(project.excluded_folders))
+        # Set excluded folders (without triggering a tree rebuild).
+        wp._excluded_folders = set(project.excluded_folders)
 
-        # Restore saved expanded folders for this project and rebuild
-        # the tree once more so the loaded paths take effect.
-        self._sidebar.workspace_panel.restore_tree_state_from_settings(
+        # Restore saved workspace folders (user-added extras beyond
+        # project root), expanded paths, and selected item.
+        wp.restore_tree_state_from_settings(
             self._settings, project.project_root
         )
-        self._sidebar.workspace_panel._refresh_tree()
+
+        # Single tree rebuild with all state configured.
+        wp._refresh_tree()
+        wp._update_empty_state()
 
         # Update toolbar button and show project action buttons.
         self._project_button.setText(project.name)
@@ -4651,6 +4658,7 @@ class MCAEditorPanel(QWidget):
         self._indexed_folders = normalized
 
         self._symbol_index = SymbolIndex()
+        self._completion_provider.set_symbol_index(self._symbol_index)
         self._index_worker = IndexWorker(self._symbol_index, folders, excluded)
         self._index_worker.start()
 
@@ -4689,6 +4697,7 @@ class MCAEditorPanel(QWidget):
         if self._symbol_index is not None:
             self._symbol_index.clear()
             self._symbol_index = None
+        self._completion_provider.set_symbol_index(None)
         self._indexed_folders = None
 
         # Clear the action bar indicator.

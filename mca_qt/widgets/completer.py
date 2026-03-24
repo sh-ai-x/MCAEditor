@@ -118,6 +118,20 @@ class CompletionProvider:
         """
         self._settings = settings
         self._adapter_manager = adapter_manager
+        # Optional project-wide symbol index (set when a project is opened).
+        self._symbol_index = None
+
+    def set_symbol_index(self, index):
+        """
+        Attach or detach the project symbol index.
+
+        Called when a project is opened (attach) or closed (detach).
+        When attached, completions include class/function/proc names
+        from all indexed files in the workspace.
+
+        :param SymbolIndex index: The symbol index, or None to detach.
+        """
+        self._symbol_index = index
 
     def get_completions(self, prefix, language, document_text=""):
         """
@@ -187,7 +201,25 @@ class CompletionProvider:
                             priority=1,
                         ))
 
-        # --- Source 3: Document words (priority 2) ---
+        # --- Source 3: Project symbols from SymbolIndex (priority 2) ---
+        # Offers class/function/proc names from all .py files in the
+        # workspace.  Only active when a project is open and the index
+        # has finished building.  Skips dotted prefixes (e.g. "os.pa")
+        # since the index stores bare names, not attributes.
+        if self._symbol_index and "." not in prefix:
+            try:
+                for name, kind, filepath in self._symbol_index.find_by_prefix(prefix):
+                    if name not in seen:
+                        seen.add(name)
+                        items.append(CompletionItem(
+                            label=name,
+                            detail=kind,
+                            priority=2,
+                        ))
+            except Exception as exc:
+                logger.debug("Symbol index completions failed: %s", exc)
+
+        # --- Source 4: Document words (priority 3) ---
         # Always available regardless of DCC connection. Scan the current
         # document for identifiers that match the insert prefix.
         if "." in prefix:
@@ -207,7 +239,7 @@ class CompletionProvider:
                     seen.add(word)
                     items.append(CompletionItem(
                         label=word, detail="document",
-                        priority=2,
+                        priority=3,
                     ))
 
         # Sort by priority first, then alphabetically within each bucket.

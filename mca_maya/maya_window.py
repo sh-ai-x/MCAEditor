@@ -1653,6 +1653,21 @@ def _restore_mca_editor():
     """
     global _mca_editor_window
 
+    # If the user explicitly closed the editor last session, don't
+    # re-create it just because Maya's workspace layout still has the
+    # control.  Delete the stale workspace control and bail out.
+    from mca_core.config.settings import MCASettings
+    from mca_maya.plugin_main import _maya_version
+    _app = "MCAEditor-Maya{}".format(_maya_version) if _maya_version else "MCAEditor"
+    if not MCASettings(app_name=_app).get("editor_was_open", False):
+        logger.info("editor_was_open is False — skipping uiScript restore")
+        try:
+            if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, q=True, exists=True):
+                cmds.workspaceControl(WORKSPACE_CONTROL_NAME, e=True, visible=False)
+        except Exception:
+            pass
+        return
+
     # Ensure command ports are open so the MCP server can connect.
     _ensure_command_ports()
 

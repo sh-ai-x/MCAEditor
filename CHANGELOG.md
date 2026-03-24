@@ -1,5 +1,13 @@
 # MCA Editor Changelog
 
+## v1.0.4 — 2026-03-24
+- File tree: lazy on-demand loading replaces 5-level depth limit — unlimited nesting
+- File tree: workspace folders and expanded state persist across sessions per-project
+- File tree: user-added workspace folders survive project reopen
+- Editor window: respects close state — no longer auto-opens when user explicitly closed it
+- Code completion: project-wide symbol index (class/def/proc) via background SymbolIndex
+- Reduced redundant tree rebuilds during project open (3 → 1)
+
 ## v1.0.3 — 2026-03-18
 - Added plugin monetization infrastructure (manifest verification + license stub)
 - macOS SSL certificate fix for activation on Maya's embedded Python

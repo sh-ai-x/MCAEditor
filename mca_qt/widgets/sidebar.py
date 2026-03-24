@@ -24,8 +24,6 @@ from mca_qt.qt_compat import (
     QColor,
 )
 from mca_qt.icons import folder_closed, folder_open, python_logo, maya_logo, text_icon
-from mca_qt.constants import MAX_WALK_DEPTH
-
 # Module-level logger for sidebar operations.
 logger = logging.getLogger(__name__)
 
@@ -45,8 +43,11 @@ FILE_ICONS = {
     ".md": "MD",
 }
 
-# Maximum depth for recursive folder traversal (imported from constants).
-MAX_TREE_DEPTH = MAX_WALK_DEPTH
+# Sentinel value stored in UserRole on placeholder items.  Placeholder
+# items are added as the sole child of unexpanded folder items so the
+# expand arrow appears.  They are replaced with real contents when the
+# user expands the folder (lazy / on-demand loading).
+_PLACEHOLDER = "__lazy_placeholder__"
 
 
 # =============================================================================
@@ -708,11 +709,16 @@ class WorkspacePanel(QWidget):
 
         self._tree.clear()
 
-        # Collect all directories found during population so we can
-        # sync the file watcher to cover subdirectories too.
-        discovered_dirs = set()
+        # Reset the file watcher — we'll re-add directories as they
+        # are populated (either here or lazily on expand).
+        old_dirs = self._watcher.directories()
+        if old_dirs:
+            self._watcher.removePaths(old_dirs)
 
         for folder in self._workspace_folders:
+            # Always watch the workspace root itself.
+            self._watcher.addPath(folder)
+
             folder_name = os.path.basename(folder)
             root_item = QTreeWidgetItem()
             root_item.setText(0, folder_name)
@@ -720,8 +726,7 @@ class WorkspacePanel(QWidget):
             root_item.setData(0, Qt.ItemDataRole.UserRole, folder)
             root_item.setForeground(0, QColor("#cccccc"))
 
-            self._populate_folder(root_item, folder, depth=0,
-                                  discovered_dirs=discovered_dirs)
+            self._populate_folder(root_item, folder)
             self._tree.addTopLevelItem(root_item)
 
             # Expand AFTER adding to the tree — Qt silently ignores
@@ -730,38 +735,41 @@ class WorkspacePanel(QWidget):
 
         # Re-expand any folders that were open before the rebuild.
         # Uses the snapshot so we're immune to clear() side-effects.
-        # The itemExpanded signal fires for each, updating
-        # _expanded_paths and swapping the folder icon.
+        #
+        # With lazy loading, only the first level of children exists
+        # after _populate_folder.  We must explicitly call
+        # _ensure_populated on each matching folder so its children
+        # are loaded before _iter_all_items pushes them onto the
+        # stack.  We cannot rely on the itemExpanded signal because
+        # Qt may not fire it for programmatic setExpanded() calls
+        # when the widget is not yet visible (e.g. during __init__).
         for item in self._iter_all_items():
             path = item.data(0, Qt.ItemDataRole.UserRole)
             if path and path in restore_paths:
+                # Force-populate children before expanding so the
+                # generator picks up the real children on its next
+                # iteration (depth-first traversal).
+                self._ensure_populated(item)
                 item.setExpanded(True)
+                item.setIcon(0, folder_open())
+                self._expanded_paths.add(path)
 
-        # Sync the file watcher so subdirectories are watched too.
-        # This ensures files added in any visible subfolder trigger
-        # a directoryChanged signal.
-        self._sync_watcher(discovered_dirs)
-
-    def _populate_folder(self, parent_item, folder_path, depth,
-                         discovered_dirs=None):
+    def _populate_folder(self, parent_item, folder_path):
         """
-        Recursively populate folder contents in the tree.
+        Populate one level of folder contents in the tree (lazy loading).
 
-        Directories are listed first, then files. Hidden entries
-        (starting with '.') are skipped.
+        Directories are listed first, then files.  Hidden entries
+        (starting with '.') are skipped.  Sub-folders receive a
+        placeholder child so the expand arrow appears; their real
+        contents are loaded on demand via ``_ensure_populated``.
 
         :param QTreeWidgetItem parent_item: Parent tree item.
         :param str folder_path: Path to scan.
-        :param int depth: Current recursion depth.
-        :param set discovered_dirs: Accumulator for all directory paths found
-            during population (used to sync the file watcher).
         """
-        if depth >= MAX_TREE_DEPTH:
-            return
-
-        # Track this directory so the file watcher can cover it.
-        if discovered_dirs is not None:
-            discovered_dirs.add(folder_path)
+        # Watch this directory so external changes trigger a refresh.
+        watched = set(self._watcher.directories())
+        if folder_path not in watched:
+            self._watcher.addPath(folder_path)
 
         try:
             entries = sorted(os.listdir(folder_path))
@@ -783,9 +791,22 @@ class WorkspacePanel(QWidget):
             item.setIcon(0, folder_closed())
             item.setData(0, Qt.ItemDataRole.UserRole, full_path)
             item.setForeground(0, QColor("#cccccc"))
+
+            # Force the expand arrow to be visible even before children
+            # are loaded.  Qt won't re-draw the arrow for items whose
+            # placeholder child is added after the item is already in
+            # the tree (during an itemExpanded signal handler).
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+
+            # Add a placeholder child so _ensure_populated knows this
+            # folder hasn't been loaded yet.  Built before addChild so
+            # the item enters the tree with a child already present.
+            placeholder = QTreeWidgetItem()
+            placeholder.setData(0, Qt.ItemDataRole.UserRole, _PLACEHOLDER)
+            item.addChild(placeholder)
+
             parent_item.addChild(item)
-            self._populate_folder(item, full_path, depth + 1,
-                                  discovered_dirs=discovered_dirs)
 
         for f in files:
             full_path = os.path.join(folder_path, f)
@@ -817,13 +838,15 @@ class WorkspacePanel(QWidget):
 
     def _on_item_expanded(self, item):
         """
-        Swap to the open folder icon when a folder is expanded,
+        Lazy-load children if needed, swap to the open folder icon,
         and track the path in ``_expanded_paths`` for persistence.
 
         :param QTreeWidgetItem item: The expanded item.
         """
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and os.path.isdir(path):
+            # Populate children on first expand (lazy loading).
+            self._ensure_populated(item)
             item.setIcon(0, folder_open())
             self._expanded_paths.add(path)
 
@@ -864,33 +887,6 @@ class WorkspacePanel(QWidget):
         path = getattr(self, "_pending_changed_path", "")
         if path:
             self.directory_changed.emit(path)
-
-    def _sync_watcher(self, discovered_dirs):
-        """
-        Sync the file watcher to cover all directories in the tree.
-
-        Adds any newly discovered subdirectories and removes paths
-        that are no longer in the tree (e.g. deleted folders).
-        This ensures files added in any visible subfolder trigger
-        a ``directoryChanged`` signal automatically.
-
-        :param set discovered_dirs: All directory paths found during
-            the most recent tree population.
-        """
-        currently_watched = set(self._watcher.directories())
-
-        # Add directories that aren't watched yet.
-        to_add = discovered_dirs - currently_watched
-        if to_add:
-            self._watcher.addPaths(list(to_add))
-
-        # Remove directories that are no longer in the tree (deleted
-        # or excluded), but keep the top-level workspace folders even
-        # if they're empty — they anchor the tree.
-        workspace_set = set(self._workspace_folders)
-        to_remove = currently_watched - discovered_dirs - workspace_set
-        if to_remove:
-            self._watcher.removePaths(list(to_remove))
 
     def _on_file_moved(self, old_path, new_path):
         """
@@ -936,6 +932,20 @@ class WorkspacePanel(QWidget):
 
         :param str folder_path: Absolute path to the folder.
         """
+        self._set_locked_folder_no_refresh(folder_path)
+        self._refresh_tree()
+        self._update_empty_state()
+
+    def _set_locked_folder_no_refresh(self, folder_path):
+        """
+        Set the workspace to a single folder without rebuilding the tree.
+
+        Used by ``_apply_project_mode`` to batch multiple state changes
+        (locked folder + excluded folders + restored expanded paths)
+        into a single ``_refresh_tree()`` call.
+
+        :param str folder_path: Absolute path to the folder.
+        """
         # Remove all existing watched folders.
         for f in self._workspace_folders:
             self._watcher.removePath(f)
@@ -950,8 +960,6 @@ class WorkspacePanel(QWidget):
         # Set the single locked folder.
         self._workspace_folders = [folder_path]
         self._watcher.addPath(folder_path)
-        self._refresh_tree()
-        self._update_empty_state()
         logger.info("Workspace locked to: %s", folder_path)
 
     def set_header_title(self, text):
@@ -1023,10 +1031,12 @@ class WorkspacePanel(QWidget):
 
     def save_tree_state_to_settings(self, settings, project_root=None):
         """
-        Persist expanded paths and selected item to QSettings.
+        Persist workspace folders, expanded paths, and selected item to QSettings.
 
         Uses a per-project key suffix so each project remembers its
-        own tree state independently.
+        own tree state independently.  Workspace folders are saved so
+        that user-added folders (beyond the project root) survive
+        across sessions.
 
         :param MCASettings settings: Application settings instance.
         :param str project_root: Project root path (None for default workspace).
@@ -1034,8 +1044,10 @@ class WorkspacePanel(QWidget):
         try:
             key_expanded = self._tree_settings_key("tree_expanded", project_root)
             key_selected = self._tree_settings_key("tree_selected", project_root)
+            key_folders = self._tree_settings_key("tree_folders", project_root)
 
             settings.set(key_expanded, list(self._expanded_paths))
+            settings.set(key_folders, list(self._workspace_folders))
 
             # Grab the current selection if available.
             current = self._tree.currentItem()
@@ -1050,10 +1062,12 @@ class WorkspacePanel(QWidget):
 
     def restore_tree_state_from_settings(self, settings, project_root=None):
         """
-        Load expanded paths and selected item from QSettings.
+        Load workspace folders, expanded paths, and selected item from QSettings.
 
-        Populates ``_expanded_paths`` and ``_selected_path`` so the
-        next ``_refresh_tree()`` call picks them up automatically.
+        Restores ``_workspace_folders`` so that user-added folders
+        (beyond the project root) reappear.  Populates
+        ``_expanded_paths`` and ``_selected_path`` so the next
+        ``_refresh_tree()`` call picks them up automatically.
 
         :param MCASettings settings: Application settings instance.
         :param str project_root: Project root path (None for default workspace).
@@ -1061,6 +1075,32 @@ class WorkspacePanel(QWidget):
         try:
             key_expanded = self._tree_settings_key("tree_expanded", project_root)
             key_selected = self._tree_settings_key("tree_selected", project_root)
+            key_folders = self._tree_settings_key("tree_folders", project_root)
+
+            # Restore workspace folders so user-added folders survive
+            # across sessions.  Only apply folders that still exist on
+            # disk to avoid dead entries.  Try the per-project key first,
+            # falling back to the global "workspace_folders" key for
+            # backwards compatibility (first run after this feature was
+            # added, or sessions saved by older builds).
+            saved_folders = settings.get(key_folders, [])
+            if isinstance(saved_folders, str):
+                saved_folders = [saved_folders] if saved_folders else []
+            if not saved_folders or not isinstance(saved_folders, list):
+                # Fallback: read the global workspace_folders key that
+                # save_window_state() has always written.
+                saved_folders = settings.get("workspace_folders", [])
+                if isinstance(saved_folders, str):
+                    saved_folders = [saved_folders] if saved_folders else []
+            if saved_folders and isinstance(saved_folders, list):
+                # Merge saved folders with current folders (the project
+                # root is already set by set_locked_folder; add any
+                # extra user-added folders that still exist).
+                current = set(self._workspace_folders)
+                for folder in saved_folders:
+                    if folder not in current and os.path.isdir(folder):
+                        self._workspace_folders.append(folder)
+                        self._watcher.addPath(folder)
 
             saved_expanded = settings.get(key_expanded, [])
             # QSettings returns a bare string instead of a list when only
@@ -1495,6 +1535,43 @@ class WorkspacePanel(QWidget):
 
     # --- Item Helpers --------------------------------------------------------
 
+    # --- Lazy Loading Helpers ------------------------------------------------
+
+    @staticmethod
+    def _is_placeholder(item):
+        """
+        Check whether a tree item is a lazy-loading placeholder.
+
+        :param QTreeWidgetItem item: The tree item to check.
+        :return: True if this item is a placeholder sentinel.
+        :rtype: bool
+        """
+        return item.data(0, Qt.ItemDataRole.UserRole) == _PLACEHOLDER
+
+    def _ensure_populated(self, item):
+        """
+        Populate a folder item's children if it only has a placeholder.
+
+        Called when a folder is expanded for the first time.  Replaces
+        the placeholder child with real directory contents via
+        ``_populate_folder``.  If the folder was already populated
+        (no placeholder), this is a no-op.
+
+        :param QTreeWidgetItem item: A folder tree item.
+        """
+        # Check for the placeholder sentinel.
+        if item.childCount() == 1 and self._is_placeholder(item.child(0)):
+            item.removeChild(item.child(0))
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if path:
+                self._populate_folder(item, path)
+
+            # If the folder turned out to be empty, let Qt hide the
+            # arrow so it doesn't look expandable.
+            if item.childCount() == 0:
+                item.setChildIndicatorPolicy(
+                    QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+
     def _is_folder_item(self, item):
         """
         Check whether a tree item represents a directory.
@@ -1514,7 +1591,8 @@ class WorkspacePanel(QWidget):
         Recursively hide/show items based on filename match.
 
         Files are matched by name. Folders are shown if any descendant
-        file matches (and auto-expanded), hidden otherwise.
+        file matches (and auto-expanded), hidden otherwise.  Lazy-loaded
+        folders are force-populated so the search covers the full tree.
 
         :param QTreeWidgetItem item: Current tree item.
         :param str search: Lowercase search string.
@@ -1522,6 +1600,9 @@ class WorkspacePanel(QWidget):
         :rtype: bool
         """
         if self._is_folder_item(item):
+            # Force-load children so the search can see all files.
+            self._ensure_populated(item)
+
             # Folder — visible only if a descendant matches.
             any_child_visible = False
             for i in range(item.childCount()):

@@ -50,7 +50,7 @@ _SKIP_EXTS = {
 }
 
 # Maximum directory depth to recurse into.
-_MAX_DEPTH = 5
+_MAX_DEPTH = 15
 
 # Regex templates for definition lines.  ``{symbol}`` is replaced with a
 # concrete name during lookup; during indexing we use a generic capture
@@ -129,6 +129,35 @@ class SymbolIndex:
         with self._lock:
             entries = self._symbols_by_name.get(name, [])
             return [(e.filepath, e.line, e.line_text) for e in entries]
+
+    def find_by_prefix(self, prefix, limit=50):
+        """
+        Return symbol names that start with *prefix* (case-insensitive).
+
+        Used by the code completer to offer project-wide suggestions
+        drawn from class, function, and proc definitions across all
+        indexed files.
+
+        :param str prefix: Prefix to match (e.g. ``"rig"``).
+        :param int limit: Maximum number of results to return.
+        :return: List of ``(name, kind, filepath)`` tuples, deduplicated
+            by name and sorted alphabetically.
+        :rtype: list[tuple]
+        """
+        prefix_lower = prefix.lower()
+        seen = set()
+        results = []
+        with self._lock:
+            for name, entries in self._symbols_by_name.items():
+                if name.lower().startswith(prefix_lower) and name not in seen:
+                    seen.add(name)
+                    # Use the first entry's kind and filepath as representative.
+                    entry = entries[0]
+                    results.append((name, entry.kind, entry.filepath))
+                    if len(results) >= limit:
+                        break
+        results.sort(key=lambda r: r[0].lower())
+        return results
 
     def find_usages(self, name, definition_patterns=None):
         """
