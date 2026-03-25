@@ -566,6 +566,45 @@ def _set_owner_window(qt_hwnd, owner_hwnd):
 
 
 # ============================================================================
+# Step 4b: Ensure Python Remote Execution is enabled
+# ============================================================================
+
+def _ensure_remote_execution():
+    """
+    Enable UE's Python Remote Execution (TCP port 6776) if not already on.
+
+    The MCP server communicates with UE over this protocol. Without it,
+    Claude Code's Unreal tools cannot reach the engine. The setting is
+    saved to the project ini so it persists across restarts.
+
+    Called from both ``auto_launch()`` (every UE startup) and
+    ``_launch_editor()`` (when the user clicks the button), so it fires
+    regardless of whether the editor auto-opens.
+    """
+    try:
+        import unreal
+        py_settings = unreal.get_default_object(
+            unreal.PythonScriptPluginSettings
+        )
+        if py_settings is None:
+            _ue_log_warning("Could not access PythonScriptPluginSettings")
+            return
+
+        # UE property bRemoteExecution is Python-ized to "remote_execution".
+        remote_enabled = py_settings.get_editor_property("remote_execution")
+        if not remote_enabled:
+            py_settings.set_editor_property("remote_execution", True)
+            py_settings.save_config()
+            _ue_log("Enabled Python Remote Execution (port 6776)")
+        else:
+            _ue_log("Python Remote Execution already enabled")
+    except Exception as exc:
+        _ue_log_warning(
+            "Failed to enable Remote Execution: {}".format(exc)
+        )
+
+
+# ============================================================================
 # Step 5: Create the MCA Editor with UE as owner window
 # ============================================================================
 
@@ -607,35 +646,7 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
     _ue_log("=== Launching MCA Editor for UE ===")
 
     # --- Ensure Remote Execution is enabled ---------------------------------
-    # The MCP server communicates with UE over the Remote Execution protocol
-    # (TCP port 6776).  Enable it automatically so users don't need to dig
-    # into Editor Preferences > Plugins > Python to turn it on manually.
-    try:
-        import unreal
-        py_settings = unreal.get_default_object(
-            unreal.PythonScriptPluginSettings
-        )
-        if py_settings is not None:
-            # UE property name is bRemoteExecution, Python-ized to
-            # "remote_execution" (UE drops the 'b' prefix and snake-cases).
-            remote_enabled = py_settings.get_editor_property(
-                "remote_execution"
-            )
-            if not remote_enabled:
-                py_settings.set_editor_property(
-                    "remote_execution", True
-                )
-                # Save to ini so it persists across restarts.
-                py_settings.save_config()
-                _ue_log("Enabled Python Remote Execution (port 6776)")
-            else:
-                _ue_log("Python Remote Execution already enabled")
-        else:
-            _ue_log_warning("Could not access PythonScriptPluginSettings")
-    except Exception as exc:
-        _ue_log_warning(
-            "Failed to enable Remote Execution: {}".format(exc)
-        )
+    _ensure_remote_execution()
 
     # --- Venv setup ---------------------------------------------------------
     _setup_venv()
@@ -1316,9 +1327,16 @@ def auto_launch(ue_hwnd=0):
     ready). Checks the ``was_open`` flag in QSettings — if True, launches
     the editor automatically so the user doesn't have to click the button.
 
+    Always enables Python Remote Execution (port 6776) regardless of whether
+    the editor opens, so the MCP server can connect to UE.
+
     :param int ue_hwnd: Native HWND of UE's main window (0 = fallback).
     """
     try:
+        # Always enable Remote Execution so the MCP server can communicate
+        # with UE even if the editor itself isn't open yet.
+        _ensure_remote_execution()
+
         _setup_venv()
         was_open, _ = _load_persistent_state()
         if was_open:
