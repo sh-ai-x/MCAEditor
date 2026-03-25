@@ -117,19 +117,28 @@ bool UMCAAnimBlueprintLibrary::AddStateMachine(
 	FGraphNodeCreator<UAnimGraphNode_StateMachine> NodeCreator(*AnimGraph);
 	UAnimGraphNode_StateMachine* SMNode = NodeCreator.CreateNode();
 
-	// The state machine name comes from its EditorStateMachineGraph name.
-	// Rename the graph to set the state machine's display name.
-	if (SMNode->EditorStateMachineGraph)
-	{
-		SMNode->EditorStateMachineGraph->Rename(*StateMachineName, nullptr);
-	}
-
 	// Position the node so it doesn't overlap the output pose.
 	SMNode->NodePosX = 0;
 	SMNode->NodePosY = 0;
 
 	// Finalize — this calls CreateNewGuid, PostPlacedNewNode, AllocateDefaultPins.
+	// IMPORTANT: Must finalize BEFORE renaming because PostPlacedNewNode creates
+	// the EditorStateMachineGraph sub-object. It doesn't exist until Finalize().
 	NodeCreator.Finalize();
+
+	// The state machine name comes from its EditorStateMachineGraph name.
+	// Use RenameGraph (not raw UObject::Rename) — it handles editor bookkeeping.
+	if (SMNode->EditorStateMachineGraph)
+	{
+		FBlueprintEditorUtils::RenameGraph(SMNode->EditorStateMachineGraph, StateMachineName);
+		UE_LOG(LogMCAScripting, Log, TEXT("AddStateMachine: Renamed graph to '%s' (actual: '%s')"),
+			*StateMachineName, *SMNode->EditorStateMachineGraph->GetName());
+	}
+	else
+	{
+		UE_LOG(LogMCAScripting, Warning,
+			TEXT("AddStateMachine: EditorStateMachineGraph is null after Finalize — name not applied"));
+	}
 
 	// Wire to the output pose if requested.
 	if (bConnectToRoot)
@@ -268,11 +277,13 @@ bool UMCAAnimBlueprintLibrary::AddState(
 	NodeCreator.Finalize();
 
 	// The state name comes from its BoundGraph name (see GetStateName()).
-	// Rename the bound graph to set the state's display name.
+	// Use RenameGraph (not raw UObject::Rename) — it handles editor bookkeeping.
 	UEdGraph* StateGraph = StateNode->GetBoundGraph();
 	if (StateGraph)
 	{
-		StateGraph->Rename(*StateName, nullptr);
+		FBlueprintEditorUtils::RenameGraph(StateGraph, StateName);
+		UE_LOG(LogMCAScripting, Log, TEXT("AddState: Renamed bound graph to '%s' (actual: '%s')"),
+			*StateName, *StateGraph->GetName());
 	}
 
 	// Position states in a grid layout so they don't pile up.
