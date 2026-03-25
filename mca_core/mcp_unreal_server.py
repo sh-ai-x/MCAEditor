@@ -38,7 +38,6 @@ import logging
 import os
 import pprint as pprint_mod
 import socket
-import struct
 import uuid
 from itertools import chain
 from typing import get_origin
@@ -60,24 +59,11 @@ __version__ = "1.0.0"
 MULTICAST_GROUP = "239.0.0.1"
 MULTICAST_PORT = 6766
 
-# Default TCP port for UE Remote Execution (if discovery fails).
-DEFAULT_REMOTE_PORT = 6776
+# Multicast TTL — 0 means localhost only (matches UE's default).
+DEFAULT_MULTICAST_TTL = 0
 
-# UE Remote Execution protocol magic bytes and version.
-PROTOCOL_MAGIC = b"ue_py"
-PROTOCOL_VERSION = 2
-
-# TCP connection timeout (seconds).
-CONNECT_TIMEOUT_SECS = 5.0
-
-# Phase 1 recv: wait for UE to START responding.
-FIRST_RECV_TIMEOUT_SECS = 30.0
-
-# Phase 2 recv: silence threshold once data is flowing.
-IDLE_RECV_TIMEOUT_SECS = 0.5
-
-# Buffer size for TCP recv.
-RECV_BUFFER_SIZE = 65536
+# Buffer size for TCP recv (matches UE's DEFAULT_RECEIVE_BUFFER_SIZE).
+RECV_BUFFER_SIZE = 8192
 
 # UDP discovery timeout (seconds).
 DISCOVERY_TIMEOUT = 3.0
@@ -93,87 +79,102 @@ logger = logging.getLogger("MCAUnrealMCP")
 
 
 # =============================================================================
-# Unreal Remote Execution Protocol
+# Unreal Connection (using UE's Remote Execution protocol)
 # =============================================================================
+#
+# UE's Remote Execution protocol (see remote_execution.py shipped with the
+# PythonScriptPlugin):
+#
+#   1. Discovery: UDP multicast — send "ping", receive "pong" with node info
+#   2. Open:      UDP multicast — send "open_connection" with our TCP endpoint
+#   3. Accept:    UE connects TO our TCP listen socket (reverse connection!)
+#   4. Command:   TCP — send "command", receive "command_result"
+#   5. Close:     UDP multicast — send "close_connection"
+#
+# Messages are plain UTF-8 JSON (no binary framing):
+#   {"version": 1, "magic": "ue_py", "type": "...", "source": "...", ...}
+#
+# Protocol version is 1. Multicast group 239.0.0.1:6766 by default.
 
-def _build_ue_message(payload_dict):
+# Message type constants matching UE's protocol.
+_TYPE_PING = "ping"
+_TYPE_PONG = "pong"
+_TYPE_OPEN_CONNECTION = "open_connection"
+_TYPE_CLOSE_CONNECTION = "close_connection"
+_TYPE_COMMAND = "command"
+_TYPE_COMMAND_RESULT = "command_result"
+
+# UE protocol version (must be 1 to match PythonScriptRemoteExecution.cpp).
+_UE_PROTOCOL_VERSION = 1
+
+
+def _ue_msg(type_, source, dest=None, data=None):
     """
-    Build a UE Remote Execution protocol message.
+    Build a UE Remote Execution message as UTF-8 bytes.
 
-    Wire format:
-        [5 bytes magic "ue_py"]
-        [4 bytes version (uint32 LE)]
-        [4 bytes payload size (uint32 LE)]
-        [N bytes UTF-8 JSON payload]
-
-    :param dict payload_dict: The JSON payload to serialize.
-    :return: The complete binary message.
+    :param str type_: Message type (ping, pong, command, etc.).
+    :param str source: Our node ID.
+    :param str dest: Destination node ID (None = broadcast).
+    :param dict data: Optional message-specific payload.
+    :return: UTF-8 encoded JSON bytes.
     :rtype: bytes
     """
-    payload_bytes = json.dumps(payload_dict, separators=(",", ":")).encode("utf-8")
-    header = PROTOCOL_MAGIC
-    header += struct.pack("<I", PROTOCOL_VERSION)
-    header += struct.pack("<I", len(payload_bytes))
-    return header + payload_bytes
+    obj = {
+        "version": _UE_PROTOCOL_VERSION,
+        "magic": "ue_py",
+        "type": type_,
+        "source": source,
+    }
+    if dest:
+        obj["dest"] = dest
+    if data:
+        obj["data"] = data
+    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
 
 
-def _parse_ue_message(data):
+def _parse_ue_json(data_bytes):
     """
-    Parse a UE Remote Execution protocol message from raw bytes.
+    Parse a UE Remote Execution JSON message from raw bytes.
 
-    :param bytes data: Raw bytes received from the socket.
-    :return: Parsed payload dict, or None if invalid.
+    :param bytes data_bytes: Raw UTF-8 bytes received from the socket.
+    :return: Parsed message dict, or None if invalid.
     :rtype: dict or None
     """
-    # Minimum size: 5 (magic) + 4 (version) + 4 (size) = 13 bytes.
-    if len(data) < 13:
-        return None
-
-    magic = data[:5]
-    if magic != PROTOCOL_MAGIC:
-        return None
-
-    payload_size = struct.unpack("<I", data[9:13])[0]
-    payload_bytes = data[13:13 + payload_size]
-
-    if len(payload_bytes) < payload_size:
-        return None
-
     try:
-        return json.loads(payload_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        obj = json.loads(data_bytes.decode("utf-8"))
+        if obj.get("magic") != "ue_py":
+            return None
+        return obj
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
         return None
 
-
-# =============================================================================
-# Unreal Connection
-# =============================================================================
 
 class UnrealConnection:
     """
-    TCP connection to UE's Python interpreter via Remote Execution protocol.
+    Manages a Remote Execution session with a running UE instance.
 
-    Mirrors the proven socket patterns from ``mca_maya_server.py``:
-    two-phase timeout recv, clean error handling, idempotent connections.
+    Follows the same protocol as UE's own ``remote_execution.py``:
+    UDP multicast for discovery, then a **reverse TCP** connection where
+    the client listens and UE connects to us.
     """
 
-    def __init__(self, port=DEFAULT_REMOTE_PORT, host=LOCAL_HOST):
+    def __init__(self, multicast_group=MULTICAST_GROUP, multicast_port=MULTICAST_PORT):
         """
         Initialize an Unreal connection.
 
-        :param int port: UE Remote Execution TCP port.
-        :param str host: Hostname (always localhost for UE).
+        :param str multicast_group: UDP multicast group address.
+        :param int multicast_port: UDP multicast port.
         """
-        self._port = port
-        self._host = host
+        self._multicast_group = multicast_group
+        self._multicast_port = multicast_port
+        self._our_node_id = str(uuid.uuid4())
 
     def run_tool_script(self, script):
         """
         Execute a tool script in Unreal and return the result.
 
-        Sends the script via the Remote Execution TCP protocol.  The script
-        should produce its result by printing JSON to stdout, which the
-        stdout redirect wrapper captures and returns.
+        Discovers a UE node, opens a command channel, sends the script,
+        waits for the response, and closes the channel.
 
         :param str script: Python source code to execute in Unreal.
         :return: Parsed result (dict/list if JSON, raw string otherwise).
@@ -190,7 +191,7 @@ class UnrealConnection:
             "print(_mcp_out)\n"
         )
 
-        raw = self._send_command(script_with_output)
+        raw = self._execute(script_with_output)
 
         if not raw:
             return None
@@ -205,97 +206,216 @@ class UnrealConnection:
 
         return raw if raw else None
 
-    def _send_command(self, command):
+    def _create_broadcast_socket(self):
         """
-        Send a Python command to UE via the Remote Execution TCP protocol.
+        Create and configure a UDP multicast socket for discovery.
 
-        The command is sent as a "C" (command) type message with exec_mode "F"
-        (file execution).  The response is a "R" (response) message containing
-        the output.
+        Binds to the multicast address on the multicast port, joins the
+        multicast group, and enables loopback so we can communicate with
+        UE on localhost.
 
-        Two-phase timeout recv (matching maya_adapter.py pattern):
-        Phase 1: Wait up to 30s for UE to start responding.
-        Phase 2: 0.5s idle timeout = response is complete.
+        :return: Configured UDP socket.
+        :rtype: socket.socket
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Bind to the multicast bind address on the multicast port (matches UE).
+        sock.bind((LOCAL_HOST, self._multicast_port))
+        # Enable multicast loopback so we hear our own pings (and UE's pongs).
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        # TTL 0 = localhost only.
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, DEFAULT_MULTICAST_TTL)
+        # Set the outgoing multicast interface to localhost.
+        sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+            socket.inet_aton(LOCAL_HOST),
+        )
+        # Join the multicast group on the local interface.
+        sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+            socket.inet_aton(self._multicast_group) + socket.inet_aton(LOCAL_HOST),
+        )
+        sock.settimeout(0.5)
+        return sock
 
-        :param str command: Python code to execute.
-        :return: Response string from UE, or None on failure.
+    def _discover_ue_node(self, sock):
+        """
+        Discover a running UE instance via UDP multicast ping/pong.
+
+        Sends ping messages and waits for a pong response from UE.
+
+        :param socket.socket sock: The multicast socket.
+        :return: The UE node ID, or None if not found.
         :rtype: str or None
         """
-        # Build the command payload.
-        command_id = str(uuid.uuid4())
-        payload = {
-            "type": "C",
-            "id": command_id,
-            "body": command,
-            "exec_mode": "F",
-        }
+        import time
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(CONNECT_TIMEOUT_SECS)
+        # Send pings for up to DISCOVERY_TIMEOUT seconds.
+        deadline = time.time() + DISCOVERY_TIMEOUT
+        while time.time() < deadline:
+            # Send a ping.
+            ping = _ue_msg(_TYPE_PING, self._our_node_id)
+            sock.sendto(ping, (self._multicast_group, self._multicast_port))
 
-        try:
-            sock.connect((self._host, self._port))
-            msg = _build_ue_message(payload)
-            sock.sendall(msg)
-
-            # Phase 1: Wait for UE to start responding.
-            sock.settimeout(FIRST_RECV_TIMEOUT_SECS)
-
-            response_data = b""
-            while True:
+            # Listen for pong responses for a short window.
+            listen_until = time.time() + 1.0
+            while time.time() < listen_until:
                 try:
-                    chunk = sock.recv(RECV_BUFFER_SIZE)
-                    if not chunk:
-                        break
-                    response_data += chunk
-
-                    # Check if we have a complete message.
-                    if len(response_data) >= 13:
-                        payload_size = struct.unpack("<I", response_data[9:13])[0]
-                        if len(response_data) >= 13 + payload_size:
-                            break
-
-                    # Phase 2: Once data is flowing, short idle timeout.
-                    sock.settimeout(IDLE_RECV_TIMEOUT_SECS)
-
+                    data, addr = sock.recvfrom(RECV_BUFFER_SIZE)
+                    msg = _parse_ue_json(data)
+                    if not msg:
+                        continue
+                    # Skip our own messages.
+                    if msg.get("source") == self._our_node_id:
+                        continue
+                    # Look for pong responses.
+                    if msg.get("type") == _TYPE_PONG:
+                        node_id = msg.get("source", "")
+                        logger.info(
+                            "Discovered UE node: %s at %s", node_id[:12], addr
+                        )
+                        return node_id
                 except socket.timeout:
                     break
 
-            if not response_data:
+        logger.warning("No UE nodes found via multicast discovery.")
+        return None
+
+    def _execute(self, command):
+        """
+        Full execution flow: discover → open → command → result → close.
+
+        :param str command: Python code to execute in UE.
+        :return: The output string from UE, or None on failure.
+        :rtype: str or None
+        """
+        import time
+
+        broadcast_sock = self._create_broadcast_socket()
+
+        try:
+            # Step 1: Discover a UE node.
+            ue_node_id = self._discover_ue_node(broadcast_sock)
+            if not ue_node_id:
                 return None
 
-            resp_payload = _parse_ue_message(response_data)
-            if resp_payload is None:
-                # Fallback: try to decode raw response as text.
-                return response_data.decode("utf-8", errors="replace")
-
-            # Extract the output from the response payload.
-            # UE Remote Execution puts output in the "output" field.
-            output = resp_payload.get("output", "")
-            if not output:
-                # Some UE versions use "body" for the response.
-                output = resp_payload.get("body", "")
-
-            return output
-
-        except ConnectionRefusedError:
-            logger.warning(
-                "UE Remote Execution port %d not open (Unreal may not be "
-                "running or Remote Execution not enabled).",
-                self._port,
+            # Step 2: Create a TCP listen socket for the command channel.
+            # UE connects TO us (reverse connection pattern).
+            # Bind to port 0 so the OS picks a free port — avoids conflicts.
+            listen_sock = socket.socket(
+                socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP
             )
-            return None
-        except socket.timeout:
-            logger.warning(
-                "Connection to UE port %d timed out after %.1fs.",
-                self._port, CONNECT_TIMEOUT_SECS,
+            listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_sock.bind((LOCAL_HOST, 0))
+            listen_sock.listen(1)
+            listen_sock.settimeout(5)
+
+            # Read the actual port the OS assigned.
+            actual_port = listen_sock.getsockname()[1]
+            logger.debug("TCP listen socket bound to port %d", actual_port)
+
+            # Step 3: Broadcast open_connection telling UE where to connect.
+            open_msg = _ue_msg(
+                _TYPE_OPEN_CONNECTION, self._our_node_id, ue_node_id,
+                {
+                    "command_ip": LOCAL_HOST,
+                    "command_port": actual_port,
+                },
             )
-            return None
+
+            # Try up to 6 times (matches UE's reference client).
+            cmd_sock = None
+            for attempt in range(6):
+                broadcast_sock.sendto(
+                    open_msg,
+                    (self._multicast_group, self._multicast_port),
+                )
+                try:
+                    cmd_sock, remote_addr = listen_sock.accept()
+                    cmd_sock.setblocking(True)
+                    logger.info(
+                        "UE connected to our command channel from %s",
+                        remote_addr,
+                    )
+                    break
+                except socket.timeout:
+                    continue
+
+            listen_sock.close()
+
+            if cmd_sock is None:
+                logger.warning(
+                    "UE did not connect to our command channel after 6 attempts."
+                )
+                # Send close just in case.
+                broadcast_sock.sendto(
+                    _ue_msg(_TYPE_CLOSE_CONNECTION, self._our_node_id, ue_node_id),
+                    (self._multicast_group, self._multicast_port),
+                )
+                return None
+
+            try:
+                # Step 4: Send command over TCP.
+                cmd_msg = _ue_msg(
+                    _TYPE_COMMAND, self._our_node_id, ue_node_id,
+                    {
+                        "command": command,
+                        "unattended": True,
+                        "exec_mode": "ExecuteFile",
+                    },
+                )
+                cmd_sock.sendall(cmd_msg)
+
+                # Step 5: Receive command_result over TCP.
+                # Blocking recv — UE sends the full result then we check size.
+                response_data = b""
+                while True:
+                    chunk = cmd_sock.recv(RECV_BUFFER_SIZE)
+                    if not chunk:
+                        # Connection closed by UE.
+                        break
+                    response_data += chunk
+                    if len(chunk) < RECV_BUFFER_SIZE:
+                        # Got less than a full buffer — all data received.
+                        break
+
+                result_msg = _parse_ue_json(response_data)
+                output = ""
+                if result_msg and result_msg.get("type") == _TYPE_COMMAND_RESULT:
+                    result_data = result_msg.get("data", {})
+                    # UE may return output as a list of strings or a single string.
+                    raw_output = result_data.get("output", "")
+                    if isinstance(raw_output, list):
+                        output = "\n".join(str(line) for line in raw_output)
+                    else:
+                        output = str(raw_output) if raw_output else ""
+                    # Append result if present (from eval mode).
+                    raw_result = result_data.get("result", "")
+                    if raw_result:
+                        if isinstance(raw_result, list):
+                            raw_result = "\n".join(str(r) for r in raw_result)
+                        else:
+                            raw_result = str(raw_result)
+                        output = (output + "\n" + raw_result).strip()
+                elif response_data:
+                    output = response_data.decode("utf-8", errors="replace")
+
+                return output if output else None
+
+            finally:
+                cmd_sock.close()
+
+                # Step 6: Broadcast close_connection.
+                broadcast_sock.sendto(
+                    _ue_msg(_TYPE_CLOSE_CONNECTION, self._our_node_id, ue_node_id),
+                    (self._multicast_group, self._multicast_port),
+                )
+
         except OSError as exc:
-            logger.warning("Socket error connecting to UE port %d: %s", self._port, exc)
+            logger.warning("Socket error during UE communication: %s", exc)
             return None
         finally:
-            sock.close()
+            broadcast_sock.close()
 
 
 # =============================================================================
@@ -589,9 +709,8 @@ def convert_to_content(result):
 
 server = Server("MCAUnrealMCP")
 
-# These get set in __main__ before the server starts.
+# Set in __main__ before the server starts.
 _operation_manager = None
-_remote_port = DEFAULT_REMOTE_PORT
 
 
 @server.list_tools()
@@ -638,17 +757,17 @@ async def handle_call_tool(name, arguments):
         script = load_unreal_tool_source(name, path, args)
 
         # Send to Unreal and get results.
-        ue_conn = UnrealConnection(port=_remote_port)
+        ue_conn = UnrealConnection()
         result = ue_conn.run_tool_script(script)
 
         # None means the connection failed.
         if result is None:
             error_msg = (
-                "Cannot connect to Unreal's Remote Execution port ({}).  "
-                "Make sure Unreal Engine is running and Remote Execution is "
-                "enabled in Editor Preferences > Plugins > Python > Remote "
-                "Execution > Enable Remote Execution."
-            ).format(_remote_port)
+                "Not connected. Unreal Engine either isn't running or "
+                "doesn't have Remote Execution enabled. Check that the "
+                "Python plugin's Remote Execution setting is on (UDP "
+                "multicast 239.0.0.1:6766)."
+            )
             logger.error(error_msg)
             return [TextContent(type="text", text=json.dumps(
                 {"success": False, "message": error_msg}))]
@@ -702,14 +821,6 @@ if __name__ == "__main__":
         description="MCA Unreal MCP Server — connects Claude Code to Unreal Engine"
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="UE Remote Execution TCP port (default: {} or UE_REMOTE_PORT env var).".format(
-            DEFAULT_REMOTE_PORT
-        ),
-    )
-    parser.add_argument(
         "--tool-dir",
         action="append",
         default=None,
@@ -717,14 +828,6 @@ if __name__ == "__main__":
              "Can be specified multiple times.",
     )
     args = parser.parse_args()
-
-    # Resolve port: CLI arg > env var > default.
-    if args.port is not None:
-        _remote_port = args.port
-    elif os.environ.get("UE_REMOTE_PORT"):
-        _remote_port = int(os.environ["UE_REMOTE_PORT"])
-    else:
-        _remote_port = DEFAULT_REMOTE_PORT
 
     # --- Logging Setup --------------------------------------------------------
 
@@ -741,7 +844,7 @@ if __name__ == "__main__":
     )
 
     logger.info("MCA Unreal MCP Server v%s starting up", __version__)
-    logger.info("UE Remote Execution port: %d", _remote_port)
+    logger.info("UE discovery: UDP multicast %s:%d", MULTICAST_GROUP, MULTICAST_PORT)
 
     # --- Tool Discovery -------------------------------------------------------
 
