@@ -202,17 +202,30 @@ class MCASettings:
         "editor_was_open": False,        # Whether the editor was open when Maya last shut down.
     }
 
-    def __init__(self, org_name="MCATools", app_name="MCAEditor", backend=None):
+    def __init__(self, org_name="MCATools", app_name="MCAEditor",
+                 backend=None, dcc_version=None):
         """
         Initialize the settings manager.
 
         If *backend* is not provided, tries to create a QSettings backend.
         Falls back to a plain dictionary if Qt is not available.
 
+        When *dcc_version* is provided (e.g. ``"UE5"``), the QSettings
+        app name is suffixed so each DCC gets its own settings store.
+        This isolates window state, recent files, last project, and all
+        other preferences per-DCC — UE won't restore Maya's layout.
+
         :param str org_name: Organization identifier for QSettings.
         :param str app_name: Application identifier for QSettings.
         :param backend: Optional pre-created backend (QSettings or dict-like).
+        :param str dcc_version: Optional DCC version tag (e.g. ``"UE5"``)
+            for per-DCC settings isolation.
         """
+        # Append the DCC version to the app name so each DCC gets its
+        # own QSettings store (separate Windows registry key / plist).
+        if dcc_version:
+            app_name = "{}-{}".format(app_name, dcc_version)
+
         if backend is not None:
             self._settings = backend
             self._use_qsettings = hasattr(backend, "setValue")

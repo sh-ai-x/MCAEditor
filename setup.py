@@ -194,6 +194,19 @@ def collect_extensions():
         print("Maya Python libdir:  {}".format(maya_lib))
         extra_lib_dirs.append(maya_lib)
 
+    # Environment variable overrides for non-standard Python installations.
+    # build_unreal.py sets these because UE's bundled Python has headers at
+    # Engine/Source/ThirdParty/Python3/Win64/include/ instead of the usual
+    # sysconfig location, so the C compiler can't find Python.h without help.
+    env_inc = os.environ.get("MCA_PYTHON_INCLUDE")
+    env_lib = os.environ.get("MCA_PYTHON_LIBDIR")
+    if env_inc and os.path.isdir(env_inc):
+        print("Custom Python include: {}".format(env_inc))
+        extra_include.append(env_inc)
+    if env_lib and os.path.isdir(env_lib):
+        print("Custom Python libdir:  {}".format(env_lib))
+        extra_lib_dirs.append(env_lib)
+
     # Build Extension objects from the .py file list so we can attach
     # the extra include/library directories that Maya needs.
     from setuptools import Extension

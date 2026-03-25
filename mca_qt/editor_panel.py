@@ -3648,8 +3648,19 @@ class MCAEditorPanel(QWidget):
 
         old_stdout = sys.stdout
         old_stderr = sys.stderr
+        _in_ue = self._dcc_version and self._dcc_version.startswith("UE")
+
+        # Redirect stdout to capture print() output.
         sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
+
+        # In UE, do NOT redirect stderr. Python's logging module and
+        # UE's C-level stderr hook both write to the original stderr,
+        # and the UE log tailer picks those up with proper severity
+        # coloring. Redirecting stderr here would cause double output
+        # (once from our capture, once from the log tailer).
+        if not _in_ue:
+            sys.stderr = io.StringIO()
+
         try:
             # Try eval mode first — if the code is a single expression
             # (variable name, function call, etc.), eval returns its value.
@@ -3665,36 +3676,58 @@ class MCAEditorPanel(QWidget):
                 exec(code, self._local_namespace)
 
             output = sys.stdout.getvalue()
-            errors = sys.stderr.getvalue()
             # Respect verbosity: "minimal" suppresses normal stdout output.
             if output and self._verbosity_level != "minimal":
                 self._output.write_output(output.rstrip())
-            if errors:
-                self._output.write_warning(errors.rstrip())
+
+            # Stderr handling — only when we redirected it (non-UE).
+            if not _in_ue:
+                errors = sys.stderr.getvalue()
+                if errors:
+                    # Route each stderr line based on content: ERROR-level
+                    # lines go red, WARNING-level lines go yellow, and
+                    # untagged lines default to warning (amber).
+                    for err_line in errors.rstrip().splitlines():
+                        stripped = err_line.strip()
+                        if not stripped:
+                            continue
+                        if "ERROR" in stripped or "Error" in stripped:
+                            self._output.write_error(err_line)
+                        else:
+                            self._output.write_warning(err_line)
+
             # Show success message unless in minimal mode or running in UE
             # (UE executions are frequent and the message adds noise).
             if self._verbosity_level != "minimal":
-                if not (self._dcc_version and self._dcc_version.startswith("UE")):
+                if not _in_ue:
                     self._output.write_success("Executed locally (no DCC)")
-            # Echo output/errors to UE's Output Log for cross-reference.
-            if self._dcc_version and self._dcc_version.startswith("UE"):
+
+            # Echo stdout to UE's Output Log for cross-reference.
+            # Prefix EVERY line with [MCAEditor] so the log tailer's
+            # skip filter catches all of them (prevents white dupes).
+            if _in_ue:
                 try:
                     import unreal as _ue
                     if output:
-                        _ue.log(f"[MCAEditor] Output: {output.rstrip()}")
-                    if errors:
-                        _ue.log_warning(f"[MCAEditor] StdErr: {errors.rstrip()}")
+                        for _out_line in output.rstrip().splitlines():
+                            _ue.log("[MCAEditor] {}".format(_out_line))
                 except ImportError:
                     pass
         except Exception:
             tb = traceback.format_exc()
             self._output.write_error(tb.rstrip())
-            # Echo traceback to UE's Output Log.
-            if self._dcc_version and self._dcc_version.startswith("UE"):
+            # Echo a single-line error summary to UE's Output Log.
+            # Do NOT echo the full multi-line traceback — each line
+            # appears as a separate UE log entry, and only the first
+            # has the [MCAEditor] prefix.  The log tailer misses the
+            # subsequent lines, which then show as white duplicates.
+            if _in_ue:
                 try:
                     import unreal as _ue
-                    _ue.log_error(f"[MCAEditor] {tb.rstrip()}")
-                except ImportError:
+                    # Extract just the final exception line.
+                    last_line = tb.rstrip().splitlines()[-1]
+                    _ue.log_error("[MCAEditor] {}".format(last_line))
+                except (ImportError, IndexError):
                     pass
         finally:
             sys.stdout = old_stdout

@@ -250,12 +250,24 @@ class MCAProject:
         """
         Absolute path to the per-project session manifest file.
 
-        Used to save/restore the tab layout when switching between
-        the default workspace and this project.
+        When a ``dcc_tag`` is set (e.g. ``"UE5"``, ``"Maya2025"``),
+        returns a DCC-specific filename so different DCCs don't
+        overwrite each other's tab layouts within the same project.
+
+        - UE5:      ``.mca-session-UE5.json``
+        - Maya2025: ``.mca-session-Maya2025.json``
+        - None:     ``.mca-session.json`` (default / standalone)
 
         :rtype: str
         """
-        return os.path.join(self._project_root, SESSION_FILENAME)
+        # Use a DCC-specific session file when running inside a DCC
+        # so Maya and UE can open the same project with independent
+        # tab layouts.
+        if self._dcc_tag:
+            name = ".mca-session-{}.json".format(self._dcc_tag)
+        else:
+            name = SESSION_FILENAME
+        return os.path.join(self._project_root, name)
 
     @property
     def python_paths(self):

@@ -51,10 +51,13 @@ def create_terminal_widget(shell="", cwd="", font_size=12, parent=None):
     :rtype: TerminalWidget or None
     """
     # --- Try xterm.js first (standalone with PySide6 + QtWebEngine) ---
-    widget = _try_xterm(shell, cwd, font_size, parent)
-    if widget is not None:
-        logger.info("Terminal frontend: xterm.js (QWebEngineView)")
-        return widget
+    # Skip in UE — CEF3 (Chromium) is already loaded in-process and
+    # importing QtWebEngine (also Chromium) causes a deadlock.
+    if not _is_inside_ue():
+        widget = _try_xterm(shell, cwd, font_size, parent)
+        if widget is not None:
+            logger.info("Terminal frontend: xterm.js (QWebEngineView)")
+            return widget
 
     # --- Fall back to native (Maya or minimal environments) ---
     widget = _try_native(shell, cwd, font_size, parent)
@@ -70,6 +73,24 @@ def create_terminal_widget(shell="", cwd="", font_size=12, parent=None):
     return None
 
 
+def _is_inside_ue():
+    """
+    Detect if we're running inside Unreal Engine's Python interpreter.
+
+    UE embeds Chromium (CEF3) in-process. Importing PySide6's QtWebEngine
+    (which also embeds Chromium) causes a deadlock — two Chromium instances
+    in the same process. We must skip any QtWebEngine probes in UE.
+
+    :return: True if running inside UE.
+    :rtype: bool
+    """
+    try:
+        import unreal  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def is_terminal_available():
     """
     Quick check if any terminal backend can work in this environment.
@@ -80,23 +101,26 @@ def is_terminal_available():
     :return: *True* if at least one terminal frontend is available.
     :rtype: bool
     """
-    # Check xterm.js (PySide6 + QtWebEngine + resources + pywinpty).
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-        resources_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)))),
-            "resources", "terminal"
-        )
-        if os.path.isfile(os.path.join(resources_dir, "index.html")):
-            # Also need pywinpty for xterm.js.
-            try:
-                import winpty  # noqa: F401
-                return True
-            except ImportError:
-                pass
-    except ImportError:
-        pass
+    # UE embeds CEF3 (Chromium) — importing QtWebEngine deadlocks.
+    # Skip the xterm.js probe entirely and go straight to native.
+    if not _is_inside_ue():
+        # Check xterm.js (PySide6 + QtWebEngine + resources + pywinpty).
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+            resources_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)))),
+                "resources", "terminal"
+            )
+            if os.path.isfile(os.path.join(resources_dir, "index.html")):
+                # Also need pywinpty for xterm.js.
+                try:
+                    import winpty  # noqa: F401
+                    return True
+                except ImportError:
+                    pass
+        except ImportError:
+            pass
 
     # Check native (Windows only — works with or without pywinpty
     # via the subprocess pipe fallback in terminal_backend.py).

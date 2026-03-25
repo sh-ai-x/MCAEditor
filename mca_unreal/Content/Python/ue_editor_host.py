@@ -155,9 +155,26 @@ def _load_persistent_state():
 # Step 1: Locate MCA Editor source packages
 # ============================================================================
 
-# In dev, use the source directory.  In prod, packages are bundled.
-_MCA_SOURCE_DIR = os.environ.get("MCA_EDITOR_SOURCE", r"E:\Projects\MCAEditor")
-if os.path.isdir(_MCA_SOURCE_DIR) and _MCA_SOURCE_DIR not in sys.path:
+# Resolution order:
+# 1. Bundled packages alongside this script (Content/Python/mca_core/)
+#    — used in distribution builds where packages are packed into the plugin.
+# 2. MCA_EDITOR_SOURCE environment variable — for custom installs or CI.
+# 3. Hardcoded dev path — for development from the repo checkout.
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_BUNDLED_DIR = _SCRIPT_DIR  # mca_core/ sits next to ue_editor_host.py in dist
+_DEV_DIR = os.environ.get("MCA_EDITOR_SOURCE", r"E:\Projects\MCAEditor")
+
+# Prefer bundled packages (distribution), fall back to dev checkout.
+if os.path.isdir(os.path.join(_BUNDLED_DIR, "mca_core")):
+    _MCA_SOURCE_DIR = _BUNDLED_DIR
+elif os.path.isdir(_DEV_DIR):
+    _MCA_SOURCE_DIR = _DEV_DIR
+else:
+    _MCA_SOURCE_DIR = None
+    _ue_log_error("Cannot find MCA Editor packages (checked bundled + dev paths)")
+
+if _MCA_SOURCE_DIR and _MCA_SOURCE_DIR not in sys.path:
     sys.path.insert(0, _MCA_SOURCE_DIR)
     logger.info("Added MCA source to path: %s", _MCA_SOURCE_DIR)
 
@@ -224,10 +241,9 @@ class UELogTailer:
     """
     Tails UE's log file and pipes lines to the MCA Editor output panel.
 
-    On creation, reads ALL existing log content from the given start
-    position (beginning of file on first launch, or saved position on
-    reopen) and dumps it into the output panel with proper severity
-    coloring. After the initial load, polls for new lines periodically.
+    On creation, loads the tail of the log (up to ``_MAX_HISTORY_BYTES``)
+    and dumps it into the output panel with severity coloring. After the
+    initial load, polls for new lines periodically.
 
     :param OutputWindow output: The MCA Editor output panel.
     :param str log_path: Path to UE's log file.
@@ -235,6 +251,11 @@ class UELogTailer:
         0 = read from beginning (first launch), >0 = resume from saved
         position (reopen after close).
     """
+
+    # Maximum bytes to read on initial history load. UE logs can be 50MB+;
+    # reading the whole file blocks UE's main thread and floods the output
+    # panel. 256KB gives ~2000 lines of recent context without freezing.
+    _MAX_HISTORY_BYTES = 256 * 1024
 
     def __init__(self, output, log_path, start_position=0):
         self._output = output
@@ -246,18 +267,31 @@ class UELogTailer:
         try:
             self._file = open(log_path, 'r', encoding='utf-8', errors='replace')
 
-            # Seek to the requested start position. On first launch this is 0
-            # (beginning of file). On reopen, this is the saved position from
-            # the previous close — we'll read everything UE logged while the
-            # editor was closed.
-            self._file.seek(start_position)
+            # Determine the actual start position. If start_position is 0
+            # (first launch / full reload), skip to the tail of the file so
+            # we don't process hundreds of thousands of historical lines.
+            # The user only needs recent context, not the full startup log.
+            if start_position == 0:
+                self._file.seek(0, 2)  # Seek to end.
+                file_size = self._file.tell()
+                if file_size > self._MAX_HISTORY_BYTES:
+                    # Jump to near the end and skip the first partial line.
+                    start_position = file_size - self._MAX_HISTORY_BYTES
+                    self._file.seek(start_position)
+                    self._file.readline()  # Discard partial first line.
+                    start_position = self._file.tell()
+                    _ue_log(f"Log file is {file_size / 1024:.0f}KB — "
+                            f"loading last {self._MAX_HISTORY_BYTES / 1024:.0f}KB")
+                else:
+                    self._file.seek(0)
+            else:
+                self._file.seek(start_position)
+
             self._position = start_position
             _ue_log(f"Log tailer started: {log_path}")
             _ue_log(f"  Start position: {start_position} bytes")
 
-            # Load all existing log content from start_position to current EOF.
-            # This gives the full log history on first open, or the missed
-            # lines on reopen.
+            # Load existing log content from start_position to current EOF.
             self._load_history()
 
         except (OSError, IOError) as exc:
@@ -309,26 +343,29 @@ class UELogTailer:
             return 'written'
 
         # Unstructured line (early startup, continuation, stack trace).
-        # Detect severity keywords for coloring. UE uses patterns like:
-        #   "LogWindows: Error: ..."   (no timestamp, pre-engine init)
-        #   "Error: something"         (continuation of error block)
-        #   "LogCategory: Warning: ..." (no timestamp variant)
-        if ': Error:' in line or line.startswith('Error:') or line.startswith('Error '):
+        # Detect severity keywords for coloring — case-insensitive since
+        # UE uses "Warning:" / "Error:" but Python uses "WARNING:" / "ERROR:".
+        line_upper = line.upper()
+        if ': ERROR:' in line_upper or line_upper.startswith('ERROR:') or line_upper.startswith('ERROR '):
             self._output.write_error(line)
-        elif ': Warning:' in line or line.startswith('Warning:') or line.startswith('Warning '):
+        elif ': WARNING:' in line_upper or line_upper.startswith('WARNING:') or line_upper.startswith('WARNING '):
             self._output.write_warning(line)
         else:
             self._output.write_output(line)
         return 'written'
 
+    # Maximum lines to process during history load. Even with the byte cap,
+    # dense log sections could have many short lines. This prevents the
+    # output panel from being overloaded on initial load.
+    _MAX_HISTORY_LINES = 3000
+
     def _load_history(self):
         """
-        Read all existing content from current position to EOF and write
-        it to the output panel with proper severity coloring.
+        Read recent log content and write it to the output panel.
 
-        Called once during __init__ to load the log history. Uses the
-        same parsing and filtering as poll() so errors show in red,
-        warnings in yellow, and noisy categories are skipped.
+        Called once during __init__ to load recent log history. Capped at
+        ``_MAX_HISTORY_LINES`` to avoid flooding the output panel and
+        freezing UE's main thread.
         """
         if self._file is None:
             return
@@ -343,12 +380,18 @@ class UELogTailer:
         self._position = self._file.tell()
 
         # Parse and route each line with proper severity formatting.
+        # Cap at _MAX_HISTORY_LINES to avoid flooding the output panel.
+        lines = data.splitlines()
+        if len(lines) > self._MAX_HISTORY_LINES:
+            _ue_log(f"  Truncating history: {len(lines)} lines → last {self._MAX_HISTORY_LINES}")
+            lines = lines[-self._MAX_HISTORY_LINES:]
+
         total_lines = 0
         written_lines = 0
         skipped_category = 0
         skipped_mca = 0
 
-        for line in data.splitlines():
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -578,7 +621,9 @@ def _launch_editor(ue_hwnd=0):
     from mca_core.config.settings import MCASettings
     from mca_qt.editor_panel import MCAEditorPanel
 
-    settings = MCASettings()
+    # Pass dcc_version so QSettings is isolated from Maya's settings.
+    # This gives UE its own window state, recent files, last project, etc.
+    settings = MCASettings(dcc_version="UE5")
 
     # Create with dcc_version="UE5" for session isolation, no adapter
     # manager (execution goes through _execute_locally which uses exec()).
@@ -642,11 +687,11 @@ def _launch_editor(ue_hwnd=0):
 
     # --- Start UE log tailer ------------------------------------------------
     # Pipe UE's Output Log into the MCA Editor output panel.
-    # Always read from the beginning (position 0) because the output panel is
-    # brand new — any previously displayed lines are gone with the old widget.
+    # Pass start_position=0 — the tailer internally limits to the tail of
+    # the file (last ~256KB) to avoid freezing UE on large logs.
     log_path = _find_ue_log_path()
     if log_path:
-        _ue_log("Starting log tailer from position 0 (full log reload)")
+        _ue_log("Starting log tailer (recent history only)")
         _log_tailer = UELogTailer(
             _mca_editor_window._panel._output, log_path,
             start_position=0,
@@ -993,7 +1038,7 @@ def _close_editor(shutting_down=False):
             panel = getattr(_mca_editor_window, "_panel", None)
             if panel is not None:
                 from mca_core.config.settings import MCASettings
-                settings = MCASettings()
+                settings = MCASettings(dcc_version="UE5")
                 panel.save_window_state(settings)
                 panel.cleanup()
                 _ue_log("Saved session state (tabs, tree, splitters)")
