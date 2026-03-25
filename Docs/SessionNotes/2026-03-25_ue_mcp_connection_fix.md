@@ -1,4 +1,4 @@
-# Session Notes — 2026-03-25: UE MCP Connection Fix (Remote Execution Protocol)
+# Session Notes — 2026-03-25: UE MCP Connection Fix + MCAEditorScripting Module
 
 ## Summary
 
@@ -89,3 +89,75 @@ Confirmed working via Claude Code MCP:
   be a list of strings (captured stdout lines), not always a single string.
 - `DefaultEngine.ini` is the correct place for `bRemoteExecution=True`, and
   the `PythonScriptPluginSettings` property name in Python is `remote_execution`.
+
+---
+
+## MCAEditorScripting C++ Module
+
+Created a new C++ module (`MCAEditorScripting`) inside the MCA Editor UE plugin.
+This ships AnimBP graph editing APIs universally with the product — not tied to
+any specific project. Any project loading the MCA Editor plugin gets these APIs
+automatically via `unreal.MCAAnimBlueprintLibrary.*`.
+
+### New Files
+
+- `mca_unreal/Source/MCAEditorScripting/MCAEditorScripting.Build.cs` — Build rules
+  - Dependencies: Core, CoreUObject, Engine, UnrealEd, BlueprintGraph, AnimGraph, etc.
+- `mca_unreal/Source/MCAEditorScripting/Public/MCAEditorScriptingModule.h` — Module header
+- `mca_unreal/Source/MCAEditorScripting/Private/MCAEditorScriptingModule.cpp` — Module startup
+- `mca_unreal/Source/MCAEditorScripting/Public/MCAAnimBlueprintLibrary.h` — Public API header
+- `mca_unreal/Source/MCAEditorScripting/Private/MCAAnimBlueprintLibrary.cpp` — Implementation
+
+### API (10 BlueprintCallable functions)
+
+- `CreateAnimBlueprint(PackagePath, AssetName, Skeleton)` — Create new AnimBP
+- `AddStateMachine(AnimBlueprint, Name, bConnectToRoot)` — Add state machine to AnimGraph
+- `ListStateMachines(AnimBlueprint, OutNames)` — List state machines
+- `AddState(AnimBlueprint, SMName, StateName)` — Add state to a state machine
+- `SetDefaultState(AnimBlueprint, SMName, StateName)` — Wire entry node to state
+- `ListStates(AnimBlueprint, SMName, OutNames)` — List states in a state machine
+- `SetStateAnimation(AnimBlueprint, SMName, StateName, AnimAsset)` — Set anim on state
+- `AddTransition(AnimBlueprint, SMName, From, To, CrossfadeDuration)` — Add transition
+- `SetAutoTransitionRule(AnimBlueprint, SMName, From, To, TriggerTime)` — Auto-transition rule
+- `CompileAnimBlueprint(AnimBlueprint)` — Compile and report status
+
+### `.uplugin` Updated
+
+Added `MCAEditorScripting` as a second module (Type: Editor, LoadingPhase: Default).
+Loads automatically in any project with the MCA Editor plugin.
+
+### State Machine Naming Bug — Fixed
+
+**Bug**: `AddStateMachine()` created the node but the name parameter was ignored.
+The state machine always showed up as "New State Machine" instead of the requested
+name (e.g. "Locomotion"). All downstream calls referencing the custom name failed.
+
+**Root cause**: Two issues:
+1. The `EditorStateMachineGraph->Rename()` call was BEFORE `NodeCreator.Finalize()`.
+   `EditorStateMachineGraph` is created by `PostPlacedNewNode()` which runs inside
+   `Finalize()` — so the rename was silently operating on null.
+2. Raw `UObject::Rename()` doesn't handle UE graph editor bookkeeping properly.
+
+**Fix**: Moved rename AFTER `Finalize()` and switched to
+`FBlueprintEditorUtils::RenameGraph()` for both `AddStateMachine` and `AddState`.
+
+### Key UE API Learnings
+
+- `FGraphNodeCreator<T>::Finalize()` calls `PostPlacedNewNode()` + `AllocateDefaultPins()`.
+  Sub-objects like `EditorStateMachineGraph` don't exist until after Finalize.
+- `GetStateMachineName()` returns `EditorStateMachineGraph->GetName()` — rename the graph.
+- `GetStateName()` returns `BoundGraph->GetName()` — rename the bound graph.
+- `FBlueprintEditorUtils::RenameGraph()` is the proper editor API for graph renaming.
+- `UAnimStateEntryNode` inherits from `UEdGraphNode`, NOT `UAnimStateNodeBase` —
+  no `GetOutputPin()`. Must iterate `Pins` array manually.
+- `ERenameFlags::REN_None` doesn't exist in UE 5.6 — use `Rename(Name, nullptr)` or
+  the `RenameGraph` utility.
+
+### Verification Status
+
+- Module compiles clean against UE 5.6
+- Module loads in Wayward project
+- `CreateAnimBlueprint` — Pass
+- `AddStateMachine` — creates node (naming fix pushed, needs retest)
+- `CompileAnimBlueprint` — Pass
+- Other functions — need retest after naming fix
