@@ -616,13 +616,17 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
             unreal.PythonScriptPluginSettings
         )
         if py_settings is not None:
+            # UE property name is bRemoteExecution, Python-ized to
+            # "remote_execution" (UE drops the 'b' prefix and snake-cases).
             remote_enabled = py_settings.get_editor_property(
-                "remote_execution_enabled"
+                "remote_execution"
             )
             if not remote_enabled:
                 py_settings.set_editor_property(
-                    "remote_execution_enabled", True
+                    "remote_execution", True
                 )
+                # Save to ini so it persists across restarts.
+                py_settings.save_config()
                 _ue_log("Enabled Python Remote Execution (port 6776)")
             else:
                 _ue_log("Python Remote Execution already enabled")
