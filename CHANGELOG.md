@@ -1,5 +1,12 @@
 # MCA Editor Changelog
 
+## v1.0.5 — 2026-03-24
+- Output panel: filter Python 3.11+ caret indicator lines (^^^) from tracebacks
+- Output panel: line-buffer stderr tee to recombine split exception lines
+- Output panel: proper red coloring for all traceback lines via stderr context tracking
+- Output panel: suppress duplicate traceback echo from Maya's command output
+- Output panel: detect WARNING/Error patterns in display messages for correct coloring
+
 ## v1.0.4 — 2026-03-24
 - File tree: lazy on-demand loading replaces 5-level depth limit — unlimited nesting
 - File tree: workspace folders and expanded state persist across sessions per-project
