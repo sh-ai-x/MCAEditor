@@ -2677,6 +2677,11 @@ class MCAMainWindow(QMainWindow):
 
         tb_text = tb_text.rstrip()
 
+        # Strip Python 3.11+ caret indicator lines ("^^^^..." / "~~~~...").
+        tb_lines = tb_text.splitlines()
+        tb_lines = [ln for ln in tb_lines if not ln.strip() or not all(c in "^~" for c in ln.strip())]
+        tb_text = "\n".join(tb_lines)
+
         # Strip line number references from traceback if disabled.
         if not show_line_nums:
             tb_text = self._strip_line_numbers(tb_text)
@@ -2695,6 +2700,13 @@ class MCAMainWindow(QMainWindow):
         """
         show_stack = self._stack_trace_action.isChecked()
         show_line_nums = self._line_numbers_action.isChecked()
+
+        # Strip Python 3.11+ caret indicator lines ("^^^^..." / "~~~~...")
+        # from the error text.  These underline markers add visual noise in
+        # the output panel without providing useful information.
+        lines = text.strip().splitlines()
+        lines = [ln for ln in lines if not ln.strip() or not all(c in "^~" for c in ln.strip())]
+        text = "\n".join(lines)
 
         # If stack traces are disabled, try to extract just the final error line.
         if not show_stack:

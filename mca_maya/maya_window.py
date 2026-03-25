@@ -145,6 +145,14 @@ class _StderrTee:
     other frameworks (e.g. the MCA framework's ``[MCA - Module:...]``
     lines) appears in our editor's output window alongside Maya's output.
 
+    Line-buffered: Python's traceback formatter writes the exception line
+    in multiple write() calls (e.g. ``AttributeError``, ``:``,
+    `` 'NoneType' ...``).  Buffering until ``\\n`` recombines them into
+    a single output line and avoids stray ``:`` noise.
+
+    Tracks traceback context so all lines between "Traceback (...)" and
+    the final exception line are colored as errors (red), not white.
+
     The original stderr object is preserved and all writes are forwarded
     to it first, so Maya's Script Editor and console still work normally.
 
@@ -161,10 +169,20 @@ class _StderrTee:
         """
         self._original = original
         self._output = output_widget
+        # Line buffer — accumulates partial write() calls until a newline.
+        self._buffer = ""
+        # Traceback context flag — set True when we see "Traceback (...)"
+        # and cleared after the final exception line, so every line in
+        # between is routed to write_error() for red coloring.
+        self._in_traceback = False
 
     def write(self, text):
         """
         Write to both the original stderr and our output panel.
+
+        Accumulates text in a line buffer and flushes complete lines.
+        This recombines split writes (e.g. ``AttributeError`` + ``:`` +
+        `` message``) into a single output line.
 
         :param str text: Text to write.
         """
@@ -175,18 +193,59 @@ class _StderrTee:
             except Exception:
                 pass
 
-        # Skip empty or whitespace-only writes.
-        if not text or not text.strip():
+        if not text:
             return
 
-        # Route to our output panel.
+        # Accumulate into the line buffer.
+        self._buffer += text
+
+        # Process every complete line (terminated by newline).
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._write_line(line)
+
+    def _write_line(self, line):
+        """
+        Route a single complete line to the output panel with proper
+        color based on content and traceback context.
+
+        :param str line: One line of stderr text (no trailing newline).
+        """
+        stripped = line.rstrip()
+
+        # Skip empty lines.
+        if not stripped:
+            return
+
+        # Skip Python 3.11+ traceback caret indicator lines ("^^^^...").
+        stripped_check = stripped.strip()
+        if stripped_check and all(c in "^~" for c in stripped_check):
+            return
+
+        # Route to our output panel with appropriate coloring.
         try:
-            stripped = text.rstrip()
             # Detect error/warning patterns from logging output.
             if "ERROR:" in stripped or "Error:" in stripped:
                 self._output.write_error(stripped)
             elif "WARNING:" in stripped or "Warning:" in stripped:
                 self._output.write_warning(stripped)
+
+            # Detect start of a Python traceback.
+            elif "Traceback (most recent call last)" in stripped:
+                self._in_traceback = True
+                self._output.write_error(stripped)
+
+            # Inside a traceback — color everything red.
+            elif self._in_traceback:
+                self._output.write_error(stripped)
+                # The final line of a traceback is the exception itself,
+                # which is not indented and typically contains "Error" or
+                # "Exception".  Reset the flag after writing it.
+                if not stripped.startswith(" ") and (
+                    "Error" in stripped or "Exception" in stripped
+                ):
+                    self._in_traceback = False
+
             else:
                 self._output.write_output(stripped)
         except (RuntimeError, AttributeError):
@@ -194,7 +253,12 @@ class _StderrTee:
             pass
 
     def flush(self):
-        """Flush the original stderr."""
+        """Flush any remaining buffered text and the original stderr."""
+        # Write out any partial line remaining in the buffer.
+        if self._buffer and self._buffer.strip():
+            self._write_line(self._buffer)
+        self._buffer = ""
+
         if self._original is not None:
             try:
                 self._original.flush()
@@ -803,6 +867,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
 
     # --- Maya Output Hook ---------------------------------------------------
 
+    # Traceback echo suppression flag.  When True, kDisplay messages that
+    # look like traceback content are suppressed — _StderrTee handles them
+    # with proper error coloring.  Set True when "Traceback (...)" is seen
+    # in a kDisplay message; reset after the final exception line.
+    _in_traceback_echo = False
+
     def _install_output_hook(self):
         """
         Register callbacks to capture ALL Maya output.
@@ -1012,6 +1082,20 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if not message or not message.strip():
             return
 
+        # Skip Python 3.11+ traceback caret indicator lines.
+        # Maya fires one callback per character for the "^^^^..." underline
+        # lines in modern tracebacks, producing dozens of single-character
+        # "^" or "~" messages that clutter the output as blank-looking lines.
+        stripped_check = message.strip()
+        if stripped_check and all(c in "^~" for c in stripped_check):
+            return
+
+        # Skip bare "#" echo lines — these are the Maya echo of caret
+        # indicator lines that we already filtered above.  A standalone
+        # "#" with no text after it is never meaningful user output.
+        if stripped_check == "#":
+            return
+
         # Suppress the harmless "Nothing is selected" error from Maya's
         # cutCopyPaste.mel — this fires when Ctrl+C/X leaks to Maya
         # during focus transitions and nothing is selected in the viewport.
@@ -1048,15 +1132,46 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
                 # C++ system messages.  This is the sole path to the
                 # output panel for stdout content; _StdoutTee only
                 # forwards to Maya's original OutputRedirector.
-                #
+                stripped = text.strip()
+
+                # Strip leading "# " echo prefix so content detection
+                # works on both echo lines and non-echo lines.
+                clean = stripped
+                if clean.startswith("#"):
+                    clean = clean[1:].lstrip()
+
+                # --- Traceback echo suppression ---
+                # When a traceback is active, _StderrTee handles the
+                # properly formatted + colored version.  Suppress the
+                # kDisplay duplicate (both echo and non-echo copies)
+                # to avoid doubled output in the panel.
+                if "Traceback (most recent call last)" in stripped:
+                    self._in_traceback_echo = True
+                    return
+                if self._in_traceback_echo:
+                    # Detect the end of the traceback: the exception line
+                    # (non-empty, non-indented, contains Error/Exception).
+                    if clean and not clean.startswith(("File ", " ")):
+                        if "Error" in clean or "Exception" in clean:
+                            self._in_traceback_echo = False
+                    # Suppress this line — stderr tee has it covered.
+                    return
+
+                # --- Content-based routing for kDisplay ---
                 # Detect result-formatted output from our internal adapter.
                 # Maya's C++ displayResult (kResult) is not exposed in
                 # Python API 2.0, so the adapter prints results as
-                # "# Result: <value> #" via print().  Detect that pattern
-                # and route to write_result() for proper result coloring.
-                stripped = text.strip()
+                # "# Result: <value> #" via print().
                 if stripped.startswith("# Result:") and stripped.endswith("#"):
                     output.write_result(text)
+                # Detect warnings printed via print() or framework loggers
+                # that Maya routes through kDisplay instead of kWarning.
+                elif "WARNING:" in clean or "Warning:" in clean:
+                    output.write_warning(text)
+                # Detect errors printed via print() or framework loggers
+                # that Maya routes through kDisplay instead of kError.
+                elif "ERROR:" in clean or "Error:" in clean:
+                    output.write_error(text)
                 else:
                     output.write_output(text)
 
