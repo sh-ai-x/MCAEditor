@@ -606,6 +606,33 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
 
     _ue_log("=== Launching MCA Editor for UE ===")
 
+    # --- Ensure Remote Execution is enabled ---------------------------------
+    # The MCP server communicates with UE over the Remote Execution protocol
+    # (TCP port 6776).  Enable it automatically so users don't need to dig
+    # into Editor Preferences > Plugins > Python to turn it on manually.
+    try:
+        import unreal
+        py_settings = unreal.get_default_object(
+            unreal.PythonScriptPluginSettings
+        )
+        if py_settings is not None:
+            remote_enabled = py_settings.get_editor_property(
+                "remote_execution_enabled"
+            )
+            if not remote_enabled:
+                py_settings.set_editor_property(
+                    "remote_execution_enabled", True
+                )
+                _ue_log("Enabled Python Remote Execution (port 6776)")
+            else:
+                _ue_log("Python Remote Execution already enabled")
+        else:
+            _ue_log_warning("Could not access PythonScriptPluginSettings")
+    except Exception as exc:
+        _ue_log_warning(
+            "Failed to enable Remote Execution: {}".format(exc)
+        )
+
     # --- Venv setup ---------------------------------------------------------
     _setup_venv()
 
