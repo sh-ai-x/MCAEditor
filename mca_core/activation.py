@@ -672,10 +672,12 @@ def _get_settings(product):
     Get the product-specific MCASettings instance.
 
     For Maya builds, the app name includes the Maya version so settings
-    are isolated per-version (e.g. ``MCAEditor-Maya2025``).  Falls back
-    to ``MCAEditor`` for standalone or unknown products.
+    are isolated per-version (e.g. ``MCAEditor-Maya2025``).  For UE,
+    the dcc_version tag produces ``MCAEditor-UE5``.  Falls back to
+    ``MCAEditor`` for standalone or unknown products.
 
-    :param str product: Product identifier (``"maya"`` or ``"standalone"``).
+    :param str product: Product identifier — ``"maya"``, ``"unreal"``,
+        or ``"standalone"``.
     :return: Settings instance.
     :rtype: MCASettings
     """
@@ -689,6 +691,9 @@ def _get_settings(product):
                 return MCASettings(app_name="MCAEditor-Maya{}".format(_maya_version))
         except ImportError:
             pass
+
+    if product == "unreal":
+        return MCASettings(dcc_version="UE5")
 
     return MCASettings()
 
