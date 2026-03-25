@@ -847,6 +847,17 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
     # if UE is restarted. Geometry is saved on close, not here.
     _save_persistent_state(was_open=True)
 
+    # --- Deploy and register the Unreal MCP server --------------------------
+    # This ensures Claude Code can discover the UE MCP tools (Blueprints,
+    # Control Rig, Python introspection, etc.).  Runs in a background thread
+    # so it doesn't block the editor from appearing.
+    try:
+        from mca_core import mcp_setup
+        mcp_setup.ensure_unreal_mcp(background=True)
+        _ue_log("Unreal MCP setup triggered (background)")
+    except Exception as exc:
+        _ue_log_warning("Unreal MCP setup failed: {}".format(exc))
+
     _ue_log("=== MCA Editor launched ===")
     return True
 

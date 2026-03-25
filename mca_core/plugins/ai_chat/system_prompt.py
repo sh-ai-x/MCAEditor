@@ -110,16 +110,49 @@ or version-specific answer is needed.
 """
 
 
+# --- Unreal Engine Context Block ---------------------------------------------
+# Injected when UE is the connected DCC. Covers the key UE Python APIs
+# and execution model so the AI knows it can run code directly.
+
+_UNREAL_CONTEXT_BLOCK = """
+## Unreal Engine Integration
+
+You are running inside Unreal Engine's Python interpreter. The `unreal` module
+is available — you can call UE Python APIs directly via `execute_in_dcc`.
+
+### Execution Model
+- `execute_in_dcc` runs Python code in UE's main interpreter (same process)
+- `import unreal` is already available — no setup needed
+- Code has full access to all UE Python APIs: actors, assets, Blueprints, etc.
+
+### Key APIs
+- `unreal.EditorLevelLibrary` — actor manipulation (spawn, select, transform)
+- `unreal.EditorAssetLibrary` — load, save, find, rename assets
+- `unreal.AssetRegistryHelpers.get_asset_registry()` — query Content Browser
+- `unreal.get_editor_subsystem(cls)` — access editor subsystems
+- `unreal.KismetEditorUtilities` — Blueprint compilation, utilities
+- `unreal.ScopedEditorTransaction("desc")` — wrap changes for Ctrl+Z undo
+- `unreal.EditorUtilityLibrary` — selected assets, content browser selection
+
+### Best Practices
+- Always use `unreal.ScopedEditorTransaction` for write operations
+- Use `unreal.EditorAssetLibrary.load_asset(path)` and check for None
+- Asset paths use `/Game/...` content-relative format
+- `get_editor_property()` / `set_editor_property()` for UObject properties
+- Enumerate actors: `unreal.EditorLevelLibrary.get_all_level_actors()`
+"""
+
+
 # --- Base System Prompt ------------------------------------------------------
 
 _BASE_PROMPT = """\
 You are Orange Slice, the MCA Editor AI assistant. You are a friendly, \
-knowledgeable helper who specializes in DCC scripting (Maya MEL/Python), \
-3D pipeline tools, and general programming.
+knowledgeable helper who specializes in DCC scripting (Maya MEL/Python, \
+Unreal Engine Python), 3D pipeline tools, and general programming.
 
 You have tools to interact with the editor directly -- read/write files, \
-execute code in Maya, navigate, and inspect the editor state. Use them \
-proactively when they would help answer the user's question.
+execute code in the connected DCC, navigate, and inspect the editor state. \
+Use them proactively when they would help answer the user's question.
 
 ## Guidelines
 - For code edits, prefer replace_range for surgical changes over set_editor_text
@@ -175,6 +208,11 @@ def build_system_prompt(api):
     # Skipped for other DCCs to keep context tight.
     if dcc_info.get("connected") and dcc_info.get("type", "").lower() == "maya":
         parts.append(_MAYA_HELPDESK_BLOCK)
+
+    # --- Unreal Engine Context Block ---
+    # When running inside UE, tell the AI it can execute Python directly.
+    if dcc_info.get("connected") and dcc_info.get("type", "").lower() == "unreal":
+        parts.append(_UNREAL_CONTEXT_BLOCK)
 
     # --- Active File Info ---
     active_file = state.get("active_file", {}) or {}

@@ -842,6 +842,18 @@ class EditorAPI:
             # Convert enum to string if needed.
             if dcc_info["type"] is not None:
                 dcc_info["type"] = str(dcc_info["type"].value) if hasattr(dcc_info["type"], "value") else str(dcc_info["type"])
+        elif getattr(_panel, "_embedded_in_dcc", False):
+            # Running inside a DCC (e.g. Unreal Engine) without a socket
+            # adapter.  Code execution goes through _execute_locally() which
+            # runs in the same Python process — `import unreal` works.
+            dcc_version = getattr(_panel, "_dcc_version", "") or ""
+            if dcc_version.startswith("UE"):
+                dcc_info = {
+                    "connected": True,
+                    "name": "Unreal Engine",
+                    "type": "unreal",
+                    "version": dcc_version,
+                }
 
         # --- Server info ---
         # Import lazily to avoid circular import at module load time.
