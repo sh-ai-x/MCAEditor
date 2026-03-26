@@ -26,6 +26,7 @@
 #include "AnimationStateMachineGraph.h"
 #include "AnimationStateMachineSchema.h"
 #include "AnimGraphNode_AssetPlayerBase.h"
+#include "AnimGraphNode_SequencePlayer.h"
 
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -126,13 +127,34 @@ bool UMCAAnimBlueprintLibrary::AddStateMachine(
 	// the EditorStateMachineGraph sub-object. It doesn't exist until Finalize().
 	NodeCreator.Finalize();
 
-	// The state machine name comes from its EditorStateMachineGraph name.
-	// Use RenameGraph (not raw UObject::Rename) — it handles editor bookkeeping.
+	// The state machine name comes from its EditorStateMachineGraph UObject name.
+	// GetStateMachineName() returns EditorStateMachineGraph->GetName(), so we must
+	// rename the actual UObject — FBlueprintEditorUtils::RenameGraph alone may only
+	// set the friendly/display name without touching the UObject name.
 	if (SMNode->EditorStateMachineGraph)
 	{
+		// Try RenameGraph first for editor bookkeeping (schema notifications, etc.).
 		FBlueprintEditorUtils::RenameGraph(SMNode->EditorStateMachineGraph, StateMachineName);
-		UE_LOG(LogMCAScripting, Log, TEXT("AddStateMachine: Renamed graph to '%s' (actual: '%s')"),
-			*StateMachineName, *SMNode->EditorStateMachineGraph->GetName());
+
+		// If the UObject name didn't change, force-rename it directly.
+		if (SMNode->EditorStateMachineGraph->GetName() != StateMachineName)
+		{
+			bool bRenamed = SMNode->EditorStateMachineGraph->Rename(
+				*StateMachineName, SMNode->EditorStateMachineGraph->GetOuter(),
+				REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+
+			UE_LOG(LogMCAScripting, Log,
+				TEXT("AddStateMachine: Direct UObject rename to '%s' %s (actual: '%s')"),
+				*StateMachineName,
+				bRenamed ? TEXT("succeeded") : TEXT("FAILED"),
+				*SMNode->EditorStateMachineGraph->GetName());
+		}
+		else
+		{
+			UE_LOG(LogMCAScripting, Log,
+				TEXT("AddStateMachine: RenameGraph set name to '%s'"),
+				*SMNode->EditorStateMachineGraph->GetName());
+		}
 	}
 	else
 	{
@@ -477,15 +499,70 @@ bool UMCAAnimBlueprintLibrary::SetStateAnimation(
 	}
 	else
 	{
-		// No existing player — we can't easily create one from C++ without
-		// knowing the exact node class (AnimSequence vs BlendSpace, etc.).
-		// Log a clear message so the caller knows to use execute_python.
-		UE_LOG(LogMCAScripting, Warning,
-			TEXT("SetStateAnimation: No existing animation player in state '%s'. "
-				 "Use the editor UI or execute_python to add the initial player node, "
-				 "then this function can update the animation asset."),
+		// No existing player — create a SequencePlayer node and wire it up.
+		// This handles UAnimSequence assets. BlendSpace and other types would
+		// need additional node classes, but SequencePlayer covers the common case.
+		UE_LOG(LogMCAScripting, Log,
+			TEXT("SetStateAnimation: Creating new SequencePlayer in state '%s'"),
 			*StateName);
-		return false;
+
+		FGraphNodeCreator<UAnimGraphNode_SequencePlayer> PlayerCreator(*StateGraph);
+		UAnimGraphNode_SequencePlayer* NewPlayer = PlayerCreator.CreateNode();
+		NewPlayer->NodePosX = 200;
+		NewPlayer->NodePosY = 0;
+		PlayerCreator.Finalize();
+
+		// Set the animation asset on the new player.
+		NewPlayer->SetAnimationAsset(AnimAsset);
+
+		// Wire the player's output pose to the state's result node.
+		// The state graph has an AnimGraphNode_StateResult that accepts a pose.
+		UEdGraphPin* PlayerOutputPin = nullptr;
+		for (UEdGraphPin* Pin : NewPlayer->Pins)
+		{
+			if (Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+			{
+				PlayerOutputPin = Pin;
+				break;
+			}
+		}
+
+		// Find the result node's input pose pin.
+		UEdGraphPin* ResultInputPin = nullptr;
+		for (UEdGraphNode* Node : StateGraph->Nodes)
+		{
+			// The result node is NOT an AssetPlayerBase — it is the output of the state.
+			if (Node != NewPlayer && !Cast<UAnimGraphNode_AssetPlayerBase>(Node))
+			{
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					if (Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+					{
+						ResultInputPin = Pin;
+						break;
+					}
+				}
+				if (ResultInputPin)
+				{
+					break;
+				}
+			}
+		}
+
+		if (PlayerOutputPin && ResultInputPin)
+		{
+			ResultInputPin->BreakAllPinLinks();
+			ResultInputPin->MakeLinkTo(PlayerOutputPin);
+			UE_LOG(LogMCAScripting, Log,
+				TEXT("SetStateAnimation: Wired SequencePlayer to state result in '%s'"),
+				*StateName);
+		}
+		else
+		{
+			UE_LOG(LogMCAScripting, Warning,
+				TEXT("SetStateAnimation: Created SequencePlayer but could not wire pose pins in '%s'"),
+				*StateName);
+		}
 	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBlueprint);
