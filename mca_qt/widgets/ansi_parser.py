@@ -92,15 +92,17 @@ class Cell:
 # =============================================================================
 
 # Regex to match CSI (Control Sequence Introducer) escape sequences.
-# Format: ESC [ <params> <intermediate> <final>
-_CSI_RE = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z@`])")
+# Format: ESC [ <private-prefix?> <params> <intermediate> <final>
+# Private prefixes: ? (DEC), > (XTMODKEYS), = (Kitty keyboard), < and !.
+# Modern terminal programs (Claude Code, vim, etc.) use these extensively.
+_CSI_RE = re.compile(r"\x1b\[([><=!]?[0-9;?]*)([A-Za-z@`])")
 
 # Regex to match OSC (Operating System Command) sequences.
 # Format: ESC ] <command> ; <text> (BEL | ESC \)
 _OSC_RE = re.compile(r"\x1b\]([^\x07\x1b]*)(?:\x07|\x1b\\)")
 
 # Regex to match any escape sequence (for skipping unsupported ones).
-_ESC_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z@`]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-B]|[78DEHM=>])")
+_ESC_RE = re.compile(r"\x1b(?:\[[><=!]?[0-9;?]*[A-Za-z@`]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-B]|[78DEHM=>])")
 
 
 class AnsiParser:
@@ -532,17 +534,28 @@ class AnsiParser:
         :param str params_str: The parameter string (e.g., "1;31" or "2").
         :param str cmd: The final command character (e.g., "m", "H", "J").
         """
+        # Private mode indicator — DEC private modes (?), XTMODKEYS (>),
+        # Kitty keyboard protocol (=, >), and other private prefixes (<, !).
+        is_private = params_str[:1] in ("?", ">", "=", "<", "!")
+
+        # For non-DEC private prefixes (>, =, <, !), silently ignore the
+        # entire sequence.  These are modern terminal protocol extensions
+        # (XTMODKEYS, Kitty keyboard protocol, etc.) that our parser does
+        # not need to implement — we just need to consume them so they
+        # don't leak through as visible text.
+        if is_private and params_str[:1] != "?":
+            return
+
         # Parse parameters into a list of integers.
+        # Skip parsing for DEC private mode sequences (? prefix) —
+        # those are handled separately in the h/l command section.
         params = []
-        if params_str and not params_str.startswith("?"):
+        if params_str and not is_private:
             for p in params_str.split(";"):
                 try:
                     params.append(int(p))
                 except ValueError:
                     params.append(0)
-
-        # Private mode indicator (DEC private modes like ?25h for cursor).
-        is_private = params_str.startswith("?")
 
         if cmd == "m":
             # SGR — Select Graphic Rendition (colors and text style).

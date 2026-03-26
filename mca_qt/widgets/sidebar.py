@@ -1333,8 +1333,9 @@ class WorkspacePanel(QWidget):
 
         :param str folder_path: The folder to create the file in.
         """
+        # Default to .py since this editor is primarily for Python scripting.
         name, ok = QInputDialog.getText(
-            self, "New File", "File name:",
+            self, "New File", "File name:", text="untitled.py",
         )
         if not ok or not name.strip():
             return

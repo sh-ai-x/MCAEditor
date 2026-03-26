@@ -60,6 +60,7 @@ nav:
   - Download: download.md
   - Pricing: pricing.md
   - Plugins: plugins.md
+  - PyUnreal: https://mcaeditor.com/docs/pyunreal/
   - Getting Started:
     - Installation: getting-started/installation.md
     - First Launch: getting-started/first-launch.md

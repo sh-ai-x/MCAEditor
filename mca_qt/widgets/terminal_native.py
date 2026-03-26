@@ -380,10 +380,13 @@ class TerminalWidget(QWidget):
         grid_lines = self._parser.get_visible_lines()
         cursor_row, cursor_col = self._parser.get_cursor_position()
 
-        # Check if the user has scrolled up — if so, don't auto-scroll
-        # to the bottom so they can read history without it jumping away.
+        # Check if the user has scrolled into the scrollback (history)
+        # area above the live grid.  If they're reading history, don't
+        # auto-scroll.  If they're anywhere near the live grid area,
+        # always auto-scroll so active output stays visible.
         scrollbar = self._display.verticalScrollBar()
-        was_at_bottom = (scrollbar.value() >= scrollbar.maximum() - 5)
+        viewport_height = self._display.viewport().height()
+        is_in_scrollback = (scrollbar.value() < scrollbar.maximum() - viewport_height)
 
         self._display.setUpdatesEnabled(False)
         try:
@@ -449,14 +452,18 @@ class TerminalWidget(QWidget):
                 pos_cursor.setPosition(target_pos)
                 self._display.setTextCursor(pos_cursor)
 
-                # Only auto-scroll if the user was already at the bottom.
-                if was_at_bottom:
-                    self._display.ensureCursorVisible()
-
         except Exception as exc:
             logger.error("Terminal render error: %s", exc, exc_info=True)
         finally:
             self._display.setUpdatesEnabled(True)
+
+        # Auto-scroll AFTER re-enabling updates so Qt can actually
+        # calculate layout and move the viewport.  Snap to the very
+        # bottom rather than using ensureCursorVisible() which only
+        # scrolls the minimum amount and can leave the input line
+        # barely visible at the viewport edge.
+        if not is_in_scrollback:
+            scrollbar.setValue(scrollbar.maximum())
 
         # Check for title changes.
         new_title = self._parser.get_title()
@@ -486,8 +493,10 @@ class TerminalWidget(QWidget):
             # invert fg/bg to draw a visible block cursor.
             is_cursor = (line_row == cursor_row and i == cursor_col)
             if is_cursor:
-                cell_fg = bg if bg != DEFAULT_BG else DEFAULT_BG
-                cell_bg = fg
+                # Use high-contrast inversion so the cursor is always
+                # clearly visible regardless of the cell's own colors.
+                cell_fg = DEFAULT_BG
+                cell_bg = "#ffffff"
             else:
                 cell_fg = fg
                 cell_bg = bg
@@ -511,7 +520,9 @@ class TerminalWidget(QWidget):
             # Create the text format for this run.
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(cell_fg))
-            if cell_bg != DEFAULT_BG:
+            # Always set background for cursor cells; for normal cells
+            # only set it when different from terminal default.
+            if is_cursor or cell_bg != DEFAULT_BG:
                 fmt.setBackground(QColor(cell_bg))
             if bold:
                 fmt.setFontWeight(QFont.Weight.Bold)
@@ -699,6 +710,13 @@ class TerminalWidget(QWidget):
                 self._dirty = True
             else:
                 self._backend.write(b"\t")
+            return True
+
+        # Shift+Tab (backtab) — send CSI Z so CLI tools (Claude Code's
+        # plan mode toggle, etc.) receive the keystroke instead of Qt
+        # stealing it for focus navigation.
+        if key == Qt.Key.Key_Backtab:
+            self._backend.write(b"\x1b[Z")
             return True
 
         # Backspace.

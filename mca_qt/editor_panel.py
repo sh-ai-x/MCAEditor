@@ -2058,10 +2058,13 @@ class MCAEditorPanel(QWidget):
             self._left_stripe.set_button_active("terminal", True)
 
             # Give the terminal panel space in the center splitter.
+            # Restore the last height the user set, or fall back to 1/4 of total.
             sizes = self._center_splitter.sizes()
             if len(sizes) >= 3 and sizes[2] < 50:
+                saved_height = self._settings.get("bottom_terminal_height", 0)
                 total = sum(sizes)
-                terminal_height = min(200, total // 4)
+                terminal_height = int(saved_height) if saved_height else min(200, total // 4)
+                terminal_height = min(terminal_height, total // 2)
                 sizes[2] = terminal_height
                 sizes[1] = max(100, sizes[1] - terminal_height)
                 self._center_splitter.setSizes(sizes)
@@ -2089,6 +2092,8 @@ class MCAEditorPanel(QWidget):
         Show the right panel stack and switch to a specific widget.
 
         Expands the splitter if the right panel is currently collapsed.
+        Uses the last user-set width so the panel remembers its size
+        across open/close toggles.
 
         :param QWidget widget: The widget to show in the stack.
         """
@@ -2102,8 +2107,10 @@ class MCAEditorPanel(QWidget):
             # Expand the right panel in the main splitter if needed.
             sizes = self._main_splitter.sizes()
             if sizes[-1] == 0:
+                # Restore the last width the user set, or fall back to 300.
+                saved_width = self._settings.get("right_panel_width", 300)
                 total = sum(sizes)
-                sizes[-1] = 300
+                sizes[-1] = min(int(saved_width), total // 2)
                 sizes[1] = total - sizes[0] - sizes[-1]
                 self._main_splitter.setSizes(sizes)
 
@@ -2111,8 +2118,14 @@ class MCAEditorPanel(QWidget):
         """
         Hide the right panel stack entirely.
 
-        Deactivates all right stripe buttons related to the panel.
+        Saves the current width so it can be restored next time the
+        panel is shown.  Deactivates all right stripe buttons.
         """
+        # Remember the panel width before hiding (hiding sets it to 0).
+        sizes = self._main_splitter.sizes()
+        if sizes[-1] > 0:
+            self._settings.set("right_panel_width", sizes[-1])
+
         self._right_panel_stack.setVisible(False)
         self._right_stripe.set_button_active("terminal", False)
         self._settings.set("right_terminal_visible", False)
@@ -2175,6 +2188,11 @@ class MCAEditorPanel(QWidget):
 
     def _on_bottom_terminals_closed(self):
         """Auto-hide the bottom terminal panel when all tabs are closed."""
+        # Remember the panel height before hiding (hiding sets it to 0).
+        sizes = self._center_splitter.sizes()
+        if len(sizes) >= 3 and sizes[2] > 0:
+            self._settings.set("bottom_terminal_height", sizes[2])
+
         self._bottom_terminal_panel.setVisible(False)
         self._settings.set("bottom_terminal_visible", False)
         self._left_stripe.set_button_active("terminal", False)
@@ -5242,6 +5260,17 @@ class MCAEditorPanel(QWidget):
         # Splitter positions.
         settings.set("splitter_sizes", self._main_splitter.sizes())
         settings.set("center_splitter_sizes", self._center_splitter.sizes())
+
+        # Save individual panel sizes so they survive hide/show toggles.
+        # If the panel is visible its current size is the right one to save;
+        # if hidden, the size is 0 so we keep whatever was saved when it was
+        # last hidden (already written by _hide_right_panel / _on_bottom_terminals_closed).
+        main_sizes = self._main_splitter.sizes()
+        if main_sizes[-1] > 0:
+            settings.set("right_panel_width", main_sizes[-1])
+        center_sizes = self._center_splitter.sizes()
+        if len(center_sizes) >= 3 and center_sizes[2] > 0:
+            settings.set("bottom_terminal_height", center_sizes[2])
         settings.set("sidebar_splitter_sizes", self._sidebar.splitter_sizes())
 
         # Panel visibility — use tracked instance vars instead of isVisible()
