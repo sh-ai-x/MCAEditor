@@ -491,33 +491,48 @@ The maintenance pattern is mechanical and well-suited for AI:
 
 ## Development Milestones
 
-### Milestone 1: Project Setup & AnimBP (Phase 1)
-- [ ] Create GitHub repo (pyunreal, MIT license)
-- [ ] Set up pyproject.toml, package structure
-- [ ] Implement core base classes (UnrealObject, asset loading, utils)
-- [ ] Implement AnimBlueprint, StateMachine, State, Transition wrappers
-- [ ] Write tests (mocked + live UE integration)
-- [ ] Write AnimBP cookbook / getting-started guide
-- [ ] Create MCP wrapper tools for AnimBP (missing from MCA Editor)
+### Milestone 1: Project Setup & AnimBP (Phase 1) -- COMPLETE
+- [x] Create GitHub repo (pyunreal, MIT license)
+- [x] Set up pyproject.toml, package structure
+- [x] Implement core base classes (UnrealObject, asset loading, utils)
+- [x] Implement AnimBlueprint, StateMachine, State, Transition wrappers
+- [x] Write tests (mocked — 21 AnimBP tests)
+- [x] Write AnimBP cookbook / getting-started guide
+- [x] Create MCP wrapper tools for AnimBP (missing from MCA Editor)
 
-### Milestone 2: Blueprint Wrappers (Phase 2)
-- [ ] Implement Blueprint, Component, Variable wrappers
-- [ ] Wrap existing MCP tool functions into Pythonic classes
-- [ ] Write tests and examples
-- [ ] Blueprint cookbook guide
+### Milestone 1.5: EventGraph Wiring (Phase 1.5) -- C++ WRITTEN
+- [x] C++ bridge functions: AddEventNode, AddFunctionCallNode, AddCastNode,
+      AddVariableGetNode, AddVariableSetNode, ConnectPins, GetNodePins,
+      SetNodePosition, ListEventGraphNodes
+- [x] Python wrappers: EventGraph, GraphNode classes
+- [x] API docs (EventGraph.md)
+- [ ] Compile C++ plugin in UE (requires UE build)
+- [ ] Live integration test in UE
 
-### Milestone 3: Control Rig Wrappers (Phase 3)
-- [ ] Implement ControlRig, Control, Null, Bone wrappers
-- [ ] Write tests and examples
-- [ ] Control Rig cookbook guide
+### Milestone 2: Blueprint Wrappers (Phase 2) -- COMPLETE
+- [x] Implement Blueprint, Component, Variable wrappers
+- [x] Wrap existing MCP tool functions into Pythonic classes
+- [x] Write examples
+- [x] Write tests (22 tests)
+- [x] Blueprint cookbook guide
 
-### Milestone 4: Scene & Actors (Phase 4)
-- [ ] Implement Actor wrappers, scene query functions
-- [ ] Material wrappers
-- [ ] Viewport helpers
-- [ ] Write tests and examples
+### Milestone 3: Control Rig Wrappers (Phase 3) -- COMPLETE
+- [x] Implement ControlRig, Control, Null, Bone wrappers
+- [x] Write examples
+- [x] Write tests (20 tests)
+- [x] Control Rig cookbook guide
+
+### Milestone 4: Scene, Material, Viewport (Phase 4) -- COMPLETE
+- [x] Implement Actor wrappers, scene query functions
+- [x] Material wrappers (create, load, set_param, get_param, assign_to)
+- [x] Viewport helpers (focus, set_camera, get_camera, screenshot)
+- [x] Write examples
+- [x] Write tests (24 scene + 20 material + 13 viewport = 57 tests)
+- [x] API docs for all new classes
 
 ### Milestone 5: Documentation Site (Phase 5)
+- [x] Hand-written API reference docs (Markdown)
+- [x] Getting started guide and AnimBP cookbook
 - [ ] Sphinx autodoc pipeline
 - [ ] Deploy to mcaeditor.com/docs/pyunreal/
 - [ ] Version selector for UE versions
