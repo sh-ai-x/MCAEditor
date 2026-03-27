@@ -524,6 +524,12 @@ def create_dist_structure():
         shutil.rmtree(DIST_DIR)
     os.makedirs(DIST_DIR)
 
+    # Build a set of pure-python source paths for fast lookup.
+    # Used to skip .pyd duplicates — files in DIST_PURE_PYTHON must ship
+    # as .py only (MCP servers are copied to deploy dirs as scripts,
+    # venv_manager bootstraps before the environment is ready).
+    pure_python_set = set(DIST_PURE_PYTHON)
+
     for package in DIST_PACKAGES:
         package_path = os.path.join(PROJECT_ROOT, package)
 
@@ -535,14 +541,25 @@ def create_dist_structure():
             rel_root = os.path.relpath(root, PROJECT_ROOT)
             dest_root = os.path.join(DIST_DIR, rel_root)
 
-            # Compiled package — copy compiled extensions + __init__.py + explicit pure files.
-            pyd_files = [f for f in files if f.endswith(COMPILED_EXT)]
+            # Compiled extensions (.pyd / .so).
+            # Skip .pyd files whose module ships as pure Python — prevents
+            # shipping both .py source AND .pyd for the same module.
+            pyd_files = []
+            for f in files:
+                if not f.endswith(COMPILED_EXT):
+                    continue
+                mod_name = f.split(".")[0]
+                source_rel = os.path.join(rel_root, mod_name + ".py")
+                if source_rel in pure_python_set:
+                    continue
+                pyd_files.append(f)
+
             init_files = [f for f in files if f == "__init__.py"]
 
             # Include any pure-Python files that must ship uncompiled.
             pure_files = [
                 f for f in files
-                if os.path.join(rel_root, f) in DIST_PURE_PYTHON
+                if os.path.join(rel_root, f) in pure_python_set
             ]
 
             # CRITICAL: Copy plugin.json manifests for bundled plugins.

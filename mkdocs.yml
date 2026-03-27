@@ -2,7 +2,7 @@ site_name: MCA Editor
 site_url: https://mcaeditor.com
 docs_dir: website/docs
 site_dir: website/site
-site_description: A better Maya script editor — dual mode, AI integration, and plugin architecture.
+site_description: A professional code editor for Maya and Unreal Engine — dual mode, AI integration, and plugin architecture.
 site_author: Nathan Comes
 
 theme:

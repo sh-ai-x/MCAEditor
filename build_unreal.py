@@ -375,6 +375,12 @@ def bundle_python_packages(output_python_dir):
     """
     os.makedirs(output_python_dir, exist_ok=True)
 
+    # Build a set of pure-python source paths for fast lookup.
+    # Used to skip .pyd duplicates — files in DIST_PURE_PYTHON must ship
+    # as .py only (MCP servers are copied to deploy dirs as scripts,
+    # venv_manager bootstraps before the environment is ready).
+    pure_python_set = set(DIST_PURE_PYTHON)
+
     for package in DIST_PACKAGES:
         package_path = os.path.join(PROJECT_ROOT, package)
         if not os.path.isdir(package_path):
@@ -392,7 +398,19 @@ def bundle_python_packages(output_python_dir):
             dest_root = os.path.join(output_python_dir, rel_root)
 
             # Compiled extensions (.pyd / .so).
-            pyd_files = [f for f in files if f.endswith(COMPILED_EXT)]
+            # Skip .pyd files whose module ships as pure Python — prevents
+            # shipping both .py source AND .pyd for the same module.
+            pyd_files = []
+            for f in files:
+                if not f.endswith(COMPILED_EXT):
+                    continue
+                # Extract module name (e.g. "venv_manager" from
+                # "venv_manager.cp311-win_amd64.pyd").
+                mod_name = f.split(".")[0]
+                source_rel = os.path.join(rel_root, mod_name + ".py")
+                if source_rel in pure_python_set:
+                    continue
+                pyd_files.append(f)
 
             # __init__.py must remain as .py for package discovery.
             init_files = [f for f in files if f == "__init__.py"]
@@ -400,7 +418,7 @@ def bundle_python_packages(output_python_dir):
             # Explicit pure-python files that must ship uncompiled.
             pure_files = [
                 f for f in files
-                if os.path.join(rel_root, f) in DIST_PURE_PYTHON
+                if os.path.join(rel_root, f) in pure_python_set
             ]
 
             # plugin.json manifests for the plugin system.
@@ -629,6 +647,26 @@ def main():
 
     # Compile .pyc fallbacks for files that crash as .pyd.
     compile_pyc_files(ue_python, output_python_dir)
+
+    # Compile ue_editor_host.py to .pyc for code protection.
+    # This file has no Qt virtual overrides so .pyd would work too, but
+    # .pyc is simpler and sufficient (it's glue code, not core IP).
+    # Python's sourceless import finds .pyc directly in the package dir.
+    host_py = os.path.join(output_python_dir, "ue_editor_host.py")
+    if os.path.isfile(host_py):
+        host_pyc = os.path.join(output_python_dir, "ue_editor_host.pyc")
+        result = subprocess.run(
+            [ue_python, "-c",
+             "import py_compile; py_compile.compile(r'{}', cfile=r'{}', doraise=True)".format(
+                 host_py, host_pyc)],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            os.remove(host_py)
+            log("Compiled ue_editor_host.py -> .pyc (source removed)")
+        else:
+            log("WARNING: Failed to compile ue_editor_host.py: {}".format(
+                result.stderr.strip()))
 
     # ================================================================
     # Step 4: Bundle Resources

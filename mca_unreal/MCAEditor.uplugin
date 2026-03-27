@@ -30,7 +30,7 @@
 		{
 			"Name": "PythonScriptPlugin",
 			"Enabled": true,
-			"Optional": true
+			"Optional": false
 		}
 	]
 }
