@@ -8,7 +8,7 @@ title: Download
   Loading latest release...
 </div>
 
-<div id="dl-content" style="display:none;">
+<div id="dl-content" style="display:none;" markdown>
 
 <div id="dl-badge" style="margin-bottom:24px;"></div>
 
@@ -29,7 +29,7 @@ title: Download
 !!! warning "Use the correct version"
     Each Maya version requires its own build. The files are **not interchangeable** — Maya 2024 uses Python 3.10 while Maya 2025/2026 use Python 3.11. Windows and macOS builds are also not interchangeable.
 
-<div id="dl-ue-wrapper">
+<div id="dl-ue-wrapper" markdown>
 
 ## Unreal Engine
 
@@ -57,7 +57,7 @@ title: Download
 ## Free Trial
 
 The download files above work as a **14-day free trial** — no license key needed to get started.
-Once you're ready, [get a license](pricing.md){ .md-button } or [retrieve your existing key](https://api.mcaeditor.com/license).
+Once you're ready, [get a license](pricing.md) or [retrieve your existing key](https://api.mcaeditor.com/license).
 
 Already activated on too many machines? [Manage your activations](https://api.mcaeditor.com/manage).
 
