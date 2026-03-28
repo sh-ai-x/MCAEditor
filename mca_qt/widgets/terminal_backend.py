@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 
 # --- pywinpty Availability Check --------------------------------------------
+#
+# pywinpty (Windows ConPTY) is only relevant on Windows.  On macOS/Linux
+# we skip the import entirely and always use the subprocess pipe fallback.
 
 # WinPTY reference — set by _ensure_conpty() on first successful import.
 WinPTY = None
@@ -49,17 +52,21 @@ WinPTY = None
 # if the venv path was injected after this module was first imported.
 HAS_CONPTY = False
 
-# Try the import immediately.  If it fails now, _ensure_conpty() will
-# retry later (e.g. after setup_venv() injects the venv site-packages).
-try:
-    from winpty import PTY as WinPTY
-    HAS_CONPTY = True
-    logger.debug("pywinpty available — integrated terminal enabled")
-except ImportError:
-    logger.info(
-        "pywinpty not available at import time — will retry when terminal starts. "
-        "Install pywinpty for full PTY support: pip install pywinpty"
-    )
+if platform.system() == "Windows":
+    # Try the import immediately.  If it fails now, _ensure_conpty() will
+    # retry later (e.g. after setup_venv() injects the venv site-packages).
+    try:
+        from winpty import PTY as WinPTY
+        HAS_CONPTY = True
+        logger.debug("pywinpty available — integrated terminal enabled")
+    except ImportError:
+        logger.info(
+            "pywinpty not available at import time — will retry when terminal starts. "
+            "Install pywinpty for full PTY support: pip install pywinpty"
+        )
+else:
+    logger.debug("Non-Windows platform (%s) — using subprocess pipe backend",
+                 platform.system())
 
 
 def _ensure_conpty():
@@ -79,6 +86,10 @@ def _ensure_conpty():
     :rtype: bool
     """
     global HAS_CONPTY, WinPTY
+
+    # pywinpty is Windows-only — skip entirely on other platforms.
+    if platform.system() != "Windows":
+        return False
 
     # Already available — nothing to do.
     if HAS_CONPTY and WinPTY is not None:
