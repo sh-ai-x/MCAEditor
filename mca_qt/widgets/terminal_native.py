@@ -1,7 +1,7 @@
 """
 MCA Qt - Native Terminal Widget (QPlainTextEdit frontend).
 
-User-facing terminal emulator widget that combines the ConPTY backend
+User-facing terminal emulator widget that combines the PTY backend
 and ANSI parser into an interactive terminal experience. Renders the
 parsed character grid into a styled QPlainTextEdit and translates Qt
 key events into ANSI escape sequences for the PTY.
@@ -14,8 +14,8 @@ The ``terminal_factory.py`` module selects the correct widget at runtime.
 
 Dependencies:
     - PySide6 or PySide2 (QWidget, QPlainTextEdit, QFont, etc.)
-    - pywinpty >= 2.0.0 (via managed venv)
-    - Windows 10 version 1809+ (for ConPTY)
+    - pywinpty >= 2.0.0 (Windows, via managed venv) OR
+    - stdlib ``pty`` module (macOS/Linux, built-in)
 """
 
 import logging
@@ -26,7 +26,7 @@ from mca_qt.qt_compat import (
     QTextCharFormat, QTextCursor, QMenu,
 )
 
-from mca_qt.widgets.terminal_backend import TerminalBackend, check_conpty
+from mca_qt.widgets.terminal_backend import TerminalBackend, check_conpty, check_unix_pty
 from mca_qt.widgets.ansi_parser import AnsiParser, DEFAULT_FG, DEFAULT_BG
 
 # Module-level logger.
@@ -195,14 +195,14 @@ class TerminalWidget(QWidget):
         if self._alive:
             return
 
-        # Check if pywinpty is available (retries import if it failed at
-        # module load time — venv path may have been injected later).
-        # When pywinpty is missing, the backend uses subprocess pipes.
-        # Pipes have no line discipline, so typed characters aren't echoed
-        # and backspace doesn't erase — we must handle that locally.
-        if not check_conpty():
-            logger.warning("Terminal start: pywinpty not available "
-                           "(subprocess fallback with local echo)")
+        # Determine if we have a real PTY backend available.
+        # pywinpty (Windows) or Unix PTY (macOS/Linux) both provide a real
+        # pseudo-terminal — the shell handles echo, line editing, etc.
+        # Only the subprocess pipe fallback needs local echo mode.
+        has_real_pty = check_conpty() or check_unix_pty()
+        if not has_real_pty:
+            logger.warning("Terminal start: no PTY available — "
+                           "using subprocess pipe with local echo")
             self._local_echo = True
             self._echo_buffer = ""
         else:

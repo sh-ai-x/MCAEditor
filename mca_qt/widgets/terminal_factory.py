@@ -12,8 +12,9 @@ Selection order:
        available (standalone mode with full PTY support).
     2. **Native** (``terminal_native.TerminalWidget``) — fallback for
        Maya or environments missing any xterm.js requirement.  Works
-       with pywinpty (full PTY) or without it (subprocess pipe fallback).
-    3. **None** — terminal feature disabled entirely (non-Windows).
+       with pywinpty (Windows), Unix PTY (macOS/Linux), or subprocess
+       pipe fallback.
+    3. **None** — terminal feature disabled entirely.
 
 Dependencies:
     - None (pure Python stdlib — import checks are done lazily)
@@ -67,7 +68,7 @@ def create_terminal_widget(shell="", cwd="", font_size=12, parent=None):
 
     # --- No terminal available ---
     logger.info(
-        "Terminal unavailable (no QtWebEngine and no pywinpty). "
+        "Terminal unavailable (no xterm.js frontend and native terminal failed). "
         "Terminal feature will be disabled."
     )
     return None
@@ -205,11 +206,13 @@ def _try_native(shell, cwd, font_size, parent):
     """
     Attempt to create the native QPlainTextEdit terminal widget.
 
-    Works on all platforms with or without pywinpty:
-        - **With pywinpty** (Windows): Full PTY support (ANSI colors, interactive).
-        - **Without pywinpty**: Subprocess pipe fallback (line-oriented tools
-          like pip, git, python, Claude Code work fine; no full-screen programs).
-        - **macOS/Linux**: Uses subprocess pipe fallback with /bin/zsh or /bin/bash.
+    Works on all platforms:
+        - **Windows + pywinpty**: Full PTY support via ConPTY (ANSI colors,
+          interactive).
+        - **macOS/Linux**: Full PTY support via stdlib ``pty`` module (ANSI
+          colors, interactive shell with prompt and line editing).
+        - **Fallback**: Subprocess pipe (line-oriented tools like pip, git,
+          python work fine; no full-screen programs).
 
     :param str shell: Shell path.
     :param str cwd: Working directory.
