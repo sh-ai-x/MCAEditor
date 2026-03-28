@@ -18,6 +18,7 @@ import base64
 import json
 import logging
 import socket
+import struct
 
 from .base_adapter import DCCAdapter, DCCType, ConnectionState
 
@@ -705,6 +706,15 @@ class MayaAdapter(DCCAdapter):
         :rtype: str or None
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Maya 2024's commandPort never closes its side of accepted
+        # connections, leaving them in CLOSE_WAIT.  After 1-2 calls the
+        # accept backlog fills and Maya freezes.  SO_LINGER with a zero
+        # timeout sends RST instead of FIN, tearing down both sides
+        # immediately and preventing CLOSE_WAIT accumulation.
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
 
         # Use the longer timeout for the initial TCP handshake.
         sock.settimeout(self._connect_timeout)

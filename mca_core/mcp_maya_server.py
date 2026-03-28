@@ -33,14 +33,20 @@ Side effects:
 import argparse
 import asyncio
 import base64
+import ctypes
 import importlib
 import importlib.util
 import inspect
 import json
 import logging
 import os
+import platform
 import pprint as pprint_mod
 import socket
+import struct
+import sys
+import tempfile
+import time
 from itertools import chain
 from typing import get_origin
 
@@ -75,11 +81,211 @@ RECV_BUFFER_SIZE = 4096
 # Localhost only — Maya's command port should never be network-exposed.
 LOCAL_HOST = "127.0.0.1"
 
+# Deferred execution: directory for result files (Maya 2024 workaround).
+_DEFERRED_RESULT_DIR = os.path.join(tempfile.gettempdir(), "mca_mcp_results")
+
+# Deferred execution: poll interval and max wait time (seconds).
+DEFERRED_POLL_INTERVAL = 0.1
+DEFERRED_MAX_WAIT = 15.0
+
 # Tool filenames to skip during discovery (known broken/dangerous).
 SKIP_TOOLS = {"generate_scene", "__init__"}
 
 # Module-level logger — configured in __main__.
 logger = logging.getLogger("MCAMayaMCP")
+
+
+# =============================================================================
+# Editor API Client (Maya 2024 Workaround)
+# =============================================================================
+#
+# Maya 2024's commandPort has bugs that prevent reliable execution of
+# maya.cmds operations through the socket handler.  As an alternative, we
+# can route tool calls through the MCA Editor's JSON-RPC API server, which
+# runs inside Maya's process and uses the internal adapter (direct exec()
+# on the main thread — immune to all commandPort issues).
+#
+# The Editor API server writes a discovery file (api_port.json) so external
+# tools can find it.  This code is inlined here because mcp_maya_server.py
+# must be fully standalone (zero mca_core imports).
+#
+# The fallback chain is: Editor API → direct commandPort → deferred commandPort.
+
+# --- Editor API Discovery File Path ---
+# Mirrors the path logic from mcp_editor_server.py.
+_home = os.path.expanduser("~")
+if sys.platform in ("win32", "darwin"):
+    # Windows and macOS both use ~/Documents.
+    _EDITOR_PREFS_DIR = os.path.join(
+        _home, "Documents", "mca_preferences", "MCAEditor"
+    )
+else:
+    # Linux follows XDG convention — ~/.config.
+    _xdg = os.environ.get("XDG_CONFIG_HOME", os.path.join(_home, ".config"))
+    _EDITOR_PREFS_DIR = os.path.join(_xdg, "mca_preferences", "MCAEditor")
+_EDITOR_DISCOVERY_FILE = os.path.join(_EDITOR_PREFS_DIR, "api_port.json")
+
+# Timeout for the Editor API TCP connection (seconds).
+EDITOR_API_CONNECT_TIMEOUT = 5.0
+
+# Timeout for reading the Editor API response (seconds).
+# Generous because tool scripts (scene analysis, etc.) can take a while
+# and execute_in_dcc blocks the main thread synchronously.
+EDITOR_API_RECV_TIMEOUT = 30.0
+
+
+def _is_process_alive(pid):
+    """
+    Check if a process with the given PID is still running.
+
+    Uses ``OpenProcess`` on Windows and ``os.kill(pid, 0)`` on POSIX.
+    Returns False if the process is definitely dead; True if it might
+    be alive (or we cannot tell).
+
+    :param int pid: The process ID to check.
+    :return: True if the process appears to be alive.
+    :rtype: bool
+    """
+    if pid is None or pid <= 0:
+        return False
+
+    if platform.system() == "Windows":
+        # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        try:
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            # If ctypes fails, assume alive to avoid false negatives.
+            return True
+    else:
+        # POSIX: signal 0 checks existence without sending a real signal.
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but we don't have permission — it's alive.
+            return True
+        except Exception:
+            return True
+
+
+def _read_editor_discovery():
+    """
+    Read the MCA Editor's port discovery file.
+
+    Returns the parsed JSON dict, or None if the file doesn't exist,
+    is unreadable, or refers to a dead process.
+
+    :return: Discovery dict with ``port``, ``pid``, ``started`` keys,
+             or None if the editor is not available.
+    :rtype: dict or None
+    """
+    if not os.path.isfile(_EDITOR_DISCOVERY_FILE):
+        return None
+
+    try:
+        with open(_EDITOR_DISCOVERY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Cannot read editor discovery file: %s", exc)
+        return None
+
+    # Check if the editor process is still alive.
+    pid = data.get("pid")
+    if pid and not _is_process_alive(pid):
+        logger.debug(
+            "Editor discovery file references dead PID %d — ignoring.", pid
+        )
+        return None
+
+    return data
+
+
+def _call_editor_api(method, params=None):
+    """
+    Send a JSON-RPC request to the MCA Editor's API server.
+
+    Returns the result value on success, or None on any failure.  Unlike
+    ``mcp_editor_server.py:_call_editor()``, this function returns None
+    instead of raising so the fallback chain in ``run_tool_script()`` can
+    continue to the next execution method.
+
+    :param str method: The JSON-RPC method name (e.g. ``execute_in_dcc``).
+    :param dict params: Keyword arguments for the method (optional).
+    :return: The result from the JSON-RPC response, or None on failure.
+    :rtype: dict or list or str or None
+    """
+    # Step 1: Read the discovery file.
+    discovery = _read_editor_discovery()
+    if discovery is None:
+        logger.debug("Editor API not available (no discovery file or dead PID).")
+        return None
+
+    port = discovery.get("port")
+    if not port:
+        logger.debug("Editor discovery file has no port — skipping Editor API.")
+        return None
+
+    # Step 2: Build the JSON-RPC request.
+    request = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params or {},
+        "id": 1,
+    }
+    request_line = json.dumps(request) + "\n"
+
+    # Step 3: Send the request and read the response.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(EDITOR_API_CONNECT_TIMEOUT)
+
+    try:
+        sock.connect((LOCAL_HOST, port))
+        sock.sendall(request_line.encode("utf-8"))
+
+        # Read the newline-delimited JSON-RPC response.
+        sock.settimeout(EDITOR_API_RECV_TIMEOUT)
+        response_data = b""
+        while True:
+            chunk = sock.recv(RECV_BUFFER_SIZE)
+            if not chunk:
+                break
+            response_data += chunk
+            # JSON-RPC responses are newline-delimited — stop at first newline.
+            if b"\n" in response_data:
+                break
+
+    except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+        logger.debug("Editor API connection failed (port %d): %s", port, exc)
+        return None
+    finally:
+        sock.close()
+
+    # Step 4: Parse the JSON-RPC response.
+    response_str = response_data.decode("utf-8", errors="replace").strip()
+    if not response_str:
+        logger.debug("Empty response from Editor API.")
+        return None
+
+    try:
+        response = json.loads(response_str)
+    except json.JSONDecodeError as exc:
+        logger.debug("Invalid JSON from Editor API: %s", exc)
+        return None
+
+    # Check for JSON-RPC error.
+    if "error" in response:
+        error = response["error"]
+        msg = error.get("message", "Unknown") if isinstance(error, dict) else str(error)
+        logger.debug("Editor API returned error: %s", msg)
+        return None
+
+    return response.get("result")
 
 
 # =============================================================================
@@ -110,23 +316,195 @@ class MayaConnection:
         """
         Execute a tool script in Maya and return the result.
 
-        Uses a stdout-redirect wrapper (matching ``maya_adapter.py``) to
-        capture results.  ``print()`` inside ``exec()`` on Maya's commandPort
-        goes to Maya's Script Editor, NOT back through the socket.  The
-        adapter's proven pattern solves this by:
+        Uses a 3-level fallback chain:
 
-        1. Redirecting stdout to a StringIO buffer before exec()
-        2. Running the script (which does ``print(_mcp_maya_results)``)
-        3. Restoring stdout
-        4. Re-printing the captured buffer — this print IS at the outer
-           exec() level and flows back through the socket
+        1. **Editor API** — routes through the MCA Editor's JSON-RPC server,
+           which uses the internal adapter (direct ``exec()`` on the main
+           thread).  Completely immune to all commandPort bugs.  Only
+           available when MCA Editor is open in Maya.
+        2. **Direct commandPort** — stdout-redirect wrapper via port 7002.
+           Works on Maya 2025+ but fails on Maya 2024.
+        3. **Deferred commandPort** — sends lightweight Python via port 7002
+           that queues real work via ``executeDeferred()``, retrieves results
+           from a temp file.  Maya 2024 fallback when Editor is not open.
 
         :param str script: Python source code to execute in Maya.
         :return: Parsed result (dict/list if JSON, raw string otherwise).
         :rtype: dict or list or str or None
         """
-        # Append result-printing code to the script.  The stdout redirect
-        # in _send_command's wrapper will capture this and re-emit it.
+        # Level 1: Try the Editor API (bypasses commandPort entirely).
+        result = self._run_via_editor_api(script)
+        if result is not None:
+            return result
+
+        # Level 2: Try direct commandPort execution (works on Maya 2025+).
+        result = self._run_direct(script)
+        if result is not None:
+            return result
+
+        # Level 3: Fall back to deferred commandPort execution.
+        # Maya 2024's commandPort crashes when maya.cmds runs inside
+        # the socket handler.  Deferred mode queues the work via
+        # maya.utils.executeDeferred() and retrieves results from a
+        # temp file, avoiding the crash entirely.
+        logger.info("Direct execution returned no data, trying deferred mode.")
+        return self._run_deferred(script)
+
+    # --- Shared Helpers -------------------------------------------------------
+
+    def _make_result_file(self):
+        """
+        Create a unique result file path in the temp directory.
+
+        The result file is used by both the Editor API and deferred execution
+        paths to retrieve tool results written by the Maya-side script.
+
+        :return: Tuple of (native path for Python, forward-slash path for Maya).
+        :rtype: tuple
+        """
+        os.makedirs(_DEFERRED_RESULT_DIR, exist_ok=True)
+        result_id = "{:.6f}".format(time.time()).replace(".", "_")
+        result_file = os.path.join(
+            _DEFERRED_RESULT_DIR, "mcp_{}.json".format(result_id)
+        )
+        # Normalize to forward slashes for Maya's Python on Windows.
+        result_file_maya = result_file.replace("\\", "/")
+        return result_file, result_file_maya
+
+    @staticmethod
+    def _build_result_suffix(result_file_maya):
+        """
+        Build Python code that writes ``_mcp_maya_results`` to a temp JSON file.
+
+        Appended to tool scripts so their results can be retrieved from disk
+        instead of through stdout/socket.  Includes a try/except so errors
+        are also written to the file for diagnosis.
+
+        :param str result_file_maya: Forward-slash path to the result file.
+        :return: Python source code to append to the tool script.
+        :rtype: str
+        """
+        return (
+            "\nimport json as _mcp_json, traceback as _mcp_tb\n"
+            "try:\n"
+            "    with open('{outfile}', 'w') as _mcp_f:\n"
+            "        _mcp_json.dump({{'success': True, "
+            "'result': _mcp_maya_results}}, _mcp_f)\n"
+            "except Exception as _mcp_e:\n"
+            "    with open('{outfile}', 'w') as _mcp_f:\n"
+            "        _mcp_json.dump({{'success': False, "
+            "'error': str(_mcp_e), "
+            "'traceback': _mcp_tb.format_exc()}}, _mcp_f)\n"
+        ).format(outfile=result_file_maya)
+
+    def _poll_result_file(self, result_file, max_wait=DEFERRED_MAX_WAIT):
+        """
+        Poll for a temp result file and return parsed content.
+
+        Waits up to ``max_wait`` seconds for the file to appear, reads and
+        parses the JSON, cleans up, and returns the result.  Used by both
+        the Editor API and deferred execution paths.
+
+        :param str result_file: Native path to the result file.
+        :param float max_wait: Maximum time to wait (seconds).
+        :return: Parsed result, or None on timeout/failure.
+        :rtype: dict or list or str or None
+        """
+        elapsed = 0.0
+        while elapsed < max_wait:
+            if os.path.isfile(result_file):
+                try:
+                    with open(result_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    # File might be partially written — retry.
+                    time.sleep(DEFERRED_POLL_INTERVAL)
+                    elapsed += DEFERRED_POLL_INTERVAL
+                    continue
+
+                # Clean up the result file.
+                try:
+                    os.remove(result_file)
+                except OSError:
+                    pass
+
+                if data.get("success"):
+                    return data.get("result")
+                else:
+                    logger.warning(
+                        "Execution error: %s", data.get("error", "unknown")
+                    )
+                    return None
+
+            time.sleep(DEFERRED_POLL_INTERVAL)
+            elapsed += DEFERRED_POLL_INTERVAL
+
+        logger.warning(
+            "Timed out after %.1fs waiting for result file %s",
+            max_wait, result_file,
+        )
+        return None
+
+    # --- Level 1: Editor API --------------------------------------------------
+
+    def _run_via_editor_api(self, script):
+        """
+        Execute a tool script through the MCA Editor's JSON-RPC API server.
+
+        The Editor API routes code through the internal Maya adapter, which
+        uses ``exec()`` directly on the main thread — completely immune to
+        all commandPort bugs.  This is the preferred execution path.
+
+        The ``execute_in_dcc`` method runs synchronously on Maya's main
+        thread (via the QTimer drain), so ``maya.cmds`` works perfectly.
+        Since the exec blocks until completion, the result file is written
+        before the API response comes back.
+
+        Returns None if the Editor API is not available (editor not open,
+        discovery file missing, dead PID, connection refused) so the
+        fallback chain can continue.
+
+        :param str script: Python source code to execute in Maya.
+        :return: Parsed result, or None if Editor API is unavailable.
+        :rtype: dict or list or str or None
+        """
+        # Prepare a result file — the Editor API's execute_in_dcc returns
+        # empty output (internal adapter limitation), so we capture results
+        # via a temp file instead.
+        result_file, result_file_maya = self._make_result_file()
+        full_script = script + self._build_result_suffix(result_file_maya)
+
+        # Send to the Editor API's execute_in_dcc method.
+        api_result = _call_editor_api("execute_in_dcc", {
+            "code": full_script,
+            "language": "python",
+        })
+
+        # If the Editor API is not available, return None to fall through.
+        if api_result is None:
+            return None
+
+        logger.info("Editor API accepted the tool script, reading result file.")
+
+        # The exec was synchronous — the result file should already exist.
+        # Use a short poll in case of filesystem caching delays on Windows.
+        return self._poll_result_file(result_file, max_wait=5.0)
+
+    # --- Level 2: Direct CommandPort ------------------------------------------
+
+    def _run_direct(self, script):
+        """
+        Execute a tool script via the direct stdout-redirect approach.
+
+        Uses a stdout-redirect wrapper (matching ``maya_adapter.py``) to
+        capture results through the commandPort socket.  Works on Maya
+        2025+ but fails on Maya 2024 (``maya.cmds`` aborts the connection).
+
+        :param str script: Python source code to execute in Maya.
+        :return: Parsed result, or None if no data came back.
+        :rtype: dict or list or str or None
+        """
+        # Append result-printing code to the script.
         script_with_output = (
             script
             + "\nimport json as _mcp_json\n"
@@ -153,6 +531,107 @@ class MayaConnection:
                 pass
 
         return raw
+
+    # --- Level 3: Deferred CommandPort ----------------------------------------
+
+    def _run_deferred(self, script):
+        """
+        Execute a tool script using deferred execution (Maya 2024 workaround).
+
+        Maya 2024's commandPort crashes when ``maya.cmds`` operations run
+        inside the socket handler.  This method avoids the crash by:
+
+        1. Sending a lightweight Python command (no ``maya.cmds``) to port
+           7002 that queues the real work via ``maya.utils.executeDeferred()``.
+        2. The deferred callback runs on Maya's next idle cycle (outside the
+           commandPort handler) where ``maya.cmds`` is safe.
+        3. The callback writes the JSON result to a temp file.
+        4. This method polls the temp file and returns the result.
+
+        :param str script: Python source code to execute in Maya.
+        :return: Parsed result, or None on timeout/failure.
+        :rtype: dict or list or str or None
+        """
+        result_file, result_file_maya = self._make_result_file()
+
+        # Build the deferred execution script.  This code runs INSIDE the
+        # commandPort handler but does NOT call maya.cmds — it only queues
+        # the real work.  The actual tool script (with maya.cmds) runs in
+        # the deferred callback on Maya's idle loop.
+        deferred_script = (
+            "import maya.utils as _mcp_utils, base64 as _mcp_b64, "
+            "json as _mcp_json, traceback as _mcp_tb\n"
+            "_mcp_code = _mcp_b64.b64decode('{code_b64}').decode('utf-8')\n"
+            "_mcp_outfile = '{outfile}'\n"
+            "def _mcp_deferred_run():\n"
+            "    try:\n"
+            "        exec(compile(_mcp_code, '<mca_mcp>', 'exec'), globals())\n"
+            "        with open(_mcp_outfile, 'w') as _f:\n"
+            "            _mcp_json.dump({{'success': True, "
+            "'result': _mcp_maya_results}}, _f)\n"
+            "    except Exception as _e:\n"
+            "        with open(_mcp_outfile, 'w') as _f:\n"
+            "            _mcp_json.dump({{'success': False, "
+            "'error': str(_e), "
+            "'traceback': _mcp_tb.format_exc()}}, _f)\n"
+            "_mcp_utils.executeDeferred(_mcp_deferred_run)\n"
+        ).format(
+            code_b64=base64.b64encode(script.encode("utf-8")).decode("ascii"),
+            outfile=result_file_maya,
+        )
+
+        # Send the deferred script to Maya's Python port.  We use
+        # _send_fire_and_forget because we don't need a socket response —
+        # the result comes from the temp file.
+        success = self._send_fire_and_forget(deferred_script, self._python_port)
+        if not success:
+            logger.warning("Failed to send deferred script to Maya.")
+            return None
+
+        # Poll for the result file.
+        return self._poll_result_file(result_file)
+
+    def _send_fire_and_forget(self, command, port):
+        """
+        Send a Python command to Maya without waiting for a response.
+
+        Used by the deferred execution path — the command queues work via
+        ``executeDeferred()`` and the result is retrieved from a temp file,
+        so we don't need the socket response.
+
+        :param str command: Python code to execute.
+        :param int port: TCP port (Maya's Python command port).
+        :return: True if the command was sent successfully.
+        :rtype: bool
+        """
+        # Single base64 layer is sufficient — no stdout redirect needed.
+        code_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        wire_command = (
+            'import base64; '
+            'exec(compile(base64.b64decode("{}").decode("utf-8"), '
+            '"<mca_mcp_deferred>", "exec"))\n'
+        ).format(code_b64)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(CONNECT_TIMEOUT_SECS)
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
+
+        try:
+            sock.connect((self._host, port))
+            sock.sendall(wire_command.encode("utf-8"))
+            # Brief pause to let Maya's commandPort receive the data
+            # before we RST the connection.
+            time.sleep(0.05)
+            return True
+        except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+            logger.warning(
+                "Failed to send deferred command to port %d: %s", port, exc
+            )
+            return False
+        finally:
+            sock.close()
 
     def _send_command(self, command, port):
         """
@@ -214,6 +693,15 @@ class MayaConnection:
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(CONNECT_TIMEOUT_SECS)
+
+        # Maya 2024's commandPort never closes its side of accepted
+        # connections, leaving them in CLOSE_WAIT.  After 1-2 calls the
+        # accept backlog fills and Maya freezes.  SO_LINGER with a zero
+        # timeout sends RST instead of FIN, tearing down both sides
+        # immediately and preventing CLOSE_WAIT accumulation.
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
 
         try:
             sock.connect((self._host, port))
