@@ -407,7 +407,14 @@ class TerminalBackend(QThread):
         Reads from stdout using ``os.read()`` on the raw file
         descriptor for efficient, non-blocking-ish chunk reads.
         """
-        logger.info("pywinpty not available — using subprocess fallback")
+        # On non-Windows platforms, subprocess pipe is the normal backend
+        # (pywinpty is Windows-only ConPTY).  Only log at INFO on Windows
+        # where it indicates a missing optional dependency.
+        if platform.system() == "Windows":
+            logger.info("pywinpty not available — using subprocess fallback")
+        else:
+            logger.debug("Using subprocess pipe backend (normal for %s)",
+                         platform.system())
 
         # Build environment with TERM set so programs know we're not
         # a full terminal (avoids them trying full-screen tricks).
