@@ -27,6 +27,7 @@ Dependencies:
 """
 
 import os
+import platform
 import shutil
 import subprocess
 import logging
@@ -252,24 +253,39 @@ class TerminalBackend(QThread):
         """
         Auto-detect the best available shell on the system.
 
-        Prefers PowerShell (pwsh.exe for PS7+, then powershell.exe),
+        On Windows: prefers PowerShell (pwsh for PS7+, then powershell.exe),
         falls back to cmd.exe.
+        On macOS/Linux: prefers zsh, falls back to bash, then sh.
 
         :return: Full path to the shell executable.
         :rtype: str
         """
-        # Try PowerShell 7+ (cross-platform pwsh).
-        pwsh = shutil.which("pwsh")
-        if pwsh:
-            return pwsh
+        if platform.system() == "Windows":
+            # Try PowerShell 7+ (cross-platform pwsh).
+            pwsh = shutil.which("pwsh")
+            if pwsh:
+                return pwsh
 
-        # Try Windows PowerShell (ships with Windows).
-        powershell = shutil.which("powershell")
-        if powershell:
-            return powershell
+            # Try Windows PowerShell (ships with Windows).
+            powershell = shutil.which("powershell")
+            if powershell:
+                return powershell
 
-        # Ultimate fallback — cmd.exe is always available on Windows.
-        return shutil.which("cmd") or "cmd.exe"
+            # Ultimate fallback — cmd.exe is always available on Windows.
+            return shutil.which("cmd") or "cmd.exe"
+        else:
+            # macOS/Linux — prefer zsh (macOS default), then bash.
+            # Also check $SHELL env var which reflects user preference.
+            user_shell = os.environ.get("SHELL", "")
+            if user_shell and shutil.which(user_shell):
+                return user_shell
+
+            for shell_name in ("zsh", "bash", "sh"):
+                found = shutil.which(shell_name)
+                if found:
+                    return found
+
+            return "/bin/sh"
 
     # --- Thread Entry Point --------------------------------------------------
 
@@ -389,16 +405,18 @@ class TerminalBackend(QThread):
 
         # Spawn the shell with merged stdout/stderr.
         # CREATE_NO_WINDOW prevents a visible console window from
-        # flashing on screen when the subprocess starts.
-        self._proc = subprocess.Popen(
-            [self._shell],
+        # flashing on screen when the subprocess starts (Windows only).
+        kwargs = dict(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=self._cwd,
             env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        self._proc = subprocess.Popen([self._shell], **kwargs)
 
         logger.info("Subprocess spawned: shell=%s, pid=%d",
                      self._shell, self._proc.pid)

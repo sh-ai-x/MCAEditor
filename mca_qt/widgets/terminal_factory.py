@@ -122,12 +122,9 @@ def is_terminal_available():
         except ImportError:
             pass
 
-    # Check native (Windows only — works with or without pywinpty
-    # via the subprocess pipe fallback in terminal_backend.py).
-    if platform.system() == "Windows":
-        return True
-
-    return False
+    # Native terminal works on all platforms — pywinpty for full PTY
+    # on Windows, subprocess pipe fallback on macOS/Linux.
+    return True
 
 
 # --- Internal: Frontend Probes ------------------------------------------------
@@ -208,10 +205,11 @@ def _try_native(shell, cwd, font_size, parent):
     """
     Attempt to create the native QPlainTextEdit terminal widget.
 
-    Works on Windows with or without pywinpty:
-        - **With pywinpty**: Full PTY support (ANSI colors, interactive programs).
+    Works on all platforms with or without pywinpty:
+        - **With pywinpty** (Windows): Full PTY support (ANSI colors, interactive).
         - **Without pywinpty**: Subprocess pipe fallback (line-oriented tools
           like pip, git, python, Claude Code work fine; no full-screen programs).
+        - **macOS/Linux**: Uses subprocess pipe fallback with /bin/zsh or /bin/bash.
 
     :param str shell: Shell path.
     :param str cwd: Working directory.
@@ -220,13 +218,6 @@ def _try_native(shell, cwd, font_size, parent):
     :return: Widget instance, or *None* on failure.
     :rtype: TerminalWidget or None
     """
-    # Platform check — currently Windows-only (pywinpty is Windows-only,
-    # and the subprocess fallback uses CREATE_NO_WINDOW).
-    if platform.system() != "Windows":
-        logger.debug("Native terminal not available (Windows-only, current: %s)",
-                      platform.system())
-        return None
-
     # Create the widget.  No pywinpty check here — the backend has a
     # subprocess pipe fallback that works without it (TERM=dumb mode).
     try:
