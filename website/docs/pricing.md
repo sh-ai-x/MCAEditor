@@ -52,8 +52,8 @@ Supports **Windows**. Unreal Engine 5.4, 5.5, 5.6, and 5.7.
 
 </div>
 
-[Buy Perpetual — $99](https://ncomes.gumroad.com/l/UE_PERPETUAL_SLUG){ .md-button .md-button--primary }
-[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/UE_ANNUAL_SLUG){ .md-button }
+[Buy Perpetual — $99](https://ncomes.gumroad.com/l/mopwol){ .md-button .md-button--primary }
+[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/xvvfbe){ .md-button }
 
 ---
 
@@ -79,8 +79,8 @@ at a discounted price. One license key covers both DCCs.
 
 </div>
 
-[Buy Bundle Perpetual — $140](https://ncomes.gumroad.com/l/BUNDLE_SLUG){ .md-button .md-button--primary }
-[Buy Bundle Annual — $40/yr](https://ncomes.gumroad.com/l/BUNDLE_ANNUAL_SLUG){ .md-button }
+[Buy Bundle Perpetual — $140](https://ncomes.gumroad.com/l/wuvhoh){ .md-button .md-button--primary }
+[Buy Bundle Annual — $40/yr](https://ncomes.gumroad.com/l/xsexcb){ .md-button }
 
 ---
 
