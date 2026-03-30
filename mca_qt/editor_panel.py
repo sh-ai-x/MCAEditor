@@ -23,6 +23,7 @@ Dependencies:
 import importlib
 import io
 import os
+import stat
 import re
 import sys
 import logging
@@ -2689,10 +2690,19 @@ class MCAEditorPanel(QWidget):
         """
         Write editor content to a file.
 
+        If the file is read-only on disk (e.g. Perforce marks checked-in
+        files as read-only), the read-only attribute is cleared before
+        writing so the save succeeds without requiring a manual checkout.
+
         :param MCACodeEditor editor: The editor to save.
         :param str filepath: The file path to write to.
         """
         try:
+            # Clear the OS read-only flag if set (common with Perforce
+            # and other VCS that mark files read-only on disk).
+            if os.path.exists(filepath) and not os.access(filepath, os.W_OK):
+                os.chmod(filepath, stat.S_IWRITE | stat.S_IREAD)
+                logger.debug("Cleared read-only attribute: %s", filepath)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(editor.toPlainText())
             editor.document().setModified(False)
@@ -5308,6 +5318,9 @@ class MCAEditorPanel(QWidget):
         for editor, name, path in self._group_container.all_editors():
             if editor.file_path and editor.document().isModified():
                 try:
+                    # Clear OS read-only flag if set (Perforce, etc.)
+                    if os.path.exists(editor.file_path) and not os.access(editor.file_path, os.W_OK):
+                        os.chmod(editor.file_path, stat.S_IWRITE | stat.S_IREAD)
                     with open(editor.file_path, "w", encoding="utf-8") as f:
                         f.write(editor.toPlainText())
                 except Exception as exc:

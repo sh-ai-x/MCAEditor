@@ -18,6 +18,7 @@ Side Effects:
 import io
 import os
 import re
+import stat
 import sys
 import logging
 import traceback
@@ -1409,10 +1410,19 @@ class MCAMainWindow(QMainWindow):
         """
         Write editor content to a file.
 
+        If the file is read-only on disk (e.g. Perforce marks checked-in
+        files as read-only), the read-only attribute is cleared before
+        writing so the save succeeds without requiring a manual checkout.
+
         :param MCACodeEditor editor: The editor to save.
         :param str filepath: The file path to write to.
         """
         try:
+            # Clear the OS read-only flag if set (common with Perforce
+            # and other VCS that mark files read-only on disk).
+            if os.path.exists(filepath) and not os.access(filepath, os.W_OK):
+                os.chmod(filepath, stat.S_IWRITE | stat.S_IREAD)
+                logger.debug("Cleared read-only attribute: %s", filepath)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(editor.toPlainText())
             editor.document().setModified(False)
