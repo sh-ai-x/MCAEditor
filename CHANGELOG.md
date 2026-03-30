@@ -1,5 +1,9 @@
 # MCA Editor Changelog
 
+## v1.0.6 — 2026-03-30
+- Save now clears OS read-only attribute on locked files (Perforce compatibility)
+- Execute and save-on-close also handle read-only files transparently
+
 ## v1.0.5 — 2026-03-24
 - Output panel: filter Python 3.11+ caret indicator lines (^^^) from tracebacks
 - Output panel: line-buffer stderr tee to recombine split exception lines
