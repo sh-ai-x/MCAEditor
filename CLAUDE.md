@@ -151,6 +151,12 @@ Help with scanning in long files:
   - Nathan Tests everything on the live website.
   - The frontend on the Mini PC should be rebuilt.
 
+### Rebuilding Maya Plugins
+- **ALWAYS `git pull origin main` before building.** The repo has cross-platform fixes that must not be skipped.
+- **Never modify terminal files without preserving cross-platform logic.** `terminal_backend.py` and `terminal_native.py` have platform-gated code paths (pywinpty on Windows, stdlib `pty` on macOS). Breaking one platform's path causes the terminal to fall back to subprocess pipes with no PTY.
+- **After building on one platform, push changes to GitHub** so builds on the other platform stay in sync.
+- See `Docs/SessionNotes/2026-03-30_mac_rebuild_pywinpty_regression.md` for details on a past regression caused by building without pulling latest.
+
 ### Session Checklist
 - [ ] At the beginning of each session, read the recent session notes in `Docs/SessionNotes/`
 - [ ] Read `Docs/REMOTE_ACCESS_GUIDE.md` for SSH/network access to all machines
