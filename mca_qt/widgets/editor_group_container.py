@@ -56,6 +56,7 @@ class EditorGroupContainer(QWidget):
     editors_changed = Signal()
     cursor_position_changed = Signal(int, int)
     tab_close_requested = Signal(object, int)
+    rename_requested = Signal(object, int)
     # Forwarded from EditorGroup when the user double-clicks the tab bar.
     new_tab_requested = Signal()
 
@@ -128,6 +129,11 @@ class EditorGroupContainer(QWidget):
         # Forward tab close requests from the group's tab widget.
         group.tab_widget().tabCloseRequested.connect(
             lambda idx, g=group: self.tab_close_requested.emit(g, idx)
+        )
+
+        # Forward rename requests from the tab context menu.
+        group.rename_requested.connect(
+            lambda idx, g=group: self.rename_requested.emit(g, idx)
         )
 
         # Forward double-click on empty tab bar space for new tab creation.
@@ -414,6 +420,11 @@ class EditorGroupContainer(QWidget):
         # Forward tab close requests.
         group.tab_widget().tabCloseRequested.connect(
             lambda idx, g=group: self.tab_close_requested.emit(g, idx)
+        )
+
+        # Forward rename requests from the tab context menu.
+        group.rename_requested.connect(
+            lambda idx, g=group: self.rename_requested.emit(g, idx)
         )
 
         # Forward double-click on empty tab bar space for new tab creation.

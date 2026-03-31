@@ -1993,7 +1993,15 @@ class MCAMainWindow(QMainWindow):
         if ok and new_name:
             new_path = os.path.join(os.path.dirname(old_path), new_name)
             try:
-                os.rename(old_path, new_path)
+                # On Windows, case-only renames (File.py -> file.py) fail because
+                # the filesystem treats them as the same path.  Work around by
+                # renaming through a temporary intermediate name.
+                if old_path.lower() == new_path.lower() and old_path != new_path:
+                    tmp = old_path + ".mca_rename_tmp"
+                    os.rename(old_path, tmp)
+                    os.rename(tmp, new_path)
+                else:
+                    os.rename(old_path, new_path)
                 editor.file_path = new_path
                 # Update tab text and tracking in the active group.
                 group = self._group_container.active_group()

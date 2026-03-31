@@ -58,9 +58,10 @@
      *
      * @param {Object} files — e.g. {"2024": "filename.zip", "2025": ...}
      * @param {string} basePath — URL prefix for download links
+     * @param {string} platform — "Windows" or "macOS"
      * @return {string} HTML table markup
      */
-    function buildMayaTable(files, basePath) {
+    function buildMayaTable(files, basePath, platform) {
         if (!files || !Object.keys(files).length) return "<p>No downloads available.</p>";
 
         var html = '<table class="dl-table">';
@@ -73,7 +74,12 @@
             html += "<tr>";
             html += "<td>Maya " + year + "</td>";
             html += "<td>Python " + pyVer + "</td>";
-            html += '<td><a href="' + url + '" class="md-button md-button--primary">Download</a></td>';
+            html += '<td><a href="' + url + '" class="md-button md-button--primary"' +
+                ' data-umami-event="download"' +
+                ' data-umami-event-product="Maya ' + year + '"' +
+                ' data-umami-event-platform="' + platform + '"' +
+                ' data-umami-event-file="' + files[year] + '"' +
+                '>Download</a></td>';
             html += "</tr>";
         });
 
@@ -99,7 +105,11 @@
             var url = basePath + files[ver];
             html += "<tr>";
             html += "<td>Unreal Engine " + ver + "</td>";
-            html += '<td><a href="' + url + '" class="md-button md-button--primary">Download</a></td>';
+            html += '<td><a href="' + url + '" class="md-button md-button--primary"' +
+                ' data-umami-event="download"' +
+                ' data-umami-event-product="UE ' + ver + '"' +
+                ' data-umami-event-file="' + files[ver] + '"' +
+                '>Download</a></td>';
             html += "</tr>";
         });
 
@@ -166,8 +176,8 @@
         if (maya) {
             var winEl = document.getElementById("dl-maya-win");
             var macEl = document.getElementById("dl-maya-mac");
-            if (winEl) winEl.innerHTML = buildMayaTable(maya.windows, DOWNLOAD_BASE);
-            if (macEl) macEl.innerHTML = buildMayaTable(maya.macos, DOWNLOAD_BASE);
+            if (winEl) winEl.innerHTML = buildMayaTable(maya.windows, DOWNLOAD_BASE, "Windows");
+            if (macEl) macEl.innerHTML = buildMayaTable(maya.macos, DOWNLOAD_BASE, "macOS");
         }
 
         // --- UE downloads ---

@@ -479,6 +479,7 @@ class EditorGroup(QWidget):
     split_up_requested = Signal(int)
     # Emitted when the user double-clicks empty space on the tab bar.
     new_tab_requested = Signal()
+    rename_requested = Signal(int)
 
     def __init__(self, parent=None):
         """
@@ -1129,6 +1130,14 @@ class EditorGroup(QWidget):
         if has_file:
             copy_path_action.triggered.connect(
                 lambda: self._copy_tab_path(clicked_index)
+            )
+
+        # Rename is available for any file-backed tab.
+        rename_action = menu.addAction("Rename")
+        rename_action.setEnabled(has_file)
+        if has_file:
+            rename_action.triggered.connect(
+                lambda: self.rename_requested.emit(clicked_index)
             )
 
         menu.addSeparator()

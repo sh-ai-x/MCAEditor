@@ -150,11 +150,14 @@ class PythonHighlighter(QSyntaxHighlighter):
         operator_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"[+\-*/%=<>!&|^~]"), operator_fmt))
 
-        # --- Single-line strings (double and single quoted, with f-string support) ---
+        # --- Single-line strings (double and single quoted) ---
+        # Supports all Python string prefixes: r, b, u, f and combinations
+        # like rb, br, rf, fr.  The prefix group is optional.
         fg, bold, italic = self._token_style("string", "#ce9178")
         string_fmt = self._make_format(fg, bold, italic)
-        self._rules.append((re.compile(r'f?"[^"\\]*(\\.[^"\\]*)*"'), string_fmt))
-        self._rules.append((re.compile(r"f?'[^'\\]*(\\.[^'\\]*)*'"), string_fmt))
+        _prefix = r"(?:[brufBRUF]{0,2})"
+        self._rules.append((re.compile(_prefix + r'"[^"\\]*(?:\\.[^"\\]*)*"'), string_fmt))
+        self._rules.append((re.compile(_prefix + r"'[^'\\]*(?:\\.[^'\\]*)*'"), string_fmt))
 
         # --- Comments (must be last to override other rules) ---
         fg, bold, italic = self._token_style("comment", "#6a9955", False, True)

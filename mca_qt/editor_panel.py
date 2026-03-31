@@ -412,6 +412,7 @@ class MCAEditorPanel(QWidget):
         self._group_container.active_editor_changed.connect(self._on_active_editor_changed)
         self._group_container.editors_changed.connect(self._update_open_editors)
         self._group_container.tab_close_requested.connect(self._close_tab_in_group)
+        self._group_container.rename_requested.connect(self._rename_tab_in_group)
         self._group_container.new_tab_requested.connect(self._show_new_tab_dialog)
         self._center_splitter.addWidget(self._group_container)
 
@@ -4055,7 +4056,16 @@ class MCAEditorPanel(QWidget):
         if ok and new_name:
             new_path = os.path.join(os.path.dirname(old_path), new_name)
             try:
-                os.rename(old_path, new_path)
+                # On Windows, case-only renames (File.py -> file.py) fail because
+                # the filesystem treats them as the same path.  Work around by
+                # renaming through a temporary intermediate name.
+                if old_path.lower() == new_path.lower() and old_path != new_path:
+                    import tempfile
+                    tmp = old_path + ".mca_rename_tmp"
+                    os.rename(old_path, tmp)
+                    os.rename(tmp, new_path)
+                else:
+                    os.rename(old_path, new_path)
                 editor.file_path = new_path
                 # Update tab text and tracking in the active group.
                 group = self._group_container.active_group()
@@ -4064,6 +4074,48 @@ class MCAEditorPanel(QWidget):
                     if idx >= 0:
                         group.set_tab_text(idx, new_name)
                         group.update_editor_entry(idx, editor, new_name, new_path)
+                self._settings.add_recent_file(new_path)
+                self._update_open_editors()
+                self._output.write_info("Renamed: {} -> {}".format(old_path, new_path))
+            except Exception as exc:
+                QMessageBox.warning(self, "Error", "Could not rename file:\n{}".format(str(exc)))
+
+    def _rename_tab_in_group(self, group, idx):
+        """
+        Rename the file for a specific tab (triggered from tab context menu).
+
+        :param EditorGroup group: The group containing the tab.
+        :param int idx: Tab index within the group.
+        """
+        if idx < 0:
+            return
+        # Retrieve the editor widget from the group's internal editors list.
+        editors = group.editors()
+        if idx >= len(editors):
+            return
+        editor = editors[idx][0]
+        if not editor or not editor.file_path:
+            self._show_status("No file to rename (save first)")
+            return
+        old_path = editor.file_path
+        new_name, ok = QInputDialog.getText(
+            self, "Rename File", "New file name:", text=os.path.basename(old_path)
+        )
+        if ok and new_name:
+            new_path = os.path.join(os.path.dirname(old_path), new_name)
+            try:
+                # On Windows, case-only renames (File.py -> file.py) fail because
+                # the filesystem treats them as the same path.  Work around by
+                # renaming through a temporary intermediate name.
+                if old_path.lower() == new_path.lower() and old_path != new_path:
+                    tmp = old_path + ".mca_rename_tmp"
+                    os.rename(old_path, tmp)
+                    os.rename(tmp, new_path)
+                else:
+                    os.rename(old_path, new_path)
+                editor.file_path = new_path
+                group.set_tab_text(idx, new_name)
+                group.update_editor_entry(idx, editor, new_name, new_path)
                 self._settings.add_recent_file(new_path)
                 self._update_open_editors()
                 self._output.write_info("Renamed: {} -> {}".format(old_path, new_path))
