@@ -1,5 +1,7 @@
 # Project Mode
 
+![Project Mode overview](../assets/images/StartProjectClose.png)
+
 Project Mode turns MCA Editor into a lightweight IDE. Open a folder, browse your file tree, and work across multiple files with project-wide search.
 
 ---
@@ -16,6 +18,8 @@ You can also create a new project from **File > New Project**, which generates a
 
 ## The Sidebar
 
+![Project Mode overview](../assets/images/SideBar.png)
+
 When a project is open, the left sidebar shows your file tree:
 
 - **Click** a file to open it in the editor
@@ -27,6 +31,8 @@ When a project is open, the left sidebar shows your file tree:
 
 ## Quick Open
 
+![Project Mode overview](../assets/images/QuickFind.png)
+
 Press ++ctrl+p++ to open the **Quick Open** dialog. Start typing a filename to fuzzy-search across your project. Press ++enter++ to open the selected file.
 
 This is the fastest way to navigate large projects.
@@ -34,6 +40,7 @@ This is the fastest way to navigate large projects.
 ---
 
 ## Find in Files
+![Project Mode overview](../assets/images/FindInFiles.png)
 
 Press ++ctrl+shift+f++ to search across all files in your project.
 

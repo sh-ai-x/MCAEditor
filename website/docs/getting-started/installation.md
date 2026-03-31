@@ -6,9 +6,7 @@ Download the latest version from the [Downloads page](../download.md), then foll
 
 ## Maya
 
-<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;margin-bottom:1.5em;">
-<iframe src="https://player.vimeo.com/video/1178681539?title=0&byline=0&portrait=0&badge=0&autopause=0&player_id=0&app_id=58479" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media" style="position:absolute;top:0;left:0;width:100%;height:100%;" title="MCA Editor Maya Installation"></iframe>
-</div>
+<iframe src="https://player.vimeo.com/video/1178681539?title=0&byline=0&portrait=0&badge=0&autopause=0&player_id=0&app_id=58479&background=0&transparent=0&dnt=1" width="100%" height="400" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media" style="border:none;display:block;margin-bottom:1.5em;" title="MCA Editor Maya Installation"></iframe>
 
 MCA Editor for Maya is distributed as a single Python file that you drop into Maya's plug-ins folder. No installer, no dependencies to manage — Maya handles everything.
 

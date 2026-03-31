@@ -97,3 +97,18 @@
 .dl-prev-links a:hover {
     text-decoration: underline;
 }
+
+/* --- Video embed --------------------------------------------------------- */
+.video-embed {
+    background: #000 !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+    border-radius: 4px;
+}
+.video-embed iframe {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+}

@@ -1096,11 +1096,18 @@ class WorkspacePanel(QWidget):
                 # Merge saved folders with current folders (the project
                 # root is already set by set_locked_folder; add any
                 # extra user-added folders that still exist).
+                # When a project_root is active, only restore folders
+                # that live inside it — never pull in stale roots from
+                # other projects.
                 current = set(self._workspace_folders)
                 for folder in saved_folders:
-                    if folder not in current and os.path.isdir(folder):
-                        self._workspace_folders.append(folder)
-                        self._watcher.addPath(folder)
+                    if folder in current or not os.path.isdir(folder):
+                        continue
+                    if project_root and not os.path.normpath(folder).startswith(
+                            os.path.normpath(project_root)):
+                        continue
+                    self._workspace_folders.append(folder)
+                    self._watcher.addPath(folder)
 
             saved_expanded = settings.get(key_expanded, [])
             # QSettings returns a bare string instead of a list when only
