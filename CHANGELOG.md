@@ -1,5 +1,12 @@
 # MCA Editor Changelog
 
+## v1.0.7 — 2026-03-31
+- Syntax highlighting: fix strings with backslashes only coloring the last escape sequence
+- Syntax highlighting: support all Python string prefixes (r, b, u, f, rb, br, rf, fr)
+- Fix case-only file rename on Windows (e.g. File.py to file.py)
+- Add "Rename" option to tab right-click context menu
+- Self-hosted analytics (Umami) on mcaeditor.com with download tracking
+
 ## v1.0.6 — 2026-03-30
 - Save now clears OS read-only attribute on locked files (Perforce compatibility)
 - Execute and save-on-close also handle read-only files transparently
