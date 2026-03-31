@@ -15,7 +15,7 @@ The terminal opens as a panel on the right side of the editor.
 
 ## Features
 
-- **Full shell access** — Runs your system shell (PowerShell on Windows, bash on macOS/Linux)
+- **Full shell access** — Runs your system shell (PowerShell on Windows, bash/zsh on macOS)
 - **ANSI color support** — Colored output from tools like `git`, `pytest`, etc.
 - **Copy/paste** — ++ctrl+c++ copies selected text (or sends interrupt if nothing is selected), ++ctrl+v++ pastes
 - **Scrollback** — Scroll up to see previous output

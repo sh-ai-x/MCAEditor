@@ -11,7 +11,7 @@ Try it free for 14 days — no credit card required.
 
 ## MCA Editor for Maya
 
-Supports **Windows, macOS, and Linux**. Maya 2024, 2025, and 2026.
+Supports **Windows and macOS**. Maya 2024, 2025, and 2026.
 
 <div class="pricing-table" markdown>
 
@@ -19,7 +19,7 @@ Supports **Windows, macOS, and Linux**. Maya 2024, 2025, and 2026.
 |---|---|---|
 | **Price** | $99 USD | $35 USD/year |
 | Maya 2024, 2025, 2026 | ✓ | ✓ |
-| Windows, macOS, Linux | ✓ | ✓ |
+| Windows, macOS | ✓ | ✓ |
 | All Editor Features | ✓ | ✓ |
 | Orange Slice AI Chat | ✓ | ✓ |
 | Plugin Architecture | ✓ | ✓ |
@@ -70,7 +70,7 @@ at a discounted price. One license key covers both DCCs.
 | ~~$198 if bought separately~~ | Save $58 | ~~$70/yr~~ Save $30/yr |
 | Maya 2024, 2025, 2026 | ✓ | ✓ |
 | Unreal Engine 5.4 – 5.7 | ✓ | ✓ |
-| Windows (Unreal), Windows/macOS/Linux (Maya) | ✓ | ✓ |
+| Windows (Unreal), Windows/macOS (Maya) | ✓ | ✓ |
 | All Editor Features | ✓ | ✓ |
 | Orange Slice AI Chat | ✓ | ✓ |
 | Plugin Architecture | ✓ | ✓ |
@@ -131,8 +131,8 @@ No account or credit card needed — just install and run.
 
 ## FAQ
 
-??? question "Can I use MCA Editor on Windows, Mac, and Linux?"
-    Yes — for Maya. A single Maya license covers all three platforms.
+??? question "Can I use MCA Editor on Windows and Mac?"
+    Yes — for Maya. A single Maya license covers both platforms.
     The Unreal Engine version currently supports Windows only.
 
 ??? question "What happens after the 14-day trial?"
@@ -147,7 +147,7 @@ No account or credit card needed — just install and run.
     and we can work something out.
 
 ??? question "What versions of Maya are supported?"
-    Maya 2024, 2025, and 2026 on Windows, macOS, and Linux.
+    Maya 2024, 2025, and 2026 on Windows and macOS.
 
 ??? question "What versions of Unreal Engine are supported?"
     Unreal Engine 5.4, 5.5, 5.6, and 5.7 on Windows.
