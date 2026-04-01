@@ -62,6 +62,52 @@ TOOL_BG = "#252526"
 # Code block background.
 CODE_BG = "#252526"
 
+# --- Friendly Tool Descriptions ----------------------------------------------
+# Maps internal tool names to (label, active_label) tuples.
+# label:        shown when the tool finishes (e.g. "Read the output panel")
+# active_label: shown while the tool is running (e.g. "Reading the output panel...")
+# Keeps the UI informative without exposing MCP internals to end users.
+
+_TOOL_LABELS = {
+    "get_editor_state":     ("Checked the editor state",        "Checking editor state..."),
+    "list_open_files":      ("Listed open files",               "Listing open files..."),
+    "get_output":           ("Read the output panel",           "Reading the output panel..."),
+    "get_editor_text":      ("Read the file contents",          "Reading file contents..."),
+    "get_selected_text":    ("Read the selected text",          "Reading selected text..."),
+    "read_disk_file":       ("Read a file from disk",           "Reading file from disk..."),
+    "set_editor_text":      ("Replaced the file contents",      "Writing file contents..."),
+    "insert_text":          ("Inserted text",                   "Inserting text..."),
+    "replace_range":        ("Edited the code",                 "Editing code..."),
+    "write_disk_file":      ("Wrote a file to disk",            "Writing file to disk..."),
+    "save_file":            ("Saved the file",                  "Saving file..."),
+    "open_file":            ("Opened a file",                   "Opening file..."),
+    "navigate_to":          ("Navigated to a location",         "Navigating..."),
+    "execute_in_dcc":       ("Ran code in the DCC",             "Running code in the DCC..."),
+    "get_maya_command_help": ("Looked up Maya command docs",    "Looking up Maya docs..."),
+    "execute_locally":      ("Ran code locally",                "Running code locally..."),
+    "search_maya_docs":     ("Searched Maya documentation",     "Searching Maya docs..."),
+    "write_output":         ("Wrote to the output panel",       "Writing to output panel..."),
+}
+
+
+def _friendly_tool_label(tool_name, active=False):
+    """
+    Get a human-readable label for a tool call.
+
+    Falls back to a cleaned-up version of the raw tool name if no
+    mapping exists (e.g. ``some_new_tool`` becomes ``Some new tool``).
+
+    :param str tool_name: Internal tool name (e.g. ``execute_in_dcc``).
+    :param bool active: If True, return the in-progress label.
+    :return: Friendly description string.
+    :rtype: str
+    """
+    pair = _TOOL_LABELS.get(tool_name)
+    if pair:
+        return pair[1] if active else pair[0]
+    # Fallback: replace underscores with spaces, capitalize first letter.
+    return tool_name.replace("_", " ").capitalize() + ("..." if active else "")
+
 # --- Thinking GIF Paths ------------------------------------------------------
 # Use mca_core's pre-computed package root — more reliable than __file__
 # which can be wrong for .pyc files loaded from the extraction cache.
@@ -563,21 +609,23 @@ class MessageBubble(QFrame):
 
 class ToolCallBubble(QFrame):
     """
-    A collapsed display for a tool call result in the message area.
+    A compact, user-friendly display for a tool call in the chat area.
 
-    Shows the tool name and a truncated preview of the result.
-    Clicking expands to show the full result.
+    Shows a human-readable description of what the AI is doing (e.g.
+    "Running code in the DCC...") instead of raw MCP internals.
+    Clicking the header expands a details section showing the raw
+    result for power users who want to inspect the tool output.
 
-    :param str tool_name: The name of the tool that was called.
-    :param str result: The JSON result string.
+    :param str tool_name: The internal tool name (e.g. ``execute_in_dcc``).
+    :param str display_text: Initial display text (usually the active label).
     """
 
-    def __init__(self, tool_name, result, parent=None):
+    def __init__(self, tool_name, display_text, parent=None):
         """
         Initialize the tool call bubble.
 
-        :param str tool_name: Tool name.
-        :param str result: JSON result string.
+        :param str tool_name: Internal tool name.
+        :param str display_text: Initial header text.
         :param QWidget parent: Parent widget.
         """
         super().__init__(parent)
@@ -586,23 +634,24 @@ class ToolCallBubble(QFrame):
         layout.setContentsMargins(12, 4, 12, 4)
         layout.setSpacing(2)
 
-        # Tool name label with icon indicator.
-        header = QLabel("[tool: {}]".format(tool_name))
+        # Friendly header label — shows what the AI is doing, not MCP names.
+        header = QLabel(display_text)
         header.setStyleSheet(
             "QLabel {{"
             "  color: #888888;"
             "  font-size: 11px;"
             "  font-style: italic;"
-            "  background-color: %s;"
+            "  font-family: {font};"
+            "  background-color: {bg};"
             "  padding: 4px 8px;"
             "  border-radius: 4px;"
-            "}}" % TOOL_BG
+            "}}".format(font=CHAT_FONT, bg=TOOL_BG)
         )
         layout.addWidget(header)
 
-        # Truncated result preview.
-        preview = result[:200] + "..." if len(result) > 200 else result
-        result_label = QLabel(preview)
+        # Expandable detail section — hidden by default, shows raw result
+        # for power users who click the header to inspect tool output.
+        result_label = QLabel("")
         result_label.setWordWrap(True)
         result_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -612,24 +661,25 @@ class ToolCallBubble(QFrame):
             "  color: #777777;"
             "  font-family: Consolas, monospace;"
             "  font-size: 11px;"
-            "  background-color: %s;"
+            "  background-color: {bg};"
             "  padding: 4px 8px;"
             "  border-radius: 4px;"
-            "}}" % TOOL_BG
+            "}}".format(bg=TOOL_BG)
         )
         result_label.setVisible(False)
         layout.addWidget(result_label)
 
-        # Store for toggle.
+        # Store references for updating after tool execution.
         self._result_label = result_label
         self._header = header
+        self._tool_name = tool_name
 
-        # Click header to toggle result visibility.
+        # Click header to toggle detail visibility.
         header.setCursor(Qt.CursorShape.PointingHandCursor)
         header.mousePressEvent = lambda e: self._toggle_result()
 
     def _toggle_result(self):
-        """Toggle the visibility of the full result text."""
+        """Toggle the visibility of the raw result details."""
         visible = self._result_label.isVisible()
         self._result_label.setVisible(not visible)
 
@@ -1264,8 +1314,9 @@ class AIChatWidget(QWidget):
         """
         logger.info("Tool call: %s (id=%s)", tool_name, call_id)
 
-        # Show a tool call indicator in the UI.
-        tool_bubble = ToolCallBubble(tool_name, "Executing...", parent=self._chat_container)
+        # Show a friendly progress indicator — e.g. "Running code in the DCC..."
+        active_label = _friendly_tool_label(tool_name, active=True)
+        tool_bubble = ToolCallBubble(tool_name, active_label, parent=self._chat_container)
         self._chat_layout.insertWidget(
             self._chat_layout.count() - 1, tool_bubble
         )
@@ -1273,9 +1324,11 @@ class AIChatWidget(QWidget):
         # Execute the tool on the main thread (safe for EditorAPI).
         result_json = execute_tool(self._api, tool_name, arguments_json)
 
-        # Update the tool bubble with the result.
+        # Update with the completed label — e.g. "Ran code in the DCC"
+        # Raw result is available by clicking the header (power user detail).
+        done_label = _friendly_tool_label(tool_name, active=False)
+        tool_bubble._header.setText(done_label)
         tool_bubble._result_label.setText(result_json[:500])
-        tool_bubble._header.setText("[tool: {} - done]".format(tool_name))
 
         # Provide the result back to the worker thread.
         if self._worker is not None:
