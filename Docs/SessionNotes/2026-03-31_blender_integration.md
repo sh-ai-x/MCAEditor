@@ -55,14 +55,64 @@ for simplicity.
 - **JSON protocol** over TCP for socket adapter (not raw commandPort like Maya)
 - **Stdout/stderr tees** for output capture (Blender has no MCommandMessage)
 
+### Bug Fixes During Testing (Blender 4.5)
+
+**HWND Discovery matched own window:**
+`_find_blender_hwnd()` found the Qt window (title "MCA Editor — Blender" contains
+"Blender") instead of the real Blender window. Both HWNDs were the same, causing
+`SetWindowLongPtrW` to fail (can't set window as its own owner).
+- Fix: Added check to skip windows where `hwnd == _last_qt_hwnd` and exclude
+  titles containing "MCA Editor"
+
+**Help menu not found:**
+`panel.layout().menuBar()` returned None because the menubar was on the outer
+QWidget, not the panel's own layout.
+- Fix: Pass `_menubar` reference directly to `_strip_mel_from_ui(panel, _menubar)`
+
+**Output not appearing in MCA Editor panel:**
+Original implementation relied on stdout tees for output capture, but
+`editor_panel.py` wires output through adapter's `_on_output`/`_on_error`
+callbacks (lines 664-665), not stdout.
+- Fix: Changed `_execute_python()` to capture stdout via StringIO buffers and
+  route through `_on_output`/`_on_error` callbacks
+
+**Output not echoing to Blender console:**
+After switching to StringIO capture, `print()` output went to the buffer but was
+never written back to Blender's original stdout.
+- Fix: After restoring sys.stdout, echo captured output to the underlying stream
+  (bypassing the tee via `_original` attribute to avoid double output in the panel)
+- Status: Still not fully working — needs further investigation next session
+
+### Addon Installation Notes
+- Blender 4.5 uses the new extensions system (since 4.2+); legacy `bl_info`
+  addons may not show in the default addon preferences view
+- Workaround: launch directly from Blender's Python console:
+  ```python
+  import mca_blender.blender_window as bw; bw.launch_editor()
+  ```
+- Addon deployed to: `%APPDATA%/Blender Foundation/Blender/4.5/scripts/addons/mca_blender/`
+- `mca_core` and `mca_qt` loaded from source dir via `sys.path` (dev mode)
+- Blender 4.5 uses Python 3.11 (PySide6 compatible); Blender 5.1 uses Python 3.13 (NOT compatible)
+
 ### Still Needed (Future Sessions)
+- **Fix Blender console output routing** — `print()` from MCA Editor execution
+  not appearing in Blender's system console despite echo fix; needs debugging
+  with actual Blender process to inspect stdout state
+- **Blender Python console → MCA Editor** — Blender's `code.InteractiveConsole`
+  may save its own stdout reference before tees are installed; may need
+  `bpy.app.handlers` or a different interception strategy
+- `blender_manifest.toml` for Blender 4.2+ extensions system (proper addon listing)
 - `build_blender.py` — Cython compilation + addon zip packaging
 - Blender socket server addon (for TCP adapter to connect to)
 - `mcp_setup.py` update for `ensure_blender_mcp()`
-- Testing in actual Blender 4.x
 - `mca_blender/install.py` — Addon installation helper
 
 ### Verified
 - All Python imports work: `BlenderAdapter`, `InternalBlenderAdapter`,
   `AdapterManager` with Blender adapter registered
 - No breakage to existing Maya/UE functionality
+- MCA Editor window launches from Blender 4.5 via Python console
+- Qt window renders correctly as floating window above Blender
+- Code execution from MCA Editor works (output appears in MCA Editor panel)
+- Win32 owner-window z-ordering works after HWND fix
+- Menu bar, status bar, and MEL stripping all functional

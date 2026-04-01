@@ -266,15 +266,29 @@ class InternalBlenderAdapter(DCCAdapter):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-        # Route captured stdout through _on_output callback → output panel.
+        # Route captured stdout to BOTH Blender's console AND MCA Editor panel.
         captured = capture_buf.getvalue()
-        if captured and self._on_output:
-            self._on_output(captured.rstrip())
+        if captured:
+            # Echo to Blender's console. If stdout is wrapped by our tee,
+            # write to the underlying stream to avoid double output in the
+            # MCA Editor panel (the tee also writes to the panel).
+            echo_out = getattr(old_stdout, '_original', old_stdout)
+            echo_out.write(captured)
+            echo_out.flush()
+            # Route to MCA Editor output panel via adapter callback.
+            if self._on_output:
+                self._on_output(captured.rstrip())
 
-        # Route captured stderr through _on_error callback → output panel.
+        # Route captured stderr to BOTH Blender's console AND MCA Editor panel.
         captured_err = error_buf.getvalue()
-        if captured_err and self._on_error:
-            self._on_error(captured_err.rstrip())
+        if captured_err:
+            # Echo to Blender's console (bypass tee to avoid double output).
+            echo_err = getattr(old_stderr, '_original', old_stderr)
+            echo_err.write(captured_err)
+            echo_err.flush()
+            # Route to MCA Editor output panel via adapter callback.
+            if self._on_error:
+                self._on_error(captured_err.rstrip())
 
         return ""
 
