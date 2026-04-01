@@ -1,3 +1,7 @@
+---
+description: "MCA Editor — professional Python code editor for Maya and Unreal Engine. Syntax highlighting, AI chat, integrated terminal, and plugin architecture."
+---
+
 # MCA Editor
 
 <div style="text-align: center; margin: 2em 0;">

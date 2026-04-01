@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mcaeditor.com/sitemap.xml
+Sitemap: https://mcaeditor.com/docs/pyunreal/sitemap.xml

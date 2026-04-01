@@ -1,5 +1,6 @@
 ---
 title: Download
+description: "Download MCA Editor for Maya 2024-2026 (Windows and macOS) and Unreal Engine 5.5-5.7. Free 14-day trial."
 ---
 
 # Download MCA Editor

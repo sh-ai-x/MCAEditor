@@ -2,4 +2,24 @@
 
 {% block extrahead %}
   <script defer src="https://analytics.mcaeditor.com/script.js" data-website-id="66b5f524-3041-478c-8e97-3ec018273140"></script>
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="MCA Editor">
+  {% if page and page.meta and page.meta.description %}
+  <meta property="og:description" content="{{ page.meta.description }}">
+  {% else %}
+  <meta property="og:description" content="Professional Python code editor for Maya and Unreal Engine.">
+  {% endif %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  <meta property="og:title" content="{{ page.title }} - MCA Editor">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{ page.title }} - MCA Editor">
+  {% if page and page.meta and page.meta.description %}
+  <meta name="twitter:description" content="{{ page.meta.description }}">
+  {% else %}
+  <meta name="twitter:description" content="Professional Python code editor for Maya and Unreal Engine.">
+  {% endif %}
 {% endblock %}

@@ -500,14 +500,14 @@ The maintenance pattern is mechanical and well-suited for AI:
 - [x] Write AnimBP cookbook / getting-started guide
 - [x] Create MCP wrapper tools for AnimBP (missing from MCA Editor)
 
-### Milestone 1.5: EventGraph Wiring (Phase 1.5) -- C++ WRITTEN
+### Milestone 1.5: EventGraph Wiring (Phase 1.5) -- COMPLETE
 - [x] C++ bridge functions: AddEventNode, AddFunctionCallNode, AddCastNode,
       AddVariableGetNode, AddVariableSetNode, ConnectPins, GetNodePins,
       SetNodePosition, ListEventGraphNodes
 - [x] Python wrappers: EventGraph, GraphNode classes
 - [x] API docs (EventGraph.md)
-- [ ] Compile C++ plugin in UE (requires UE build)
-- [ ] Live integration test in UE
+- [x] Compile C++ plugin in UE 5.5/5.6/5.7
+- [x] Live integration test in UE — 14/14 passed (2026-03-31)
 
 ### Milestone 2: Blueprint Wrappers (Phase 2) -- COMPLETE
 - [x] Implement Blueprint, Component, Variable wrappers
@@ -530,13 +530,14 @@ The maintenance pattern is mechanical and well-suited for AI:
 - [x] Write tests (24 scene + 20 material + 13 viewport = 57 tests)
 - [x] API docs for all new classes
 
-### Milestone 5: Documentation Site (Phase 5)
-- [x] Hand-written API reference docs (Markdown)
+### Milestone 5: Documentation Site (Phase 5) -- COMPLETE
+- [x] Hand-written API reference docs (Markdown, 18 API pages + 4 guides)
 - [x] Getting started guide and AnimBP cookbook
-- [ ] Sphinx autodoc pipeline
-- [ ] Deploy to mcaeditor.com/docs/pyunreal/
-- [ ] Version selector for UE versions
-- [ ] SEO and discoverability
+- [x] MkDocs Material site (matches MCA Editor styling)
+- [x] Deploy to mcaeditor.com/docs/pyunreal/ (live, 2026-03-31)
+- [x] Umami analytics tracking
+- [ ] Version selector for UE versions (future — when API diverges)
+- [ ] SEO and discoverability (meta tags, sitemap submission)
 
 ---
 

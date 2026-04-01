@@ -1,3 +1,7 @@
+---
+description: "Install MCA Editor in Maya or Unreal Engine. Step-by-step setup guide for Windows and macOS, Maya 2024-2026, and UE 5.5-5.7."
+---
+
 # Installation
 
 Download the latest version from the [Downloads page](../download.md), then follow the instructions for your DCC application.

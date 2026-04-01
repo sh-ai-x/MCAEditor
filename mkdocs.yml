@@ -34,6 +34,9 @@ extra_css:
 extra_javascript:
   - assets/javascripts/logo-replay.js
 
+plugins:
+  - search
+
 extra:
   generator: false
 
