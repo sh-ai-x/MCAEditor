@@ -179,9 +179,12 @@ def _markdown_to_html(text):
             html_lines.append("</{}>".format(list_tag))
             in_list = False
 
-        # Empty line → paragraph break.
+        # Empty line → paragraph break.  Collapse consecutive blanks so
+        # the AI can't produce huge vertical gaps with many blank lines.
         if not stripped:
-            html_lines.append("<br>")
+            # Only append a <br> if the last item isn't already a break.
+            if not html_lines or html_lines[-1] != "<br>":
+                html_lines.append("<br>")
         else:
             html_lines.append(stripped)
 
@@ -189,12 +192,8 @@ def _markdown_to_html(text):
     if in_list:
         html_lines.append("</{}>".format(list_tag))
 
-    result = "<br>".join(
-        l for l in html_lines
-        if not l.startswith(("<ul", "<ol", "<li", "</ul", "</ol"))
-    )
-    # Re-insert list blocks without <br> joining (they have their own spacing).
-    # Simpler approach: just join all lines, lists already have block tags.
+    # Join all lines.  List block tags (<ul>, <li>, etc.) are already
+    # well-formed HTML block elements and handle their own spacing.
     result = "\n".join(html_lines)
 
     # --- Inline processing ---

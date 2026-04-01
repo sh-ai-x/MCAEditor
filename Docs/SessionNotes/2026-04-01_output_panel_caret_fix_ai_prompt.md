@@ -84,12 +84,37 @@ broken after restart, add debug logging to the paste path.
 
 ---
 
+---
+
+## AI Chat: Blank Space in Plan Rendering
+
+### Problem
+When the AI generated a plan-style response, a huge blank gap appeared in the
+middle of the chat bubble, requiring scrolling past empty space to see the
+second half of the plan.
+
+### Root Cause
+`_markdown_to_html()` in `chat_widget.py` converted every empty line in the
+AI's output to a `<br>` tag with no limit. Plan-style responses often use
+multiple consecutive blank lines between sections. Each became a separate
+`<br>`, stacking up into a massive vertical gap.
+
+Also found dead code: lines 192-195 computed a filtered `<br>` join that was
+immediately overwritten by line 198's `\n` join.
+
+### Fix
+Collapse consecutive blank lines to a single `<br>`. If `html_lines[-1]` is
+already a `<br>`, skip the duplicate. Removed the dead code join.
+
+---
+
 ## Files Changed
 - `mca_qt/widgets/output_window.py` — Defensive caret filter in `_append_formatted()`
 - `mca_maya/maya_window.py` — Caret filter in `_load_session_history()`
 - `mca_core/plugins/ai_chat/system_prompt.py` — Environment-aware critical rules
+- `mca_core/plugins/ai_chat/chat_widget.py` — Collapse consecutive `<br>` in markdown renderer
 - `setup.py` — Exclude `mcp_blender_server.py` from Cython compilation
 - `build_maya.py` — Add `mcp_blender_server.py` to `DIST_PURE_PYTHON`
 
 ## Build Deployed
-- Maya 2025 v1.0.7 (build hash `fb3921541bae`)
+- Maya 2025 v1.0.7 (multiple builds, latest hash in deployed plugin)
