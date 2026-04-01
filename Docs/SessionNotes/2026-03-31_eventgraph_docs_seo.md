@@ -104,3 +104,38 @@ https://mcaeditor.com/docs/pyunreal/. Matches the main MCA Editor site styling.
 - `docs/index.md` — Added meta description frontmatter
 - `docs/guides/*.md` — Added meta descriptions (4 files)
 - `docs/api/*.md` — Added meta descriptions (6 key files)
+
+---
+
+## Custom Analytics Dashboard
+
+### Problem
+Umami 3.0.3 Events detail page (Chart, Activity, Properties tabs) all show
+"Something went wrong". The event data is correctly stored in PostgreSQL —
+verified via direct DB queries — but the Umami UI fails to render it.
+
+### Solution
+Built a custom analytics dashboard that queries the Umami PostgreSQL database
+directly, bypassing the broken Umami UI entirely.
+
+### Implementation
+- **Script**: `tools/analytics_dashboard.py` — Python HTTP server using psycopg2
+- **Deployed**: `/home/mca/analytics-dashboard/app.py` on VPS
+- **Service**: `mca-analytics.service` (systemd, auto-restart, port 3001)
+- **URL**: https://analytics.mcaeditor.com/downloads
+- **Nginx**: Added `location /downloads` proxy block to umami site config
+
+### Dashboard Shows
+- Summary cards: Total Downloads, Downloads Today, Page Views, Unique Visitors
+- Download log table: date, product, platform, filename (every download click)
+- Top Pages (by view count)
+- Top Referrers (by visit count)
+- Dark theme matching MCA Editor branding (#1a1a2e background, #E8922A highlights)
+- `noindex, nofollow` meta tag — private, not indexed by search engines
+- Live data on every page load (no caching)
+
+### VPS Infrastructure
+- `python3-psycopg2` installed via apt on VPS (Ubuntu 24.04)
+- DB connection to Umami PostgreSQL container at `172.18.0.2:5432`
+- Note: DB IP may change if Docker containers are recreated — would need to
+  update `DB_HOST` in app.py if that happens
