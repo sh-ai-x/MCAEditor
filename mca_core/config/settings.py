@@ -158,7 +158,7 @@ class MCASettings:
         # --- DCC Connection ---
         "dcc_auto_detect": True,
         "dcc_maya_port": 7001,            # Maya MEL command port
-        "dcc_blender_port": 7002,         # Reserved for future Blender support
+        "dcc_blender_port": 8400,         # Blender socket server port
         "dcc_unreal_port": 7003,          # Reserved for future Unreal support
         "dcc_unity_port": 7004,           # Reserved for future Unity support
         "last_connected_dcc": "",

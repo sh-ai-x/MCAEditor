@@ -20,6 +20,7 @@ import threading
 
 from .base_adapter import DCCAdapter, DCCType, ConnectionState
 from .maya_adapter import MayaAdapter
+from .blender_adapter import BlenderAdapter
 
 # Module-level logger for adapter management operations.
 logger = logging.getLogger(__name__)
@@ -81,9 +82,11 @@ class AdapterManager:
             self._register_builtin_adapters()
 
     def _register_builtin_adapters(self):
-        """Register all built-in DCC adapters (Maya-only for now)."""
+        """Register all built-in DCC adapters."""
         self._adapters[DCCType.MAYA] = MayaAdapter()
         logger.debug("Registered built-in adapter: Maya")
+        self._adapters[DCCType.BLENDER] = BlenderAdapter()
+        logger.debug("Registered built-in adapter: Blender")
 
     # --- Connection Callbacks ------------------------------------------------
 
