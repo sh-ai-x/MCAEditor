@@ -208,17 +208,30 @@ class InternalBlenderAdapter(DCCAdapter):
 
         Uses the eval-first-then-exec pattern:
         1. Try to compile as "eval" — single expressions show their result
-           via a formatted ``print("# Result: <value> #")`` call.
+           via a formatted ``# Result: <value> #`` message.
         2. Fall back to "exec" for statements (imports, assignments, etc.).
 
-        All ``print()`` output flows through the stdout tee installed by
-        ``blender_window.py``, which routes it to the output panel.
+        Stdout is temporarily redirected to a StringIO buffer so that
+        ``print()`` output from the user's code is captured and routed
+        through the adapter's ``_on_output`` callback (wired to the
+        output panel by ``editor_panel.py``).
 
         :param str code: Python source code to execute.
-        :return: Empty string (output arrives via stdout tee).
+        :return: Empty string (output arrives via callbacks).
         :rtype: str
         """
         import __main__
+        import io
+
+        # Redirect stdout to capture print() output from user code.
+        # Blender has no MCommandMessage equivalent — we must capture
+        # stdout ourselves and route it through _on_output.
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        capture_buf = io.StringIO()
+        error_buf = io.StringIO()
+        sys.stdout = capture_buf
+        sys.stderr = error_buf
 
         try:
             # Try eval mode first — expressions like variable names,
@@ -227,15 +240,12 @@ class InternalBlenderAdapter(DCCAdapter):
                 compiled = compile(code, "<mca_editor>", "eval")
                 result = eval(compiled, __main__.__dict__)
 
-                # Display the result in the standard format:
-                #   # Result: <value> #
-                # Goes through stdout tee → output panel.
+                # Display the result in the standard format.
                 if result is not None:
                     print("# Result: {} #".format(repr(result)))
 
             except SyntaxError:
                 # Not a single expression — execute as statements.
-                # print() calls flow through stdout tee → output panel.
                 exec(compile(code, "<mca_editor>", "exec"), __main__.__dict__)
 
         except Exception as exc:
@@ -246,12 +256,26 @@ class InternalBlenderAdapter(DCCAdapter):
             # fallback. The user only cares about the final error.
             exc.__context__ = None
 
-            # Format and print the error — it flows through stderr tee
-            # to the output panel with error coloring.
+            # Format and route the error through _on_error callback.
             error_display = self._format_error(exc)
-            print(error_display, file=sys.stderr)
+            if self._on_error:
+                self._on_error(error_display)
 
-        # Return empty — all output already displayed via stdout/stderr tees.
+        finally:
+            # Always restore stdout/stderr, even if the code raised.
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+        # Route captured stdout through _on_output callback → output panel.
+        captured = capture_buf.getvalue()
+        if captured and self._on_output:
+            self._on_output(captured.rstrip())
+
+        # Route captured stderr through _on_error callback → output panel.
+        captured_err = error_buf.getvalue()
+        if captured_err and self._on_error:
+            self._on_error(captured_err.rstrip())
+
         return ""
 
     def _format_error(self, exc):

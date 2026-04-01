@@ -384,12 +384,18 @@ def _find_blender_hwnd():
         if pid.value != blender_pid:
             return True
 
-        # Check if window title contains "Blender".
+        # Skip our own Qt window — its title contains "Blender" too.
+        if _last_qt_hwnd and hwnd == _last_qt_hwnd:
+            return True
+
+        # Check if window title contains "Blender" but NOT "MCA Editor".
+        # Blender's main window title is like "Blender 4.5.3 - filename.blend".
         title_len = _user32.GetWindowTextLengthW(hwnd)
         if title_len > 0:
             title_buf = ctypes.create_unicode_buffer(title_len + 1)
             _user32.GetWindowTextW(hwnd, title_buf, title_len + 1)
-            if "Blender" in title_buf.value or "blender" in title_buf.value:
+            title = title_buf.value
+            if ("Blender" in title or "blender" in title) and "MCA Editor" not in title:
                 found_hwnd[0] = hwnd
                 return False  # Stop enumeration — found it.
 
@@ -642,7 +648,7 @@ def _launch_editor(show_license_dialog=True):
     panel._dcc_indicator.setVisible(False)
 
     # Remove MEL-related UI elements and add Blender doc links.
-    _strip_mel_from_ui(panel)
+    _strip_mel_from_ui(panel, _menubar)
 
     # --- Show license/trial notice on the status bar -------------------------
     if _license_message:
@@ -701,7 +707,7 @@ def _launch_editor(show_license_dialog=True):
     return True
 
 
-def _strip_mel_from_ui(panel):
+def _strip_mel_from_ui(panel, menubar):
     """
     Remove all MEL and Maya-specific items from the editor panel UI.
 
@@ -709,6 +715,7 @@ def _strip_mel_from_ui(panel):
     closes any open MEL tabs, and adds Blender doc links to the Help menu.
 
     :param MCAEditorPanel panel: The editor panel instance.
+    :param QMenuBar menubar: The outer window's menu bar.
     """
     # --- Remove MEL from the language combo ---------------------------------
     try:
@@ -753,9 +760,8 @@ def _strip_mel_from_ui(panel):
     try:
         import webbrowser
 
-        # Find the Help menu.
+        # Find the Help menu from the passed menubar reference.
         help_menu = None
-        menubar = panel.layout().menuBar()
         if menubar is not None:
             for action in menubar.actions():
                 if action.text().replace("&", "") == "Help":
