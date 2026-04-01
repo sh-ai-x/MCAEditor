@@ -875,9 +875,31 @@ class OutputWindow(QWidget):
         per-message ``setTextCursor()`` + ``ensureCursorVisible()`` calls
         that cause chunky output and focus theft during rapid streaming.
 
+        Includes a defensive filter for Python 3.11+ traceback caret
+        indicator lines (``^`` / ``~``).  These are filtered upstream in
+        multiple places, but history loading and future code paths can
+        still leak them through.  Filtering here — the single entry
+        point for all output — guarantees they never reach the document.
+
         :param str text: The text to append.
         :param QTextCharFormat fmt: The format to apply.
         """
+        # --- Defensive caret-line filter ---
+        # Python 3.11+ tracebacks include "^^^^..." indicator lines.
+        # Maya can send these as bare "^" messages, echo-prefixed "# ^",
+        # or full-width "^^^^~~~~^^^" underlines.  Strip the optional
+        # Maya echo prefix ("# ") first, then check if only carets/tildes
+        # remain.  This is the last line of defence — upstream filters
+        # exist but do not cover every ingestion path (e.g. session
+        # history).  Filtering at this single funnel point ensures no
+        # caret-only lines ever appear in the output panel.
+        stripped = text.strip()
+        clean = stripped
+        if clean.startswith("#"):
+            clean = clean[1:].strip()
+        if clean and all(c in "^~" for c in clean):
+            return
+
         self._pending_messages.append((text, fmt))
 
         # Start the flush timer if it isn't already running.

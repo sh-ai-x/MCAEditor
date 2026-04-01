@@ -151,6 +151,8 @@ def collect_extensions():
         # --- AI Chat plugin ---
         os.path.join("mca_core", "plugins", "ai_chat", "chat_widget.py"),   # keyPressEvent
         os.path.join("mca_core", "plugins", "ai_chat", "chat_worker.py"),   # QThread.run()
+        # --- MCP servers (separate processes, reference mcp package at module level) ---
+        os.path.join("mca_core", "mcp_blender_server.py"),                  # uses mcp.server.stdio
     }
 
     py_files = []

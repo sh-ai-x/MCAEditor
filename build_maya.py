@@ -64,6 +64,7 @@ DIST_PURE_PYTHON = [
     os.path.join("mca_core", "venv_manager.py"),
     os.path.join("mca_core", "mcp_maya_server.py"),
     os.path.join("mca_core", "mcp_editor_server.py"),
+    os.path.join("mca_core", "mcp_blender_server.py"),
 ]
 
 # Files that ship as .pyc (bytecode) instead of .pyd (compiled C extension).

@@ -1040,6 +1040,17 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         for line in lines:
             stripped = line.strip()
 
+            # Skip Python 3.11+ traceback caret indicator lines.
+            # The session history buffer contains the raw "^" / "~" lines
+            # that the live callback (_on_maya_output) filters out.  Strip
+            # the optional Maya echo prefix ("# ") before checking so we
+            # also catch "# ^^^^" style echo lines.
+            clean = stripped
+            if clean.startswith("#"):
+                clean = clean[1:].strip()
+            if clean and all(c in "^~" for c in clean):
+                continue
+
             # Detect message type from the prefix that Maya's output
             # system embedded in the reporter text.
             # MEL format:   // Error: message //
