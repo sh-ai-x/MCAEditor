@@ -807,6 +807,8 @@ class TerminalWidget(QWidget):
         Code, vim, and fish rely on this to handle pastes correctly.
         """
         if not self._alive or not self._backend:
+            logger.warning("paste_clipboard: terminal not alive or no backend "
+                           "(alive=%s, backend=%s)", self._alive, self._backend)
             return
         clipboard = QApplication.clipboard()
         text = clipboard.text()
@@ -814,9 +816,18 @@ class TerminalWidget(QWidget):
             payload = text.encode("utf-8")
             # Wrap in bracketed paste sequences when the running program
             # has enabled mode 2004 (e.g. Claude Code, vim, fish shell).
-            if self._parser._bracketed_paste:
+            bracketed = self._parser._bracketed_paste
+            in_alt = self._parser._in_alt_screen
+            if bracketed:
+                logger.info("paste_clipboard: bracketed paste ON (alt_screen=%s), "
+                            "wrapping %d bytes", in_alt, len(payload))
                 payload = b"\x1b[200~" + payload + b"\x1b[201~"
+            else:
+                logger.info("paste_clipboard: bracketed paste OFF (alt_screen=%s), "
+                            "sending %d bytes raw", in_alt, len(payload))
             self._backend.write(payload)
+        else:
+            logger.warning("paste_clipboard: clipboard is empty")
 
     # --- Context Menu --------------------------------------------------------
 

@@ -170,12 +170,14 @@ class AnsiParser:
 
         # Alternate screen buffer — TUI programs (Claude Code, vim, etc.)
         # switch to an alternate screen on startup and restore the original
-        # screen on exit.  We save/restore the grid, cursor, and scrollback
-        # so the shell prompt reappears cleanly after the TUI exits.
+        # screen on exit.  We save/restore the grid, cursor, scrollback,
+        # and DEC private modes so the shell prompt reappears cleanly
+        # after the TUI exits.
         self._alt_grid = None
         self._alt_cursor = None
         self._alt_scrollback = None
         self._alt_scroll_region = None
+        self._alt_bracketed_paste = None
         self._in_alt_screen = False
 
         # Bracketed paste mode (DEC private mode 2004).
@@ -636,26 +638,34 @@ class AnsiParser:
         elif cmd == "h" or cmd == "l":
             # SM/RM — Set/Reset Mode.
             if is_private:
-                # Parse the private mode number from the params string.
+                # Parse ALL private mode numbers from the params string.
+                # Programs can combine modes in one sequence, e.g.
+                # ESC[?1049;2004h sets alt screen AND bracketed paste.
+                # We must process every mode, not just the first.
                 mode_str = params_str.lstrip("?")
-                try:
-                    mode = int(mode_str.split(";")[0]) if mode_str else 0
-                except ValueError:
-                    mode = 0
+                for mode_part in mode_str.split(";"):
+                    try:
+                        mode = int(mode_part) if mode_part else 0
+                    except ValueError:
+                        continue
 
-                if mode in (1049, 47):
-                    # Alternate screen buffer — used by TUI programs
-                    # (Claude Code, vim, less) to draw their UI without
-                    # overwriting the shell session.
-                    if cmd == "h":
-                        self._enter_alt_screen()
-                    else:
-                        self._leave_alt_screen()
-                elif mode == 2004:
-                    # Bracketed paste mode — when enabled, pasted text
-                    # must be wrapped in ESC[200~ ... ESC[201~ so the
-                    # running program can distinguish pastes from typing.
-                    self._bracketed_paste = (cmd == "h")
+                    if mode in (1049, 47):
+                        # Alternate screen buffer — used by TUI programs
+                        # (Claude Code, vim, less) to draw their UI
+                        # without overwriting the shell session.
+                        if cmd == "h":
+                            self._enter_alt_screen()
+                        else:
+                            self._leave_alt_screen()
+                    elif mode == 2004:
+                        # Bracketed paste mode — when enabled, pasted
+                        # text must be wrapped in ESC[200~ ... ESC[201~
+                        # so the running program can distinguish pastes
+                        # from typing.
+                        self._bracketed_paste = (cmd == "h")
+                        logger.info("Bracketed paste mode %s (alt_screen=%s)",
+                                    "ENABLED" if self._bracketed_paste else "DISABLED",
+                                    self._in_alt_screen)
             # Other modes (cursor visibility, etc.) are silently ignored.
 
         elif cmd == "X":
@@ -949,20 +959,22 @@ class AnsiParser:
         """
         Switch to the alternate screen buffer.
 
-        Saves the current grid, cursor position, scrollback, and scroll
-        region, then clears the screen.  TUI programs (Claude Code, vim,
-        less) use this so their UI doesn't overwrite the shell session.
-        When the program exits, ``_leave_alt_screen()`` restores the
-        original content.
+        Saves the current grid, cursor position, scrollback, scroll
+        region, and DEC private mode state (bracketed paste), then
+        clears the screen.  TUI programs (Claude Code, vim, less) use
+        this so their UI doesn't overwrite the shell session.  When the
+        program exits, ``_leave_alt_screen()`` restores the original
+        content and mode state.
         """
         if self._in_alt_screen:
             return
 
-        # Save the main screen state.
+        # Save the main screen state (including DEC private modes).
         self._alt_grid = self._grid
         self._alt_cursor = (self._cursor_row, self._cursor_col)
         self._alt_scrollback = self._scrollback
         self._alt_scroll_region = (self._scroll_top, self._scroll_bottom)
+        self._alt_bracketed_paste = self._bracketed_paste
 
         # Switch to a fresh screen.
         self._grid = self._make_grid(self._rows, self._cols)
@@ -979,25 +991,27 @@ class AnsiParser:
         """
         Switch back to the main screen buffer.
 
-        Restores the grid, cursor, scrollback, and scroll region that
-        were saved when entering the alternate screen.  If we were never
-        in alt screen, this is a no-op.
+        Restores the grid, cursor, scrollback, scroll region, and DEC
+        private mode state that were saved when entering the alternate
+        screen.  If we were never in alt screen, this is a no-op.
         """
         if not self._in_alt_screen:
             return
 
-        # Restore the main screen state.
+        # Restore the main screen state (including DEC private modes).
         if self._alt_grid is not None:
             self._grid = self._alt_grid
             self._cursor_row, self._cursor_col = self._alt_cursor
             self._scrollback = self._alt_scrollback
             self._scroll_top, self._scroll_bottom = self._alt_scroll_region
+            self._bracketed_paste = self._alt_bracketed_paste
 
         # Clear saved state.
         self._alt_grid = None
         self._alt_cursor = None
         self._alt_scrollback = None
         self._alt_scroll_region = None
+        self._alt_bracketed_paste = None
         self._in_alt_screen = False
 
         logger.debug("Left alternate screen buffer — main screen restored")

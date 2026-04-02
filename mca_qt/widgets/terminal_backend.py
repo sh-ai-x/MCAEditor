@@ -716,6 +716,8 @@ class TerminalBackend(QThread):
         :param bytes data: Raw bytes to send to the shell.
         """
         if not self._running:
+            logger.warning("write(): backend not running, dropping %d bytes",
+                           len(data) if data else 0)
             return
 
         # pywinpty PTY path — pywinpty.PTY.write() expects a string.
@@ -725,6 +727,12 @@ class TerminalBackend(QThread):
                     text = data.decode("utf-8", errors="replace")
                 else:
                     text = data
+                # Log paste-sized writes (> 1 byte) at INFO to help
+                # diagnose paste issues.  Single-byte writes (keystrokes)
+                # are too frequent to log.
+                if len(text) > 1:
+                    logger.info("PTY write: %d chars (starts with %r)",
+                                len(text), text[:40])
                 self._pty.write(text)
             except Exception as e:
                 logger.error("PTY write error: %s", e)
