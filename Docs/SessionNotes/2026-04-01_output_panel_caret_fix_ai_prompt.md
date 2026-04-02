@@ -108,13 +108,53 @@ already a `<br>`, skip the duplicate. Removed the dead code join.
 
 ---
 
+## Terminal Paste: Multi-Mode CSI Parsing Bug (Ctrl+V with Claude Code)
+
+### Problem
+Ctrl+V paste worked in the normal shell but NOT when Claude Code (a TUI app)
+was running inside the terminal.
+
+### Root Cause
+**Bug 1 — Multi-mode CSI sequences only processed the first mode.** The ANSI
+parser's `h`/`l` handler extracted `int(mode_str.split(";")[0])`, so a sequence
+like `ESC[?1049;2004h` (alt screen + bracketed paste) only processed mode 1049.
+Mode 2004 (bracketed paste) was silently dropped, meaning `_bracketed_paste`
+never became `True`.
+
+**Bug 2 — Alt screen didn't save/restore bracketed paste state.**
+`_enter_alt_screen()` saved grid, cursor, scrollback, and scroll region, but
+NOT `_bracketed_paste`. When a TUI exited alt screen, the bracketed paste mode
+from the alt session incorrectly persisted into the main screen.
+
+### Fix
+1. **`ansi_parser.py:_handle_csi()` h/l handler** — Changed from processing
+   only the first mode to iterating over ALL `;`-separated modes. This ensures
+   combined sequences like `ESC[?1049;2004h` enable both alt screen and
+   bracketed paste.
+2. **`ansi_parser.py:_enter_alt_screen()/_leave_alt_screen()`** — Save
+   `_bracketed_paste` when entering alt screen, restore when leaving. Mode
+   state is now properly isolated between main and alt screen buffers.
+3. **Diagnostic logging** added to `paste_clipboard()`, `write()`, and mode
+   2004 toggle to trace the full paste flow through Maya's Script Editor.
+
+### Lesson
+When fixing bugs, trace the ENTIRE code flow end-to-end and identify ALL issues
+in one pass. The multi-mode parsing bug and the alt screen save/restore bug were
+independent but both contributed to paste failures. Fixing one without the other
+would have left paste broken in certain sequences.
+
+---
+
 ## Files Changed
 - `mca_qt/widgets/output_window.py` — Defensive caret filter in `_append_formatted()`
 - `mca_maya/maya_window.py` — Caret filter in `_load_session_history()`
 - `mca_core/plugins/ai_chat/system_prompt.py` — Environment-aware critical rules
-- `mca_core/plugins/ai_chat/chat_widget.py` — Collapse consecutive `<br>` in markdown renderer
+- `mca_core/plugins/ai_chat/chat_widget.py` — Collapse consecutive `<br>` in markdown renderer, friendly tool labels
+- `mca_qt/widgets/ansi_parser.py` — Multi-mode CSI parsing, alt screen bracketed paste save/restore
+- `mca_qt/widgets/terminal_native.py` — Bracketed paste wrapping in `paste_clipboard()`, diagnostic logging
+- `mca_qt/widgets/terminal_backend.py` — Diagnostic logging for paste-sized writes
 - `setup.py` — Exclude `mcp_blender_server.py` from Cython compilation
 - `build_maya.py` — Add `mcp_blender_server.py` to `DIST_PURE_PYTHON`
 
 ## Build Deployed
-- Maya 2025 v1.0.7 (multiple builds, latest hash in deployed plugin)
+- Maya 2025 v1.0.7 (multiple builds, latest hash: d475a293681e)
