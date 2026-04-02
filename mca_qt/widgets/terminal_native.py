@@ -797,14 +797,26 @@ class TerminalWidget(QWidget):
             self._display.setTextCursor(cursor)
 
     def paste_clipboard(self):
-        """Paste the system clipboard content into the terminal."""
+        """
+        Paste the system clipboard content into the terminal.
+
+        When the running program has enabled bracketed paste mode
+        (DEC private mode 2004), wraps the pasted text in the
+        standard bracket sequences so the program can distinguish
+        pasted text from typed keystrokes.  Programs like Claude
+        Code, vim, and fish rely on this to handle pastes correctly.
+        """
         if not self._alive or not self._backend:
             return
         clipboard = QApplication.clipboard()
         text = clipboard.text()
         if text:
-            # Send clipboard content to the PTY as keystrokes.
-            self._backend.write(text.encode("utf-8"))
+            payload = text.encode("utf-8")
+            # Wrap in bracketed paste sequences when the running program
+            # has enabled mode 2004 (e.g. Claude Code, vim, fish shell).
+            if self._parser._bracketed_paste:
+                payload = b"\x1b[200~" + payload + b"\x1b[201~"
+            self._backend.write(payload)
 
     # --- Context Menu --------------------------------------------------------
 

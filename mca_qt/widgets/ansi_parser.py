@@ -178,6 +178,12 @@ class AnsiParser:
         self._alt_scroll_region = None
         self._in_alt_screen = False
 
+        # Bracketed paste mode (DEC private mode 2004).
+        # When enabled, terminal emulators must wrap pasted text in
+        # ESC[200~ ... ESC[201~ so the running program (Claude Code,
+        # vim, etc.) can distinguish pasted text from typed keystrokes.
+        self._bracketed_paste = False
+
     # --- Grid Construction ---------------------------------------------------
 
     def _make_grid(self, rows, cols):
@@ -645,6 +651,11 @@ class AnsiParser:
                         self._enter_alt_screen()
                     else:
                         self._leave_alt_screen()
+                elif mode == 2004:
+                    # Bracketed paste mode — when enabled, pasted text
+                    # must be wrapped in ESC[200~ ... ESC[201~ so the
+                    # running program can distinguish pastes from typing.
+                    self._bracketed_paste = (cmd == "h")
             # Other modes (cursor visibility, etc.) are silently ignored.
 
         elif cmd == "X":
