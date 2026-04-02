@@ -1,5 +1,14 @@
 # MCA Editor Changelog
 
+## v1.0.8 — 2026-04-01
+- Fix terminal Ctrl+V paste when TUI apps (Claude Code, vim) are running
+- Fix ANSI parser: process all modes in multi-mode DEC private sequences
+- Save/restore bracketed paste state across alternate screen transitions
+- AI chat: show friendly tool descriptions instead of raw MCP tool names
+- AI chat: fix blank space in plan-style responses (consecutive line break collapse)
+- AI chat: environment-aware prompts — never asks "Is it in Maya?" or "Can you paste the error?"
+- Output panel: defensive caret-line filter at the single entry point for all output text
+
 ## v1.0.7 — 2026-03-31
 - Syntax highlighting: fix strings with backslashes only coloring the last escape sequence
 - Syntax highlighting: support all Python string prefixes (r, b, u, f, rb, br, rf, fr)
