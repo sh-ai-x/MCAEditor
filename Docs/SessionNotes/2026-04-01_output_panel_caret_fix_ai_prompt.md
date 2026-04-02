@@ -156,5 +156,55 @@ would have left paste broken in certain sequences.
 - `setup.py` — Exclude `mcp_blender_server.py` from Cython compilation
 - `build_maya.py` — Add `mcp_blender_server.py` to `DIST_PURE_PYTHON`
 
-## Build Deployed
-- Maya 2025 v1.0.7 (multiple builds, latest hash: d475a293681e)
+## Logging Caused Lag (v1.0.7 → v1.0.8 hotfix)
+
+### Problem
+After deploying v1.0.7 with the terminal paste fixes, the terminal lagged badly
+and Ctrl+V stopped working after a while.
+
+### Root Cause
+INFO-level logging in `terminal_backend.py:write()` fired on every multi-byte
+PTY write (arrow keys, escape sequences). When Claude Code was running, this
+flooded Maya's Script Editor at high volume, causing Qt's event loop to back up.
+Key events (including Ctrl+V) got dropped under the load.
+
+### Fix
+Downgraded `write()` and mode 2004 toggle logging to DEBUG. Only
+`paste_clipboard()` remains at INFO (user-triggered, rare). Bumped version to
+v1.0.8.
+
+---
+
+## Remaining: macOS v1.0.8 Website Deploy
+
+The Mac Mini builds for v1.0.8 are compiled and deployed locally on the Mac,
+but the zip files couldn't be transferred to `dist/latest/` for website upload
+because the Mac Mini went unreachable (WiFi adapter crashed on this PC, and the
+Mac may have gone to sleep). **Next session**: pull the three macOS v1.0.8 zips
+from the Mac Mini and re-run `python tools/deploy_website.py`.
+
+Files needed from Mac Mini `~/Projects/MCAEditor/dist/`:
+- `MCAEditor-Maya2024-v1.0.8.zip` → `dist/latest/MCAEditor-Maya2024-macOS-v1.0.8.zip`
+- `MCAEditor-Maya2025-v1.0.8.zip` → `dist/latest/MCAEditor-Maya2025-macOS-v1.0.8.zip`
+- `MCAEditor-Maya2026-v1.0.8.zip` → `dist/latest/MCAEditor-Maya2026-macOS-v1.0.8.zip`
+
+---
+
+## Files Changed
+- `mca_qt/widgets/output_window.py` — Defensive caret filter in `_append_formatted()`
+- `mca_maya/maya_window.py` — Caret filter in `_load_session_history()`
+- `mca_core/plugins/ai_chat/system_prompt.py` — Environment-aware critical rules
+- `mca_core/plugins/ai_chat/chat_widget.py` — Collapse consecutive `<br>` in markdown renderer, friendly tool labels
+- `mca_qt/widgets/ansi_parser.py` — Multi-mode CSI parsing, alt screen bracketed paste save/restore
+- `mca_qt/widgets/terminal_native.py` — Bracketed paste wrapping in `paste_clipboard()`, diagnostic logging
+- `mca_qt/widgets/terminal_backend.py` — Downgraded diagnostic logging to DEBUG
+- `mca_core/__init__.py` — Version bump to 1.0.8
+- `CHANGELOG.md` — v1.0.8 entry
+- `setup.py` — Exclude `mcp_blender_server.py` from Cython compilation
+- `build_maya.py` — Add `mcp_blender_server.py` to `DIST_PURE_PYTHON`
+
+## Builds Deployed (v1.0.8)
+- Windows: Maya 2024, 2025, 2026 — deployed locally
+- Mac: Maya 2024, 2025, 2026 — deployed on Mac Mini
+- UE: 5.5, 5.6, 5.7 — built, UE 5.6 deployed to Wayward project
+- Website: Windows Maya + all UE uploaded. macOS Maya pending (see above)
