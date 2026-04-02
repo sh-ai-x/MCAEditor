@@ -727,12 +727,11 @@ class TerminalBackend(QThread):
                     text = data.decode("utf-8", errors="replace")
                 else:
                     text = data
-                # Log paste-sized writes (> 1 byte) at INFO to help
-                # diagnose paste issues.  Single-byte writes (keystrokes)
-                # are too frequent to log.
-                if len(text) > 1:
-                    logger.info("PTY write: %d chars (starts with %r)",
-                                len(text), text[:40])
+                # Log paste-sized writes at DEBUG to avoid flooding
+                # Maya's Script Editor.  Only the paste_clipboard()
+                # caller logs at INFO for user-visible diagnostics.
+                if len(text) > 10:
+                    logger.debug("PTY write: %d chars", len(text))
                 self._pty.write(text)
             except Exception as e:
                 logger.error("PTY write error: %s", e)

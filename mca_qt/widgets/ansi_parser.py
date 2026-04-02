@@ -663,9 +663,9 @@ class AnsiParser:
                         # so the running program can distinguish pastes
                         # from typing.
                         self._bracketed_paste = (cmd == "h")
-                        logger.info("Bracketed paste mode %s (alt_screen=%s)",
-                                    "ENABLED" if self._bracketed_paste else "DISABLED",
-                                    self._in_alt_screen)
+                        logger.debug("Bracketed paste mode %s (alt_screen=%s)",
+                                     "ENABLED" if self._bracketed_paste else "DISABLED",
+                                     self._in_alt_screen)
             # Other modes (cursor visibility, etc.) are silently ignored.
 
         elif cmd == "X":
