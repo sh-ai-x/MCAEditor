@@ -9,6 +9,7 @@ Dependencies:
 """
 
 import re
+import sys
 import logging
 
 from mca_qt.qt_compat import (
@@ -786,11 +787,29 @@ class MCACodeEditor(QPlainTextEdit):
         Covers clicking the sidebar, output panel, another tab, or
         switching to a different application entirely.
 
+        On macOS, showing a ToolTip-type QFrame can trigger a transient
+        focusOut event on the parent widget.  If we dismiss immediately,
+        the autocomplete popup appears and vanishes in the same frame.
+        Deferring the check with a zero-timer lets the event loop settle
+        so we only dismiss when focus truly left the editor.
+
         :param QFocusEvent event: The focus-out event.
         """
         if self._completer and self._completer.is_active:
-            self._completer.dismiss()
+            # Deferred check — don't dismiss during transient focus changes.
+            QTimer.singleShot(0, self._deferred_completer_dismiss)
         super().focusOutEvent(event)
+
+    def _deferred_completer_dismiss(self):
+        """
+        Dismiss the completer only if the editor still lacks focus.
+
+        Called from a zero-timer after focusOutEvent. If focus returned
+        to the editor (e.g. macOS transient focus-out from showing a
+        ToolTip window), the popup stays open.
+        """
+        if self._completer and self._completer.is_active and not self.hasFocus():
+            self._completer.dismiss()
 
     # --- Search Highlights ---------------------------------------------------
 
@@ -1381,10 +1400,18 @@ class MCACodeEditor(QPlainTextEdit):
             return
 
         # --- Ctrl+Space: manual auto-complete trigger ---
-        if (event.key() == Qt.Key.Key_Space
-                and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-            self.completion_requested.emit(True)
-            return
+        # On macOS, Qt swaps Ctrl/Meta: ControlModifier = Command key,
+        # MetaModifier = physical Ctrl key.  Accept both so the physical
+        # Ctrl+Space shortcut works on Mac (Command+Space is captured by
+        # Spotlight and never reaches us).
+        if event.key() == Qt.Key.Key_Space:
+            mods = event.modifiers()
+            if mods == Qt.KeyboardModifier.ControlModifier:
+                self.completion_requested.emit(True)
+                return
+            if sys.platform == "darwin" and mods == Qt.KeyboardModifier.MetaModifier:
+                self.completion_requested.emit(True)
+                return
 
         # --- Smart Home key (toggle between first non-whitespace and col 0) ---
         if event.key() == Qt.Key.Key_Home:

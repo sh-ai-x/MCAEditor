@@ -572,18 +572,27 @@ class MayaAdapter(DCCAdapter):
                     # Filter out attributes that are module objects — these
                     # are the module's own imports (e.g. os, pm, mel) and
                     # clutter the list with irrelevant names.
+                    # Try eval first; fall back to __import__ for modules
+                    # that are typed in the editor but not yet executed.
                     code = (
-                        'import json, types; _obj={0}; '
-                        'json.dumps([x for x in dir(_obj) '
+                        'import json, types, importlib, sys; '
+                        '_obj = None\n'
+                        'try:\n _obj = {0}\n'
+                        'except NameError:\n'
+                        ' try:\n  _obj = importlib.import_module("{0}")\n'
+                        ' except Exception:\n  pass\n'
+                        'print(json.dumps([x for x in dir(_obj) '
                         'if x.startswith("{1}") and not x.startswith("__") '
-                        'and not isinstance(getattr(_obj, x, None), types.ModuleType)][:200])'
+                        'and not (isinstance(getattr(_obj, x, None), types.ModuleType) '
+                        'and x in sys.modules)][:500]) '
+                        'if _obj else "[]")'
                     ).format(obj_part, attr_prefix)
                 else:
                     # Completing a top-level name.
                     code = (
                         'import json; '
                         'json.dumps([x for x in dir() '
-                        'if x.startswith("{}")][:200])'
+                        'if x.startswith("{}")][:500])'
                     ).format(partial)
 
                 result = self._send_command(code, self._python_port)

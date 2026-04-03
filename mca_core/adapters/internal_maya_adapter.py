@@ -434,29 +434,52 @@ class InternalMayaAdapter(DCCAdapter):
             try:
                 import __main__
                 if "." in partial:
-                    # Completing an attribute on an object.
+                    # Completing an attribute on an object (e.g. "os.pa").
                     import types
                     obj_part = partial.rsplit(".", 1)[0]
                     attr_prefix = partial.rsplit(".", 1)[1]
-                    obj = eval(obj_part, __main__.__dict__)
-                    # Filter out attributes that are module objects — these
-                    # are the module's own imports and clutter the list.
-                    attrs = [
-                        x for x in dir(obj)
-                        if x.startswith(attr_prefix)
-                        and not x.startswith("__")
-                        and not isinstance(getattr(obj, x, None), types.ModuleType)
-                    ]
-                    for attr in attrs[:200]:
-                        completions.append({
-                            "label": attr,
-                            "detail": "Python",
-                            "insert_text": attr,
-                        })
+
+                    # Try eval in __main__ first (for executed imports and
+                    # user-defined objects).  Falls back to __import__ for
+                    # modules that are typed in the editor but not yet
+                    # executed — e.g. the user wrote "import os" but hasn't
+                    # pressed Ctrl+Enter yet.
+                    obj = None
+                    try:
+                        obj = eval(obj_part, __main__.__dict__)
+                    except Exception:
+                        # Fallback: try importing the module chain directly.
+                        try:
+                            parts = obj_part.split(".")
+                            obj = __import__(parts[0])
+                            for part in parts[1:]:
+                                obj = getattr(obj, part)
+                        except Exception:
+                            pass
+
+                    if obj is not None:
+                        # Filter out re-exported top-level modules (e.g.
+                        # os.sys) but keep genuine sub-modules (e.g. os.path).
+                        # A re-export's attribute name exists as a key in
+                        # sys.modules (e.g. "sys"), while a sub-module's
+                        # name does not (e.g. "path" is not in sys.modules).
+                        attrs = [
+                            x for x in dir(obj)
+                            if x.startswith(attr_prefix)
+                            and not x.startswith("__")
+                            and not (isinstance(getattr(obj, x, None), types.ModuleType)
+                                     and x in sys.modules)
+                        ]
+                        for attr in attrs[:500]:
+                            completions.append({
+                                "label": attr,
+                                "detail": "Python",
+                                "insert_text": attr,
+                            })
                 else:
                     # Completing a top-level name.
                     names = [x for x in dir(__main__) if x.startswith(partial)]
-                    for name in names[:200]:
+                    for name in names[:500]:
                         completions.append({
                             "label": name,
                             "detail": "Python",

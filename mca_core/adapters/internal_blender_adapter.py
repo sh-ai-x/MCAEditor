@@ -379,7 +379,7 @@ class InternalBlenderAdapter(DCCAdapter):
                     and not x.startswith("__")
                     and not isinstance(getattr(obj, x, None), types.ModuleType)
                 ]
-                for attr in attrs[:200]:
+                for attr in attrs[:500]:
                     completions.append({
                         "label": attr,
                         "detail": "Python",
@@ -388,7 +388,7 @@ class InternalBlenderAdapter(DCCAdapter):
             else:
                 # Completing a top-level name from __main__ namespace.
                 names = [x for x in dir(__main__) if x.startswith(partial)]
-                for name in names[:200]:
+                for name in names[:500]:
                     completions.append({
                         "label": name,
                         "detail": "Python",

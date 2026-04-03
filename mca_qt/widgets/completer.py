@@ -15,6 +15,7 @@ Dependencies:
 """
 
 import re
+import sys
 import logging
 
 from mca_qt.qt_compat import (
@@ -133,7 +134,8 @@ class CompletionProvider:
         """
         self._symbol_index = index
 
-    def get_completions(self, prefix, language, document_text=""):
+    def get_completions(self, prefix, language, document_text="",
+                        known_globals=None):
         """
         Gather completions from all sources for the given prefix.
 
@@ -141,6 +143,8 @@ class CompletionProvider:
         :param str language: Current language ("python" or "mel").
         :param str document_text: Full text of the current document for
             word scanning.
+        :param set known_globals: Optional set of names imported in other
+            open tabs (cross-tab completion).
         :return: Deduplicated, sorted list of CompletionItem instances.
         :rtype: list
         """
@@ -164,6 +168,41 @@ class CompletionProvider:
                         ))
             except Exception as exc:
                 logger.debug("Adapter completions failed: %s", exc)
+
+        # --- Source 1b: Module import fallback for dotted prefixes ---
+        # When the adapter didn't return results for a dotted prefix
+        # (e.g. "os.pa" where os hasn't been executed), try importing
+        # the module directly.  Works for stdlib and any installed
+        # package regardless of adapter state.
+        if "." in prefix and language == "python":
+            adapter_count = sum(1 for i in items if i.priority == 0)
+            if adapter_count == 0:
+                try:
+                    import types as _types
+                    obj_part = prefix.rsplit(".", 1)[0]
+                    attr_prefix = prefix.rsplit(".", 1)[1]
+                    # Traverse the dotted module path.
+                    parts = obj_part.split(".")
+                    obj = __import__(parts[0])
+                    for part in parts[1:]:
+                        obj = getattr(obj, part)
+                    attrs = [
+                        x for x in dir(obj)
+                        if x.startswith(attr_prefix)
+                        and not x.startswith("__")
+                        and not (isinstance(getattr(obj, x, None), _types.ModuleType)
+                                 and x in sys.modules)
+                    ]
+                    for attr in attrs[:500]:
+                        if attr not in seen:
+                            seen.add(attr)
+                            items.append(CompletionItem(
+                                label=attr, detail="module",
+                                insert_text=attr,
+                                priority=0,
+                            ))
+                except Exception:
+                    pass
 
         # --- Source 2: Static keywords/builtins (priority 1) ---
         # Figure out which part of the prefix to match against static words.
@@ -219,7 +258,21 @@ class CompletionProvider:
             except Exception as exc:
                 logger.debug("Symbol index completions failed: %s", exc)
 
-        # --- Source 4: Document words (priority 3) ---
+        # --- Source 4: Cross-tab imported names (priority 2) ---
+        # Names imported in other open tabs are offered so autocomplete
+        # works across the editing session — e.g. "import os" in tab A
+        # makes "os" appear as a suggestion in tab B.
+        if known_globals and "." not in prefix:
+            filter_prefix = prefix.lower()
+            for name in sorted(known_globals):
+                if name.lower().startswith(filter_prefix) and name not in seen:
+                    seen.add(name)
+                    items.append(CompletionItem(
+                        label=name, detail="cross-tab",
+                        priority=2,
+                    ))
+
+        # --- Source 5: Document words (priority 3) ---
         # Always available regardless of DCC connection. Scan the current
         # document for identifiers that match the insert prefix.
         if "." in prefix:
@@ -314,6 +367,8 @@ class CodeCompleter(QFrame):
         self._visible_items = []
         # Whether the popup is currently showing an active completion session.
         self._active = False
+        # macOS native window fix — see _show_items() for details.
+        self._mac_native_ready = False
 
         # --- Window flags: float like a tooltip, don't steal focus ---
         self.setWindowFlags(
@@ -543,10 +598,22 @@ class CodeCompleter(QFrame):
             self.dismiss()
             return
 
+        # Collect names imported in other open tabs so autocomplete
+        # works across the editing session (e.g. "import os" in tab A
+        # makes "os" completable in tab B).
+        known_globals = None
+        if hasattr(self._editor, '_known_globals_provider') and self._editor._known_globals_provider:
+            try:
+                known_globals = self._editor._known_globals_provider()
+            except Exception:
+                pass
+
         # Gather completions from all sources.
         language = self._editor.language
         document_text = self._editor.toPlainText()
-        items = self._provider.get_completions(full_prefix, language, document_text)
+        items = self._provider.get_completions(
+            full_prefix, language, document_text, known_globals=known_globals
+        )
 
         if not items:
             self.dismiss()
@@ -604,8 +671,20 @@ class CodeCompleter(QFrame):
         # Position below the cursor, flipping above if near screen bottom.
         self._position_popup()
 
+        # On macOS, the completer is created during Maya startup before
+        # the window system is fully initialized.  The ToolTip-type
+        # NSWindow gets created in a state where it never becomes
+        # visible.  Re-setting the window flags forces Qt to destroy
+        # and recreate the native window, which fixes the issue.
+        # Only needed once — after the first recreation, subsequent
+        # show/hide cycles work normally.
+        if sys.platform == "darwin" and not self._mac_native_ready:
+            self.setWindowFlags(self.windowFlags())
+            self._mac_native_ready = True
+
         self._active = True
         self.show()
+        self.raise_()
 
     def _position_popup(self):
         """

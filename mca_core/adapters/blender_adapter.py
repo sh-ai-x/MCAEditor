@@ -441,14 +441,14 @@ class BlenderAdapter(DCCAdapter):
                     'import json, types; _obj={0}; '
                     'json.dumps([x for x in dir(_obj) '
                     'if x.startswith("{1}") and not x.startswith("__") '
-                    'and not isinstance(getattr(_obj, x, None), types.ModuleType)][:200])'
+                    'and not isinstance(getattr(_obj, x, None), types.ModuleType)][:500])'
                 ).format(obj_part, attr_prefix)
             else:
                 # Completing a top-level name.
                 code = (
                     'import json; '
                     'json.dumps([x for x in dir() '
-                    'if x.startswith("{}")][:200])'
+                    'if x.startswith("{}")][:500])'
                 ).format(partial)
 
             response = self._send_json_command("eval", code)
@@ -622,7 +622,7 @@ class BlenderAdapter(DCCAdapter):
                 return json.loads(decoded)
             except json.JSONDecodeError:
                 # Response wasn't valid JSON — return it as plain output.
-                logger.warning("Non-JSON response from Blender: %s", decoded[:200])
+                logger.warning("Non-JSON response from Blender: %s", decoded[:500])
                 return {"status": "ok", "output": decoded, "error": ""}
 
         finally:
