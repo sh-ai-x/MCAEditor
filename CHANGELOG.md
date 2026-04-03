@@ -5,10 +5,13 @@
 - Smart Backspace: deletes to previous tab stop when cursor is in leading whitespace
 - Imported name highlighting: stdlib imports (teal) vs third-party/project imports (purple)
 - Cross-tab diagnostic suppression: imports from other open tabs no longer flagged as undefined
-- Autocomplete: fix missing completions after dot (raised adapter limit from 30 to 200)
+- Autocomplete: fix missing completions after dot (raised adapter limit from 30 to 500)
 - Autocomplete: filter out module-type attributes from dot-completion results
+- Autocomplete: macOS fixes — invisible popup, missing os.path, Ctrl+Space, focusOut race
 - Settings: hide MEL-related options when running in Unreal Engine
-- UE: preserve editor panel on close/reopen (skip re-indexing)
+- Fix symbol index re-scanning on every editor close/reopen in Maya
+- Fix command port startup warning (unreliable port verification removed)
+- AI chat: fix large empty gaps between messages
 - Pricing update: Maya/UE perpetual $49, annual $25, bundle perpetual $75, annual $30
 
 ## v1.0.8 — 2026-04-01

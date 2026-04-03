@@ -143,25 +143,41 @@ Three root causes identified and fixed for autocomplete not working on macOS:
 
 ---
 
-## Build Status (Updated)
+## April 3 Follow-up — Index Cache & Command Port Fixes
+
+### 13. Symbol Index Re-scanning on Close/Reopen (FIXED)
+- **Problem**: Editor re-indexed 25,000+ files every time the panel was closed and reopened in Maya
+- **Root cause**: `_do_auto_open_editor()` in `plugin_main.py` sets `_mca_editor_window = None` and calls `deleteUI` WITHOUT calling `cleanup()` on the old panel. The module-level cache stash only happened in `cleanup()` → `_stop_symbol_indexing(True)`, so it never fired.
+- **Fix**: Stash the index eagerly in `_poll_index_progress()` the moment indexing completes (`state == "ready"`), rather than only during `cleanup()`. Cleanup still stashes as a safety net.
+- Also: normalize folder paths case-insensitively on Windows (drive letter `E:\` vs `e:\` would cause cache miss)
+- **Files changed**: `mca_qt/editor_panel.py`
+
+### 14. Command Port Startup Warning (FIXED)
+- **Problem**: `mca_maya.maya_window : Command ports not open after 3 retries` on every Maya launch
+- **Root cause**: `cmds.commandPort(":7002", query=True)` is unreliable for verifying a specific port is open. The ports WERE opening successfully, but the verification returned False, triggering 3 retries and a warning.
+- **Fix**: Removed the unreliable verification/retry loop entirely. The `commandPort()` open call either succeeds or raises `RuntimeError` (already open) — both are fine. One deferred retry at 5s handles slow Maya startups.
+- **Files changed**: `mca_maya/maya_window.py`
+
+---
+
+## Build Status (Final — April 3)
 
 | Platform | Version | Status |
 |----------|---------|--------|
-| Maya 2024 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
-| Maya 2025 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
-| Maya 2026 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
-| Maya 2024 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
-| Maya 2025 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
-| Maya 2026 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
-| UE 5.5 Windows | v1.0.9 | **Rebuilt (zip ready, autocomplete + chat fix)** |
-| UE 5.6 Windows | v1.0.9 | **Rebuilt + deployed to Wayward** |
-| UE 5.7 Windows | v1.0.9 | **Rebuilt (zip ready, autocomplete + chat fix)** |
+| Maya 2024 Windows | v1.0.9 | **Rebuilt + deployed + website** |
+| Maya 2025 Windows | v1.0.9 | **Rebuilt + deployed + website** |
+| Maya 2026 Windows | v1.0.9 | **Rebuilt + deployed + website** |
+| Maya 2024 macOS | v1.0.9 | **Rebuilt + deployed + website** |
+| Maya 2025 macOS | v1.0.9 | **Rebuilt + deployed + website** |
+| Maya 2026 macOS | v1.0.9 | **Rebuilt + deployed + website** |
+| UE 5.5 Windows | v1.0.9 | **Website (zip ready)** |
+| UE 5.6 Windows | v1.0.9 | **Website + deployed to Wayward** |
+| UE 5.7 Windows | v1.0.9 | **Website (zip ready)** |
 
 ---
 
 ## Known Issues
-- **REGRESSION**: Maya Windows — editor re-indexes every time you close and reopen, bogging down Maya. Needs investigation.
-- Website not redeployed with v1.0.9 download zips yet — waiting on testing
+- None outstanding
 
 ---
 
@@ -193,3 +209,8 @@ Three root causes identified and fixed for autocomplete not working on macOS:
 - `mca_qt/widgets/settings_dialog.py` — hide_mel parameter support
 - `mca_unreal/Content/Python/ue_editor_host.py` — UE host updates
 - `CHANGELOG.md` — updated
+
+## Files Modified (April 3 — index cache & command port)
+- `mca_qt/editor_panel.py` — eager index stash on completion, case-insensitive folder compare
+- `mca_maya/maya_window.py` — simplified command port open (removed broken verification/retry)
+- `CHANGELOG.md` — added new fix entries
