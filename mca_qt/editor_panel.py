@@ -72,6 +72,15 @@ logger = logging.getLogger(__name__)
 # not present in __main__" from "attribute is None".
 _SENTINEL = object()
 
+# --- Module-level symbol index cache ----------------------------------------
+# In Maya, closing the dockable panel destroys the MCAEditorPanel instance
+# (cleanup -> _stop_symbol_indexing -> clear).  When the user reopens the
+# editor, a brand-new instance is created and would re-scan the entire
+# project.  Stashing the finished index here lets the new panel reuse it
+# instead of re-indexing from scratch every time.
+_cached_symbol_index = None      # SymbolIndex instance (ready state).
+_cached_indexed_folders = None   # sorted list of folder paths it covers.
+
 
 # =============================================================================
 # MCA Editor Panel (embeddable QWidget)
@@ -4839,12 +4848,32 @@ class MCAEditorPanel(QWidget):
             excluded = set(self._active_project.excluded_folders)
 
         # Reuse the existing index if it is ready and covers the same folders.
+        # Check both the instance-level cache (same panel, project reopen)
+        # and the module-level cache (panel destroyed and recreated in Maya).
+        global _cached_symbol_index, _cached_indexed_folders
         normalized = sorted(os.path.normpath(f) for f in folders)
+
+        # First check: instance still has a live, ready index.
         if (self._symbol_index is not None
                 and self._symbol_index.get_state() == "ready"
                 and getattr(self, "_indexed_folders", None) == normalized):
             logger.info("Symbol index still valid — skipping re-index")
-            # Re-emit the status so the action bar shows the existing count.
+            file_count = self._symbol_index.get_file_count()
+            self.index_status_changed.emit(
+                "Indexed {} files".format(file_count)
+            )
+            return
+
+        # Second check: module-level cache from a previous panel instance.
+        # This covers the Maya close/reopen cycle where cleanup() destroyed
+        # the old panel but the index survived at module scope.
+        if (_cached_symbol_index is not None
+                and _cached_symbol_index.get_state() == "ready"
+                and _cached_indexed_folders == normalized):
+            logger.info("Restoring symbol index from module cache — skipping re-index")
+            self._symbol_index = _cached_symbol_index
+            self._indexed_folders = _cached_indexed_folders
+            self._completion_provider.set_symbol_index(self._symbol_index)
             file_count = self._symbol_index.get_file_count()
             self.index_status_changed.emit(
                 "Indexed {} files".format(file_count)
@@ -4902,10 +4931,24 @@ class MCAEditorPanel(QWidget):
             self._index_worker = None
 
         if clear_index:
-            # Full teardown — destroy index data and cached folder list.
-            if self._symbol_index is not None:
-                self._symbol_index.clear()
-                self._symbol_index = None
+            # Before destroying, stash a finished index at module level so
+            # a new panel instance (Maya close/reopen) can reuse it instead
+            # of re-scanning the entire project from scratch.
+            global _cached_symbol_index, _cached_indexed_folders
+            if (self._symbol_index is not None
+                    and self._symbol_index.get_state() == "ready"):
+                _cached_symbol_index = self._symbol_index
+                _cached_indexed_folders = getattr(self, "_indexed_folders", None)
+                logger.debug("Stashed symbol index in module cache (%d files)",
+                             self._symbol_index.get_file_count())
+            else:
+                # Index wasn't ready — nothing worth caching.
+                _cached_symbol_index = None
+                _cached_indexed_folders = None
+
+            # Detach from this instance but don't destroy the data (it
+            # lives on in the module-level cache now).
+            self._symbol_index = None
             self._completion_provider.set_symbol_index(None)
             self._indexed_folders = None
 
