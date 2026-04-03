@@ -4850,8 +4850,12 @@ class MCAEditorPanel(QWidget):
         # Reuse the existing index if it is ready and covers the same folders.
         # Check both the instance-level cache (same panel, project reopen)
         # and the module-level cache (panel destroyed and recreated in Maya).
+        # On Windows, folder paths may differ only in drive-letter case
+        # (e.g. "E:\\" vs "e:\\"), so we normalize to lowercase there.
         global _cached_symbol_index, _cached_indexed_folders
         normalized = sorted(os.path.normpath(f) for f in folders)
+        if sys.platform == "win32":
+            normalized = [f.lower() for f in normalized]
 
         # First check: instance still has a live, ready index.
         if (self._symbol_index is not None
@@ -4865,14 +4869,16 @@ class MCAEditorPanel(QWidget):
             return
 
         # Second check: module-level cache from a previous panel instance.
-        # This covers the Maya close/reopen cycle where cleanup() destroyed
-        # the old panel but the index survived at module scope.
+        # The index is stashed eagerly in _poll_index_progress when
+        # indexing completes, so this covers both the normal close/reopen
+        # cycle AND the startup race where _do_auto_open_editor discards
+        # the uiScript panel without calling cleanup().
         if (_cached_symbol_index is not None
                 and _cached_symbol_index.get_state() == "ready"
                 and _cached_indexed_folders == normalized):
             logger.info("Restoring symbol index from module cache — skipping re-index")
             self._symbol_index = _cached_symbol_index
-            self._indexed_folders = _cached_indexed_folders
+            self._indexed_folders = normalized
             self._completion_provider.set_symbol_index(self._symbol_index)
             file_count = self._symbol_index.get_file_count()
             self.index_status_changed.emit(
@@ -4931,20 +4937,16 @@ class MCAEditorPanel(QWidget):
             self._index_worker = None
 
         if clear_index:
-            # Before destroying, stash a finished index at module level so
-            # a new panel instance (Maya close/reopen) can reuse it instead
-            # of re-scanning the entire project from scratch.
+            # The index is stashed eagerly in _poll_index_progress as
+            # soon as it reaches "ready" state.  This block just detaches
+            # the reference from the panel instance.  If for some reason
+            # the eager stash didn't fire (e.g. timer stopped early),
+            # do a last-chance stash here.
             global _cached_symbol_index, _cached_indexed_folders
             if (self._symbol_index is not None
                     and self._symbol_index.get_state() == "ready"):
                 _cached_symbol_index = self._symbol_index
                 _cached_indexed_folders = getattr(self, "_indexed_folders", None)
-                logger.debug("Stashed symbol index in module cache (%d files)",
-                             self._symbol_index.get_file_count())
-            else:
-                # Index wasn't ready — nothing worth caching.
-                _cached_symbol_index = None
-                _cached_indexed_folders = None
 
             # Detach from this instance but don't destroy the data (it
             # lives on in the module-level cache now).
@@ -4988,6 +4990,16 @@ class MCAEditorPanel(QWidget):
             if self._index_progress_timer is not None:
                 self._index_progress_timer.stop()
                 self._index_progress_timer = None
+
+            # Eagerly stash the finished index at module level so it
+            # survives panel destruction.  _do_auto_open_editor() in
+            # plugin_main discards the uiScript panel WITHOUT calling
+            # cleanup(), so we can't rely on cleanup() alone to stash.
+            global _cached_symbol_index, _cached_indexed_folders
+            _cached_symbol_index = self._symbol_index
+            _cached_indexed_folders = getattr(self, "_indexed_folders", None)
+            logger.info("Stashed symbol index in module cache (%d files)",
+                        file_count)
 
     def _on_workspace_directory_changed(self, path):
         """

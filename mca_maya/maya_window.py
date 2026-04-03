@@ -1510,12 +1510,14 @@ def _safe_clear_label(label):
 
 # --- Command Port Setup -----------------------------------------------------
 
-def _open_command_ports_now():
+def _open_command_ports():
     """
-    Attempt to open Maya's MEL (7001) and Python (7002) command ports.
+    Open Maya's MEL (7001) and Python (7002) command ports.
 
-    :return: True if port 7002 is confirmed open after the attempt.
-    :rtype: bool
+    Called once during editor startup.  ``RuntimeError`` from
+    ``commandPort`` means the port is already open — that is fine.
+    Any other exception is logged as a debug-level message because
+    some Maya versions silently refuse ports during early startup.
     """
     for port, src_type in [("7001", "mel"), ("7002", "python")]:
         port_name = ":{}".format(port)
@@ -1524,59 +1526,39 @@ def _open_command_ports_now():
             logger.info("Opened %s command port %s", src_type, port_name)
         except RuntimeError:
             # RuntimeError means the port is already open — that's fine.
-            pass
+            logger.debug("Command port %s already open", port_name)
         except Exception as exc:
-            logger.warning("Failed to open command port %s: %s", port_name, exc)
-
-    # Verify port 7002 is actually open.
-    try:
-        return cmds.commandPort(":7002", query=True)
-    except Exception:
-        return False
+            logger.debug("Command port %s not ready yet: %s", port_name, exc)
 
 
-_command_port_retries_scheduled = False
+_command_ports_opened = False
 
 
 def _ensure_command_ports():
     """
-    Open Maya's MEL (7001) and Python (7002) command ports if not already open.
+    Open Maya's MEL (7001) and Python (7002) command ports if not already done.
 
     The MCP server runs as a separate process and communicates with Maya
     over TCP on port 7002.  These ports must be open for Claude Code's
-    MCP tools to work.  If a port is already open, the call is a no-op.
+    MCP tools to work.
 
     Maya's networking may not be ready during early startup (plugin init,
-    layout restore).  If the ports fail to open on the first attempt,
-    staggered retries are scheduled via QTimer.  A module-level flag
-    prevents duplicate retry chains when called from both
-    ``show_mca_editor()`` and ``_restore_mca_editor()`` during the
-    same startup cycle.
+    layout restore).  A single deferred retry at 5 s covers slow starts.
+    A module-level flag prevents duplicate attempts when called from both
+    ``show_mca_editor()`` and ``_restore_mca_editor()``.
     """
-    global _command_port_retries_scheduled
+    global _command_ports_opened
 
-    if _open_command_ports_now():
+    if _command_ports_opened:
         return
+    _command_ports_opened = True
 
-    # Only schedule retries once — both show_mca_editor() and
-    # _restore_mca_editor() call this during startup.
-    if _command_port_retries_scheduled:
-        return
-    _command_port_retries_scheduled = True
+    # Try immediately — works most of the time.
+    _open_command_ports()
 
-    # Maya's networking likely isn't ready yet.  Schedule staggered
-    # retries at 3s, 6s, and 10s to cover slow startup scenarios.
-    def _make_retry(attempt, delay):
-        """Create a retry closure for the given attempt number."""
-        def _retry():
-            if not _open_command_ports_now():
-                if attempt >= 3:
-                    logger.warning("Command ports not open after %d retries", attempt)
-        QTimer.singleShot(delay, _retry)
-
-    _make_retry(1, 3000)
-    _make_retry(2, 6000)
-    _make_retry(3, 10000)
+    # One deferred retry for slow Maya startups where networking
+    # is not ready yet during plugin init.
+    QTimer.singleShot(5000, _open_command_ports)
 
 
 # --- Public API (called from plugin_main and MEL override) ------------------
