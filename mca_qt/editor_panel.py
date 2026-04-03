@@ -2863,6 +2863,84 @@ class MCAEditorPanel(QWidget):
             lambda manual: completer.trigger(manual=manual)
         )
 
+        # Give the editor a way to query names imported in other open
+        # tabs so pyflakes can suppress false-positive "undefined name"
+        # errors for cross-tab imports and forced-import globals.
+        editor._known_globals_provider = lambda ed=editor: self._collect_known_globals(ed)
+
+    def _collect_known_globals(self, requesting_editor):
+        """
+        Collect names that are known to be defined at runtime but are not
+        imported in *requesting_editor*'s file.
+
+        Sources:
+            1. Import statements in every *other* open Python tab.
+            2. The ``py_forced_imports`` setting (comma-separated names).
+
+        The result is passed to ``analyze_python(known_globals=...)`` so
+        pyflakes suppresses false-positive "undefined name" errors for
+        these names.
+
+        :param MCACodeEditor requesting_editor: The editor being analyzed.
+        :return: Set of known global name strings.
+        :rtype: set
+        """
+        import re
+        names = set()
+
+        # --- Source 1: imports from other open tabs ---
+        # Re-use the same regex patterns as PythonHighlighter to keep
+        # parsing consistent.
+        re_import = re.compile(r"^\s*import\s+(.+)")
+        re_from_import = re.compile(r"^\s*from\s+\S+\s+import\s+(.+)")
+
+        for editor, tab_name, path in self._group_container.all_editors():
+            # Skip the editor that is requesting analysis — it only needs
+            # names from *other* tabs.
+            if editor is requesting_editor:
+                continue
+            # Only scan Python tabs.
+            if editor.language != "python":
+                continue
+
+            code = editor.toPlainText()
+            for line in code.splitlines():
+                # Try "from X import ..." first.
+                m = re_from_import.match(line)
+                if m:
+                    for part in m.group(1).split(","):
+                        part = part.strip()
+                        if not part or part.startswith("#"):
+                            break
+                        tokens = part.split()
+                        if len(tokens) >= 3 and tokens[-2] == "as":
+                            names.add(tokens[-1])
+                        else:
+                            names.add(tokens[0])
+                    continue
+
+                m = re_import.match(line)
+                if m:
+                    for part in m.group(1).split(","):
+                        part = part.strip()
+                        if not part or part.startswith("#"):
+                            break
+                        tokens = part.split()
+                        if len(tokens) >= 3 and tokens[-2] == "as":
+                            names.add(tokens[-1])
+                        else:
+                            names.add(tokens[0].split(".")[0])
+
+        # --- Source 2: forced imports from settings ---
+        forced = self._settings.get("py_forced_imports") if self._settings else ""
+        if forced:
+            for name in forced.split(","):
+                name = name.strip()
+                if name:
+                    names.add(name)
+
+        return names
+
     def _on_editor_content_changed(self):
         """
         Handle editor content changes by scheduling an outline refresh.

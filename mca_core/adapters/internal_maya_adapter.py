@@ -435,11 +435,19 @@ class InternalMayaAdapter(DCCAdapter):
                 import __main__
                 if "." in partial:
                     # Completing an attribute on an object.
+                    import types
                     obj_part = partial.rsplit(".", 1)[0]
                     attr_prefix = partial.rsplit(".", 1)[1]
                     obj = eval(obj_part, __main__.__dict__)
-                    attrs = [x for x in dir(obj) if x.startswith(attr_prefix) and not x.startswith("__")]
-                    for attr in attrs[:30]:
+                    # Filter out attributes that are module objects — these
+                    # are the module's own imports and clutter the list.
+                    attrs = [
+                        x for x in dir(obj)
+                        if x.startswith(attr_prefix)
+                        and not x.startswith("__")
+                        and not isinstance(getattr(obj, x, None), types.ModuleType)
+                    ]
+                    for attr in attrs[:200]:
                         completions.append({
                             "label": attr,
                             "detail": "Python",
@@ -448,7 +456,7 @@ class InternalMayaAdapter(DCCAdapter):
                 else:
                     # Completing a top-level name.
                     names = [x for x in dir(__main__) if x.startswith(partial)]
-                    for name in names[:30]:
+                    for name in names[:200]:
                         completions.append({
                             "label": name,
                             "detail": "Python",

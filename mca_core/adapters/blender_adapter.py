@@ -435,17 +435,20 @@ class BlenderAdapter(DCCAdapter):
                 # Completing an attribute on an object.
                 obj_part = partial.rsplit(".", 1)[0]
                 attr_prefix = partial.rsplit(".", 1)[1]
+                # Filter out module-type attributes — these are the
+                # module's own imports and clutter the completion list.
                 code = (
-                    'import json; '
-                    'json.dumps([x for x in dir({}) '
-                    'if x.startswith("{}") and not x.startswith("__")][:30])'
+                    'import json, types; _obj={0}; '
+                    'json.dumps([x for x in dir(_obj) '
+                    'if x.startswith("{1}") and not x.startswith("__") '
+                    'and not isinstance(getattr(_obj, x, None), types.ModuleType)][:200])'
                 ).format(obj_part, attr_prefix)
             else:
                 # Completing a top-level name.
                 code = (
                     'import json; '
                     'json.dumps([x for x in dir() '
-                    'if x.startswith("{}")][:30])'
+                    'if x.startswith("{}")][:200])'
                 ).format(partial)
 
             response = self._send_json_command("eval", code)

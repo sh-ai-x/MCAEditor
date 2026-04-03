@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Canonical default styles for every syntax token, keyed by (language, token).
 # Each value is a dict: display (human label), fg (hex color), bold, italic.
 TOKEN_DEFAULTS = OrderedDict([
-    # --- Python tokens (11) ---
+    # --- Python tokens (13) ---
     (("python", "keyword"),          {"display": "Keywords",          "fg": "#569cd6", "bold": True,  "italic": False}),
     (("python", "builtin"),          {"display": "Built-ins",         "fg": "#4ec9b0", "bold": False, "italic": False}),
     (("python", "decorator"),        {"display": "Decorators",        "fg": "#d7ba7d", "bold": False, "italic": False}),
@@ -42,6 +42,8 @@ TOKEN_DEFAULTS = OrderedDict([
     (("python", "string"),           {"display": "Strings",           "fg": "#ce9178", "bold": False, "italic": False}),
     (("python", "comment"),          {"display": "Comments",          "fg": "#6a9955", "bold": False, "italic": True}),
     (("python", "multiline_string"), {"display": "Multi-line Strings","fg": "#ce9178", "bold": False, "italic": False}),
+    (("python", "imported_stdlib"),  {"display": "Imports (stdlib)",  "fg": "#4EC9B0", "bold": False, "italic": False}),
+    (("python", "imported_user"),    {"display": "Imports (packages)","fg": "#C586C0", "bold": False, "italic": False}),
 
     # --- MEL tokens (6) ---
     (("mel", "keyword"),  {"display": "Keywords",       "fg": "#569cd6", "bold": True,  "italic": False}),

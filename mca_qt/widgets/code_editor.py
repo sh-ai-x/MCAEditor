@@ -41,6 +41,34 @@ class PythonHighlighter(QSyntaxHighlighter):
     :param dict color_scheme: Optional color scheme override dict.
     """
 
+    # Regexes for collecting imported names from import statements.
+    # Matches: import X, import X as Y, from X import Y, from X import Y as Z
+    # Also handles comma-separated imports: from X import A, B, C as D
+    _RE_IMPORT = re.compile(r"^\s*import\s+(.+)")
+    _RE_FROM_IMPORT = re.compile(r"^\s*from\s+(\S+)\s+import\s+(.+)")
+
+    # Python standard library module names (3.10+).  Used to distinguish
+    # stdlib imports from third-party / project imports for coloring.
+    try:
+        _STDLIB_MODULES = frozenset(__import__("sys").stdlib_module_names)
+    except AttributeError:
+        # Python < 3.10 fallback — common stdlib top-level names.
+        _STDLIB_MODULES = frozenset([
+            "abc", "argparse", "ast", "asyncio", "base64", "bisect",
+            "calendar", "cmath", "codecs", "collections", "contextlib",
+            "copy", "csv", "ctypes", "dataclasses", "datetime", "decimal",
+            "difflib", "email", "enum", "fileinput", "fnmatch", "fractions",
+            "ftplib", "functools", "getpass", "glob", "gzip", "hashlib",
+            "heapq", "hmac", "html", "http", "importlib", "inspect", "io",
+            "itertools", "json", "logging", "math", "mimetypes", "multiprocessing",
+            "operator", "os", "pathlib", "pickle", "platform", "pprint",
+            "queue", "random", "re", "shlex", "shutil", "signal", "socket",
+            "sqlite3", "ssl", "stat", "string", "struct", "subprocess", "sys",
+            "tempfile", "textwrap", "threading", "time", "timeit", "tkinter",
+            "traceback", "types", "typing", "unittest", "urllib", "uuid",
+            "warnings", "weakref", "xml", "zipfile", "zipimport",
+        ])
+
     def __init__(self, parent=None, color_scheme=None):
         """
         Initialize the highlighter and build all rules.
@@ -52,6 +80,9 @@ class PythonHighlighter(QSyntaxHighlighter):
         # Store the color scheme for rule building and multiline strings.
         self._color_scheme = color_scheme or {}
         self._rules = []
+        # Cached sets of imported names split by origin.
+        self._imported_stdlib = set()   # Names from stdlib modules.
+        self._imported_user = set()     # Names from third-party / project modules.
         self._build_rules()
 
     def _make_format(self, color, bold=False, italic=False):
@@ -164,9 +195,87 @@ class PythonHighlighter(QSyntaxHighlighter):
         comment_fmt = self._make_format(fg, bold, italic)
         self._rules.append((re.compile(r"#[^\n]*"), comment_fmt))
 
+        # --- Imported names formats (applied dynamically per-block) ---
+        # Stdlib imports (os, sys, pathlib, etc.) get one color.
+        fg, bold, italic = self._token_style("imported_stdlib", "#4EC9B0")
+        self._imported_stdlib_fmt = self._make_format(fg, bold, italic)
+        # Third-party / project imports get a different color.
+        fg, bold, italic = self._token_style("imported_user", "#C586C0")
+        self._imported_user_fmt = self._make_format(fg, bold, italic)
+
+    def _collect_imported_names(self):
+        """
+        Scan the entire document for import statements and split names
+        into stdlib vs third-party/project sets.
+
+        Handles:
+            - ``import X``            -> collects ``X``
+            - ``import X as Y``       -> collects ``Y``
+            - ``from X import Y``     -> collects ``Y``
+            - ``from X import Y as Z`` -> collects ``Z``
+            - Comma-separated imports (``from X import A, B, C as D``)
+
+        The top-level module name determines the category: if it's in
+        ``sys.stdlib_module_names`` it goes into stdlib, otherwise user.
+
+        :return: Tuple of (stdlib_names, user_names) sets.
+        :rtype: tuple
+        """
+        stdlib = set()
+        user = set()
+        doc = self.document()
+        if not doc:
+            return stdlib, user
+
+        for i in range(doc.blockCount()):
+            line = doc.findBlockByNumber(i).text()
+
+            # Try "from X import ..." first (more specific).
+            m = self._RE_FROM_IMPORT.match(line)
+            if m:
+                # group(1) = top-level module, group(2) = imported names.
+                top_module = m.group(1).split(".")[0]
+                is_stdlib = top_module in self._STDLIB_MODULES
+                target = stdlib if is_stdlib else user
+                # Parse comma-separated names: "A, B as C, D"
+                for part in m.group(2).split(","):
+                    part = part.strip()
+                    if not part or part.startswith("#"):
+                        break
+                    # "Y as Z" -> collect Z; "Y" -> collect Y
+                    tokens = part.split()
+                    if len(tokens) >= 3 and tokens[-2] == "as":
+                        target.add(tokens[-1])
+                    else:
+                        target.add(tokens[0])
+                continue
+
+            # Try plain "import ..." (may be comma-separated: import A, B as C).
+            m = self._RE_IMPORT.match(line)
+            if m:
+                for part in m.group(1).split(","):
+                    part = part.strip()
+                    if not part or part.startswith("#"):
+                        break
+                    tokens = part.split()
+                    # Determine the top-level module for categorization.
+                    top_module = tokens[0].split(".")[0]
+                    is_stdlib = top_module in self._STDLIB_MODULES
+                    target = stdlib if is_stdlib else user
+                    if len(tokens) >= 3 and tokens[-2] == "as":
+                        target.add(tokens[-1])
+                    else:
+                        # "import os.path" -> the usable name is "os"
+                        target.add(top_module)
+
+        return stdlib, user
+
     def highlightBlock(self, text):
         """
         Apply highlighting rules to a single block of text.
+
+        Runs standard regex rules, then multi-line strings, then
+        imported-name highlighting.
 
         :param str text: The text content of the block.
         """
@@ -184,6 +293,39 @@ class PythonHighlighter(QSyntaxHighlighter):
 
         # Handle multi-line triple-quoted strings separately.
         self._highlight_multiline_strings(text)
+
+        # Highlight imported names used in this block.
+        self._highlight_imported_names(text)
+
+    def refresh_imported_names(self):
+        """
+        Re-scan the document for import statements and update the cached
+        stdlib / user name sets.  Call this when the document text changes
+        (e.g. on the same debounce timer as diagnostics).
+        """
+        self._imported_stdlib, self._imported_user = self._collect_imported_names()
+
+    def _highlight_imported_names(self, text):
+        """
+        Apply imported-name formats to whole-word occurrences in the
+        current text block.  Stdlib names and third-party/project names
+        get different colors.
+
+        :param str text: The text content of the current block.
+        """
+        # Highlight stdlib imported names (e.g. os, sys, pathlib).
+        for name in self._imported_stdlib:
+            pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(),
+                               self._imported_stdlib_fmt)
+
+        # Highlight third-party / project imported names.
+        for name in self._imported_user:
+            pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(),
+                               self._imported_user_fmt)
 
     def _highlight_multiline_strings(self, text):
         """
@@ -464,6 +606,11 @@ class MCACodeEditor(QPlainTextEdit):
         # Settings reference — set by the panel so the editor can check
         # per-language auto-complete toggles during key handling.
         self._settings = None
+        # Callable that returns a set of names known to be defined at
+        # runtime (imports from other open tabs, forced imports from
+        # settings).  Set by the editor panel so pyflakes can suppress
+        # false-positive "undefined name" errors for cross-tab imports.
+        self._known_globals_provider = None
 
         # --- Diagnostics (inline error/warning markers) ---
         # Populated by set_diagnostics() after the analyzer runs.
@@ -539,6 +686,10 @@ class MCACodeEditor(QPlainTextEdit):
             self._highlighter = PythonHighlighter(
                 self.document(), color_scheme=self._color_scheme
             )
+            # Seed the imported-names set so highlighting is correct
+            # immediately when a file is opened (before the first
+            # debounced analysis fires).
+            self._highlighter.refresh_imported_names()
         elif self._language == "mel":
             self._highlighter = MELHighlighter(
                 self.document(), color_scheme=self._color_scheme
@@ -1094,8 +1245,41 @@ class MCACodeEditor(QPlainTextEdit):
                 return
 
         code = self.toPlainText()
-        diagnostics = analyze_python(code)
+
+        # Collect names known to exist at runtime so pyflakes doesn't
+        # flag them as undefined (cross-tab imports, forced imports).
+        known = None
+        if self._known_globals_provider:
+            try:
+                known = self._known_globals_provider()
+            except Exception:
+                logger.debug("known_globals_provider failed", exc_info=True)
+
+        diagnostics = analyze_python(code, known_globals=known)
         self.set_diagnostics(diagnostics)
+
+        # Refresh the set of imported names for syntax highlighting.
+        # Done here on the same 500ms debounce to avoid redundant scans.
+        self._refresh_imported_names()
+
+    def _refresh_imported_names(self):
+        """
+        Refresh the highlighter's imported-name sets and rehighlight if
+        either set has changed.  Only applies to Python files with an
+        active highlighter.
+        """
+        if self._language != "python" or not self._highlighter:
+            return
+
+        old_stdlib = self._highlighter._imported_stdlib
+        old_user = self._highlighter._imported_user
+        self._highlighter.refresh_imported_names()
+
+        # Only rehighlight when the sets actually changed to avoid
+        # unnecessary full-document re-processing.
+        if (self._highlighter._imported_stdlib != old_stdlib
+                or self._highlighter._imported_user != old_user):
+            self._highlighter.rehighlight()
 
     def event(self, evt):
         """
@@ -1201,6 +1385,35 @@ class MCACodeEditor(QPlainTextEdit):
                 and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
             self.completion_requested.emit(True)
             return
+
+        # --- Smart Home key (toggle between first non-whitespace and col 0) ---
+        if event.key() == Qt.Key.Key_Home:
+            # Only handle plain Home and Shift+Home (not Ctrl+Home which goes to doc start).
+            mods_home = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            if mods_home in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier):
+                self._handle_smart_home(shift_held=bool(mods_home & Qt.KeyboardModifier.ShiftModifier))
+                return
+
+        # --- Smart Backspace (delete to previous tab stop when in leading whitespace) ---
+        if event.key() == Qt.Key.Key_Backspace and not event.modifiers():
+            cursor = self.textCursor()
+            if not cursor.hasSelection():
+                col = cursor.columnNumber()
+                # Only act when cursor is in leading whitespace at a tab-stop
+                # boundary and there are spaces to delete.
+                if col > 0 and col % self._tab_size == 0:
+                    line_text = cursor.block().text()
+                    prefix = line_text[:col]
+                    # All characters before cursor must be spaces.
+                    if prefix and prefix == " " * len(prefix):
+                        # Delete tab_size spaces back to the previous tab stop.
+                        cursor.movePosition(
+                            QTextCursor.MoveOperation.Left,
+                            QTextCursor.MoveMode.KeepAnchor,
+                            self._tab_size
+                        )
+                        cursor.removeSelectedText()
+                        return
 
         # --- Toggle comment (Ctrl+/) ---
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Slash:
@@ -1425,6 +1638,41 @@ class MCACodeEditor(QPlainTextEdit):
 
         # Insert newline with preserved/increased indent.
         cursor.insertText("\n" + indent)
+        self.setTextCursor(cursor)
+
+    def _handle_smart_home(self, shift_held):
+        """
+        VS Code-style smart Home key.
+
+        First press moves the cursor to the first non-whitespace character
+        on the line. If the cursor is already there, moves to column 0.
+        When *shift_held* is True, extends the selection instead of moving.
+
+        :param bool shift_held: Whether Shift is held (extend selection).
+        """
+        cursor = self.textCursor()
+        block_text = cursor.block().text()
+        col = cursor.columnNumber()
+
+        # Find the column of the first non-whitespace character.
+        first_non_ws = len(block_text) - len(block_text.lstrip())
+
+        # If cursor is already at the first non-whitespace position (or
+        # the line is all whitespace), jump to column 0; otherwise jump
+        # to first non-whitespace.
+        target_col = 0 if col == first_non_ws else first_non_ws
+
+        # Use KeepAnchor when Shift is held so the selection extends.
+        move_mode = (QTextCursor.MoveMode.KeepAnchor if shift_held
+                     else QTextCursor.MoveMode.MoveAnchor)
+
+        # Move to start of block, then right to the target column.
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock, move_mode)
+        if target_col > 0:
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Right, move_mode, target_col
+            )
+
         self.setTextCursor(cursor)
 
     def _toggle_comment(self):

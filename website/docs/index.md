@@ -33,9 +33,9 @@ MCA Editor is a modern, full-featured code editor that lives inside your DCC. Wr
 
 ## Quick Start
 
-[Maya — $99](pricing.md#mca-editor-for-maya){ .md-button .md-button--primary }
-[Unreal — $99](pricing.md#mca-editor-for-unreal-engine){ .md-button .md-button--primary }
-[Bundle — $140](pricing.md#maya-unreal-bundle){ .md-button }
+[Maya — $49](pricing.md#mca-editor-for-maya){ .md-button .md-button--primary }
+[Unreal — $49](pricing.md#mca-editor-for-unreal-engine){ .md-button .md-button--primary }
+[Bundle — $75](pricing.md#maya-unreal-bundle){ .md-button }
 [Try Free for 14 Days](download.md){ .md-button }
 
 === "Maya"

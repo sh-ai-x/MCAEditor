@@ -889,6 +889,8 @@ class SettingsDialog(QDialog):
             # Python preview.
             sample = (
                 "import os\n"
+                "from pathlib import Path\n"
+                "from maya.cmds import ls\n"
                 "\n"
                 "class FileCounter:\n"
                 '    """Count files and their sizes."""\n'
@@ -901,12 +903,16 @@ class SettingsDialog(QDialog):
                 "            if size >= threshold:\n"
                 "                total += size\n"
                 '        print(f"Total: {total}")\n'
-                "        return total\n"
+                "        return Path(total)\n"
             )
             self._color_preview.setPlainText(sample)
             self._preview_highlighter = PythonHighlighter(
                 self._color_preview.document(), color_scheme=self._working_scheme
             )
+            # Seed imported names so the preview shows both stdlib
+            # and package import colors in the sample code.
+            self._preview_highlighter.refresh_imported_names()
+            self._preview_highlighter.rehighlight()
         else:
             # MEL preview.
             sample = (

@@ -17,7 +17,7 @@ Supports **Windows and macOS**. Maya 2024, 2025, and 2026.
 
 | | Perpetual | Annual |
 |---|---|---|
-| **Price** | $99 USD | $35 USD/year |
+| **Price** | $49 USD | $25 USD/year |
 | Maya 2024, 2025, 2026 | ✓ | ✓ |
 | Windows, macOS | ✓ | ✓ |
 | All Editor Features | ✓ | ✓ |
@@ -28,8 +28,8 @@ Supports **Windows and macOS**. Maya 2024, 2025, and 2026.
 
 </div>
 
-[Buy Perpetual — $99](https://ncomes.gumroad.com/l/ndsupov){ .md-button .md-button--primary }
-[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/qkscq){ .md-button }
+[Buy Perpetual — $49](https://ncomes.gumroad.com/l/ndsupov){ .md-button .md-button--primary }
+[Buy Annual — $25/yr](https://ncomes.gumroad.com/l/qkscq){ .md-button }
 
 ---
 
@@ -41,7 +41,7 @@ Supports **Windows**. Unreal Engine 5.4, 5.5, 5.6, and 5.7.
 
 | | Perpetual | Annual |
 |---|---|---|
-| **Price** | $99 USD | $35 USD/year |
+| **Price** | $49 USD | $25 USD/year |
 | Unreal Engine 5.4 – 5.7 | ✓ | ✓ |
 | Windows | ✓ | ✓ |
 | All Editor Features | ✓ | ✓ |
@@ -52,8 +52,8 @@ Supports **Windows**. Unreal Engine 5.4, 5.5, 5.6, and 5.7.
 
 </div>
 
-[Buy Perpetual — $99](https://ncomes.gumroad.com/l/mopwol){ .md-button .md-button--primary }
-[Buy Annual — $35/yr](https://ncomes.gumroad.com/l/xvvfbe){ .md-button }
+[Buy Perpetual — $49](https://ncomes.gumroad.com/l/mopwol){ .md-button .md-button--primary }
+[Buy Annual — $25/yr](https://ncomes.gumroad.com/l/xvvfbe){ .md-button }
 
 ---
 
@@ -66,8 +66,8 @@ at a discounted price. One license key covers both DCCs.
 
 | | Perpetual | Annual |
 |---|---|---|
-| **Price** | $140 USD | $40 USD/year |
-| ~~$198 if bought separately~~ | Save $58 | ~~$70/yr~~ Save $30/yr |
+| **Price** | $75 USD | $30 USD/year |
+| ~~$98 if bought separately~~ | Save $23 | ~~$50/yr~~ Save $20/yr |
 | Maya 2024, 2025, 2026 | ✓ | ✓ |
 | Unreal Engine 5.4 – 5.7 | ✓ | ✓ |
 | Windows (Unreal), Windows/macOS (Maya) | ✓ | ✓ |
@@ -79,8 +79,8 @@ at a discounted price. One license key covers both DCCs.
 
 </div>
 
-[Buy Bundle Perpetual — $140](https://ncomes.gumroad.com/l/wuvhoh){ .md-button .md-button--primary }
-[Buy Bundle Annual — $40/yr](https://ncomes.gumroad.com/l/xsexcb){ .md-button }
+[Buy Bundle Perpetual — $75](https://ncomes.gumroad.com/l/wuvhoh){ .md-button .md-button--primary }
+[Buy Bundle Annual — $30/yr](https://ncomes.gumroad.com/l/xsexcb){ .md-button }
 
 ---
 

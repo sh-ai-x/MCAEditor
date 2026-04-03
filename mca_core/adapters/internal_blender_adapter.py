@@ -367,14 +367,19 @@ class InternalBlenderAdapter(DCCAdapter):
 
             if "." in partial:
                 # Completing an attribute on an object (e.g. "bpy.context.").
+                import types
                 obj_part = partial.rsplit(".", 1)[0]
                 attr_prefix = partial.rsplit(".", 1)[1]
                 obj = eval(obj_part, __main__.__dict__)
+                # Filter out module-type attributes — these are the
+                # module's own imports and clutter the completion list.
                 attrs = [
                     x for x in dir(obj)
-                    if x.startswith(attr_prefix) and not x.startswith("__")
+                    if x.startswith(attr_prefix)
+                    and not x.startswith("__")
+                    and not isinstance(getattr(obj, x, None), types.ModuleType)
                 ]
-                for attr in attrs[:30]:
+                for attr in attrs[:200]:
                     completions.append({
                         "label": attr,
                         "detail": "Python",
@@ -383,7 +388,7 @@ class InternalBlenderAdapter(DCCAdapter):
             else:
                 # Completing a top-level name from __main__ namespace.
                 names = [x for x in dir(__main__) if x.startswith(partial)]
-                for name in names[:30]:
+                for name in names[:200]:
                     completions.append({
                         "label": name,
                         "detail": "Python",

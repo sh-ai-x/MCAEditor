@@ -65,14 +65,20 @@ _PYFLAKES_ERROR_TYPES = (
 # Public API
 # =============================================================================
 
-def analyze_python(code):
+def analyze_python(code, known_globals=None):
     """
     Run all available analysis tiers on Python source code.
 
     Tier 1 (compile) always runs first. If a syntax error is found,
     Tier 2 is skipped because pyflakes can't parse broken syntax.
 
+    *known_globals* is an optional set of names that are known to exist
+    at runtime (e.g. imported in other open tabs or listed in the
+    project's forced-imports setting).  Any pyflakes "undefined name"
+    diagnostic whose name appears in this set is silently suppressed.
+
     :param str code: Python source code to analyze.
+    :param set known_globals: Optional set of names to treat as defined.
     :return: List of diagnostic dicts sorted by line number.
     :rtype: list
     """
@@ -87,7 +93,7 @@ def analyze_python(code):
 
     # --- Tier 2: pyflakes for warnings and undefined names ---
     if _HAS_PYFLAKES:
-        pyflakes_diags = _check_pyflakes(code)
+        pyflakes_diags = _check_pyflakes(code, known_globals=known_globals)
         diagnostics.extend(pyflakes_diags)
 
     # Sort by line number for consistent display order.
@@ -135,7 +141,7 @@ def _check_syntax(code):
 # Tier 2 — Pyflakes Analysis
 # =============================================================================
 
-def _check_pyflakes(code):
+def _check_pyflakes(code, known_globals=None):
     """
     Run pyflakes on the code and collect diagnostics.
 
@@ -143,7 +149,12 @@ def _check_pyflakes(code):
     them to stderr. Each pyflakes message class is mapped to either
     "error" or "warning" severity.
 
+    When *known_globals* is provided, any "undefined name 'X'" diagnostic
+    where X is in the set is dropped — the name exists at runtime even
+    though it's not imported in this file.
+
     :param str code: Python source code (must be valid syntax).
+    :param set known_globals: Optional set of names to suppress.
     :return: List of diagnostic dicts from pyflakes.
     :rtype: list
     """
@@ -156,6 +167,20 @@ def _check_pyflakes(code):
     except Exception:
         # If pyflakes crashes for any reason, don't break the editor.
         logger.debug("pyflakes analysis failed", exc_info=True)
+
+    # Filter out "undefined name" diagnostics for names that are known
+    # to exist at runtime (imported in other open tabs or forced imports).
+    if known_globals:
+        filtered = []
+        for diag in diagnostics:
+            # UndefinedName messages follow the pattern: "undefined name 'X'"
+            if diag["severity"] == "error" and diag["message"].startswith("undefined name '"):
+                # Extract the name between the single quotes.
+                name = diag["message"][len("undefined name '"):-1]
+                if name in known_globals:
+                    continue
+            filtered.append(diag)
+        diagnostics = filtered
 
     return diagnostics
 
