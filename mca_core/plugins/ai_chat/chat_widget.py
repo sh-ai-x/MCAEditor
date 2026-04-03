@@ -324,6 +324,59 @@ def _streaming_to_html(text):
     return "".join(html_parts)
 
 
+# --- Word-Wrap Label Fix for QScrollArea ------------------------------------
+# Standard QLabel with wordWrap + RichText inside nested layouts in a
+# QScrollArea has a well-known sizing bug: sizeHint() returns height for
+# the preferred (non-wrapped) text width, but the actual available width
+# in a narrow chat panel is much smaller.  The layout allocates the
+# inflated height, creating massive empty vertical gaps between messages.
+#
+# _WrappingLabel overrides sizeHint() to use the actual widget width,
+# and forces a geometry update on resize so the layout converges to the
+# correct compact height.
+
+
+class _WrappingLabel(QLabel):
+    """
+    QLabel that sizes correctly with word-wrap inside scroll areas.
+
+    Overrides ``sizeHint`` to calculate height based on the actual widget
+    width (via ``heightForWidth``) instead of the preferred (non-wrapped)
+    width.  Also triggers a geometry update on horizontal resize so the
+    parent layout re-queries sizeHint and converges to the right height.
+
+    :param str text: Initial label text.
+    :param QWidget parent: Parent widget.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        # Allow the label to be as narrow as the layout needs.
+        self.setMinimumWidth(1)
+
+    def sizeHint(self):
+        """Return height based on actual width, not preferred width."""
+        w = self.width()
+        # On the first layout pass width may be 0 — use parent's width
+        # as a reasonable approximation so we don't over-allocate.
+        if w <= 1 and self.parent():
+            w = self.parent().width()
+        if w > 1 and self.wordWrap():
+            h = self.heightForWidth(w)
+            if h > 0:
+                return QSize(w, h)
+        return super().sizeHint()
+
+    def resizeEvent(self, event):
+        """Force layout recalculation when width changes."""
+        super().resizeEvent(event)
+        # Width changed — our sizeHint depends on width, so tell the
+        # layout system to re-query it.
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()
+
+
 # --- Stylesheet Fragments ---------------------------------------------------
 
 _CHAT_AREA_STYLE = """
@@ -527,6 +580,14 @@ class MessageBubble(QFrame):
         content_widget = self._build_content(text)
         bubble_layout.addWidget(content_widget)
 
+        # Propagate heightForWidth up the container chain so the
+        # layout correctly queries word-wrapped labels for their
+        # height at the actual available width.
+        for widget in (content_widget, bubble, self):
+            sp = widget.sizePolicy()
+            sp.setHeightForWidth(True)
+            widget.setSizePolicy(sp)
+
         outer_layout.addWidget(bubble, 1)
 
         # User messages get right alignment via a spacer on the left (added above).
@@ -569,8 +630,7 @@ class MessageBubble(QFrame):
                 else:
                     code = inner
 
-                code_label = QLabel(code.strip())
-                code_label.setWordWrap(True)
+                code_label = _WrappingLabel(code.strip())
                 code_label.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
@@ -589,9 +649,8 @@ class MessageBubble(QFrame):
             else:
                 # Prose text — convert Markdown to HTML for rich rendering.
                 html_content = _markdown_to_html(part.strip())
-                text_label = QLabel(html_content)
+                text_label = _WrappingLabel(html_content)
                 text_label.setTextFormat(Qt.TextFormat.RichText)
-                text_label.setWordWrap(True)
                 text_label.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
@@ -1293,10 +1352,13 @@ class AIChatWidget(QWidget):
                 self._streaming_label.setVisible(True)
 
         # Update the streaming label with formatted HTML.
+        # _WrappingLabel handles its own sizing via sizeHint/resizeEvent —
+        # do NOT call adjustSize() here, it forces the label to resize
+        # based on the (wrong) preferred-width sizeHint and causes gaps.
         if self._streaming_label is not None:
             html = _streaming_to_html(self._current_text)
             self._streaming_label.setText(html)
-            self._streaming_label.adjustSize()
+            self._streaming_label.updateGeometry()
 
         # Auto-scroll to the bottom.
         self._scroll_to_bottom()
@@ -1511,9 +1573,8 @@ class AIChatWidget(QWidget):
 
         # Streaming text label (updated incrementally, hidden until first token).
         # Uses RichText so markdown formatting renders live during streaming.
-        text_label = QLabel("")
+        text_label = _WrappingLabel("")
         text_label.setTextFormat(Qt.TextFormat.RichText)
-        text_label.setWordWrap(True)
         text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -1526,6 +1587,13 @@ class AIChatWidget(QWidget):
         )
         text_label.setVisible(False)
         bubble_layout.addWidget(text_label)
+
+        # Propagate heightForWidth through container chain so nested
+        # word-wrapped labels size correctly in the scroll area.
+        for widget in (bubble, container):
+            sp = widget.sizePolicy()
+            sp.setHeightForWidth(True)
+            widget.setSizePolicy(sp)
 
         outer_layout.addWidget(bubble, 1)
         # Right spacer to push bubble left (assistant alignment).

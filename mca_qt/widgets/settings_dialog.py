@@ -168,7 +168,8 @@ class SettingsDialog(QDialog):
         "Python",
     ]
 
-    def __init__(self, settings, action_registry=None, default_shortcuts=None, parent=None):
+    def __init__(self, settings, action_registry=None, default_shortcuts=None,
+                 hide_mel=False, parent=None):
         """
         Initialize the settings dialog and populate all pages.
 
@@ -179,10 +180,15 @@ class SettingsDialog(QDialog):
             representing the hard-coded defaults (before user customization).
             Used by "Restore Defaults" and to detect which shortcuts changed.
             If None, snapshots the live actions (legacy fallback).
+        :param bool hide_mel: When True, suppress all MEL-related categories,
+            tokens, and options (used by non-Maya hosts like Unreal Engine).
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
         self._settings = settings
+
+        # Whether to hide MEL-related UI elements (e.g. running inside UE).
+        self._hide_mel = hide_mel
 
         # Action registry for the keyboard shortcut editor.
         # Keys are clean command names, values are live QAction objects.
@@ -235,8 +241,9 @@ class SettingsDialog(QDialog):
             "QListWidget::item:hover:!selected { background-color: #3e3e42; }"
         )
 
-        # Populate the category list.
-        for name in self.CATEGORIES:
+        # Populate the category list, optionally skipping MEL.
+        categories = [c for c in self.CATEGORIES if not (self._hide_mel and c == "MEL")]
+        for name in categories:
             self._category_list.addItem(name)
 
         body.addWidget(self._category_list)
@@ -248,13 +255,14 @@ class SettingsDialog(QDialog):
         root_layout.addLayout(body, 1)
 
         # --- Build each page and add to the stack ---
-        # Order must match CATEGORIES so list index maps to page index.
+        # Order must match the filtered categories so list index maps to page index.
         self._build_general_page()
         self._build_fonts_colors_page()
         self._build_code_editor_page()
         self._build_tabs_spacing_page()
         self._build_keyboard_page()
-        self._build_mel_page()
+        if not self._hide_mel:
+            self._build_mel_page()
         self._build_output_page()
         self._build_python_page()
 
@@ -316,7 +324,9 @@ class SettingsDialog(QDialog):
         self._chk_check_modified = QCheckBox("Detect external file changes")
         self._chk_override_script_editor = QCheckBox("Replace Maya Script Editor")
         row2.addWidget(self._chk_check_modified)
-        row2.addWidget(self._chk_override_script_editor)
+        # Only show Maya Script Editor override when Maya is available.
+        if not self._hide_mel:
+            row2.addWidget(self._chk_override_script_editor)
         mw_layout.addLayout(row2)
 
         # Full-width checkboxes.
@@ -566,7 +576,9 @@ class SettingsDialog(QDialog):
         lang_group = QGroupBox("Language")
         lang_layout = QVBoxLayout(lang_group)
         self._lang_combo = QComboBox()
-        self._lang_combo.addItems(["Default", "MEL", "Python"])
+        # Only include MEL when the host supports it.
+        indent_langs = ["Default", "Python"] if self._hide_mel else ["Default", "MEL", "Python"]
+        self._lang_combo.addItems(indent_langs)
         lang_layout.addWidget(self._lang_combo)
         layout.addWidget(lang_group)
 
@@ -651,7 +663,11 @@ class SettingsDialog(QDialog):
 
         # Build the tree: one top-level node per language, children are tokens.
         # Store (lang, token_key) in each child item's data for lookup.
-        for lang, lang_label in [("python", "Python"), ("mel", "MEL")]:
+        # When hide_mel is set, skip MEL tokens entirely (UE has no MEL).
+        lang_list = [("python", "Python")]
+        if not self._hide_mel:
+            lang_list.append(("mel", "MEL"))
+        for lang, lang_label in lang_list:
             parent_item = QTreeWidgetItem(self._token_tree, [lang_label])
             parent_item.setExpanded(True)
             for token_key, display_name in get_tokens_for_language(lang):
@@ -692,7 +708,9 @@ class SettingsDialog(QDialog):
         preview_header = QHBoxLayout()
         preview_header.addWidget(QLabel("Preview:"))
         self._preview_lang_combo = QComboBox()
-        self._preview_lang_combo.addItems(["Python", "MEL"])
+        # Only show MEL preview option when MEL is available.
+        preview_langs = ["Python"] if self._hide_mel else ["Python", "MEL"]
+        self._preview_lang_combo.addItems(preview_langs)
         self._preview_lang_combo.currentIndexChanged.connect(self._on_preview_lang_changed)
         preview_header.addWidget(self._preview_lang_combo)
         preview_header.addStretch()
@@ -998,10 +1016,13 @@ class SettingsDialog(QDialog):
         self._chk_out_double_click = QCheckBox(
             "Double-click selects MEL variable prefix ($)"
         )
-        opt_layout.addWidget(self._chk_out_double_click)
+        # Only show MEL/Maya-specific output options when MEL is available.
+        if not self._hide_mel:
+            opt_layout.addWidget(self._chk_out_double_click)
 
         self._chk_out_disable_echo = QCheckBox("Suppress Maya echo-all on startup")
-        opt_layout.addWidget(self._chk_out_disable_echo)
+        if not self._hide_mel:
+            opt_layout.addWidget(self._chk_out_disable_echo)
 
         self._chk_out_word_wrap = QCheckBox("Wrap long lines")
         opt_layout.addWidget(self._chk_out_word_wrap)
@@ -1026,14 +1047,21 @@ class SettingsDialog(QDialog):
         self._highlight_list.setFixedHeight(140)
 
         # Each highlight item is checkable so users can toggle categories.
+        # Skip MEL items when the host doesn't support MEL.
         highlight_items = [
             ("Errors (Python)", "output_highlight_errors_py"),
-            ("Errors (MEL)", "output_highlight_errors_mel"),
             ("Warnings (Python)", "output_highlight_warnings_py"),
-            ("Warnings (MEL)", "output_highlight_warnings_mel"),
             ("Results (Python)", "output_highlight_results_py"),
-            ("Results (MEL)", "output_highlight_results_mel"),
         ]
+        if not self._hide_mel:
+            highlight_items = [
+                ("Errors (Python)", "output_highlight_errors_py"),
+                ("Errors (MEL)", "output_highlight_errors_mel"),
+                ("Warnings (Python)", "output_highlight_warnings_py"),
+                ("Warnings (MEL)", "output_highlight_warnings_mel"),
+                ("Results (Python)", "output_highlight_results_py"),
+                ("Results (MEL)", "output_highlight_results_mel"),
+            ]
         # Store mapping from list row to setting key for save/load.
         self._highlight_items_map = []
         for label, key in highlight_items:
@@ -1146,7 +1174,9 @@ class SettingsDialog(QDialog):
         gen_layout.addWidget(self._chk_py_hide_pyc)
 
         self._chk_py_pymel = QCheckBox("Pre-import PyMEL at startup")
-        gen_layout.addWidget(self._chk_py_pymel)
+        # Only show PyMEL option when Maya/MEL is available.
+        if not self._hide_mel:
+            gen_layout.addWidget(self._chk_py_pymel)
 
         self._chk_py_ac_quickhelp = QCheckBox("Show Quick Help on auto-complete")
         gen_layout.addWidget(self._chk_py_ac_quickhelp)
@@ -1189,7 +1219,9 @@ class SettingsDialog(QDialog):
         aco_layout.addWidget(self._chk_py_ac_builtins)
 
         self._chk_py_native_maya = QCheckBox("Maya introspection fallback")
-        aco_layout.addWidget(self._chk_py_native_maya)
+        # Only show Maya introspection option when Maya is available.
+        if not self._hide_mel:
+            aco_layout.addWidget(self._chk_py_native_maya)
 
         layout.addWidget(aco_group)
 
@@ -1270,18 +1302,19 @@ class SettingsDialog(QDialog):
             state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             self._highlight_list.item(i).setCheckState(state)
 
-        # --- MEL ---
-        self._chk_mel_errors.setChecked(s.get("mel_display_errors"))
-        self._chk_mel_smart_indent.setChecked(s.get("mel_smart_indent"))
-        self._chk_mel_indent_bracket.setChecked(s.get("mel_indent_to_bracket"))
-        self._chk_mel_close_bracket.setChecked(s.get("mel_close_bracket"))
-        self._chk_mel_close_quotes.setChecked(s.get("mel_close_quotes"))
-        self._chk_mel_trim_ws.setChecked(s.get("mel_trim_whitespace"))
-        self._chk_mel_newline.setChecked(s.get("mel_ensure_newline"))
-        self._chk_mel_dollar.setChecked(s.get("mel_double_click_dollar"))
-        self._chk_mel_ac_quickhelp.setChecked(s.get("mel_autocomplete_quickhelp"))
-        self._chk_mel_ac_ctrl.setChecked(s.get("mel_autocomplete_ctrlspace"))
-        self._chk_mel_ac_letters.setChecked(s.get("mel_autocomplete_on_letters"))
+        # --- MEL (skipped when hide_mel is set) ---
+        if not self._hide_mel:
+            self._chk_mel_errors.setChecked(s.get("mel_display_errors"))
+            self._chk_mel_smart_indent.setChecked(s.get("mel_smart_indent"))
+            self._chk_mel_indent_bracket.setChecked(s.get("mel_indent_to_bracket"))
+            self._chk_mel_close_bracket.setChecked(s.get("mel_close_bracket"))
+            self._chk_mel_close_quotes.setChecked(s.get("mel_close_quotes"))
+            self._chk_mel_trim_ws.setChecked(s.get("mel_trim_whitespace"))
+            self._chk_mel_newline.setChecked(s.get("mel_ensure_newline"))
+            self._chk_mel_dollar.setChecked(s.get("mel_double_click_dollar"))
+            self._chk_mel_ac_quickhelp.setChecked(s.get("mel_autocomplete_quickhelp"))
+            self._chk_mel_ac_ctrl.setChecked(s.get("mel_autocomplete_ctrlspace"))
+            self._chk_mel_ac_letters.setChecked(s.get("mel_autocomplete_on_letters"))
 
         # --- Python ---
         self._chk_py_errors.setChecked(s.get("py_display_errors"))
@@ -1369,18 +1402,19 @@ class SettingsDialog(QDialog):
             checked = self._highlight_list.item(i).checkState() == Qt.CheckState.Checked
             s.set(key, checked)
 
-        # --- MEL ---
-        s.set("mel_display_errors", self._chk_mel_errors.isChecked())
-        s.set("mel_smart_indent", self._chk_mel_smart_indent.isChecked())
-        s.set("mel_indent_to_bracket", self._chk_mel_indent_bracket.isChecked())
-        s.set("mel_close_bracket", self._chk_mel_close_bracket.isChecked())
-        s.set("mel_close_quotes", self._chk_mel_close_quotes.isChecked())
-        s.set("mel_trim_whitespace", self._chk_mel_trim_ws.isChecked())
-        s.set("mel_ensure_newline", self._chk_mel_newline.isChecked())
-        s.set("mel_double_click_dollar", self._chk_mel_dollar.isChecked())
-        s.set("mel_autocomplete_quickhelp", self._chk_mel_ac_quickhelp.isChecked())
-        s.set("mel_autocomplete_ctrlspace", self._chk_mel_ac_ctrl.isChecked())
-        s.set("mel_autocomplete_on_letters", self._chk_mel_ac_letters.isChecked())
+        # --- MEL (skipped when hide_mel is set) ---
+        if not self._hide_mel:
+            s.set("mel_display_errors", self._chk_mel_errors.isChecked())
+            s.set("mel_smart_indent", self._chk_mel_smart_indent.isChecked())
+            s.set("mel_indent_to_bracket", self._chk_mel_indent_bracket.isChecked())
+            s.set("mel_close_bracket", self._chk_mel_close_bracket.isChecked())
+            s.set("mel_close_quotes", self._chk_mel_close_quotes.isChecked())
+            s.set("mel_trim_whitespace", self._chk_mel_trim_ws.isChecked())
+            s.set("mel_ensure_newline", self._chk_mel_newline.isChecked())
+            s.set("mel_double_click_dollar", self._chk_mel_dollar.isChecked())
+            s.set("mel_autocomplete_quickhelp", self._chk_mel_ac_quickhelp.isChecked())
+            s.set("mel_autocomplete_ctrlspace", self._chk_mel_ac_ctrl.isChecked())
+            s.set("mel_autocomplete_on_letters", self._chk_mel_ac_letters.isChecked())
 
         # --- Python ---
         s.set("py_display_errors", self._chk_py_errors.isChecked())

@@ -1294,8 +1294,9 @@ class MCAEditorPanel(QWidget):
         project_name = self._active_project.name
 
         try:
-            # Stop background indexing and clear the symbol index.
-            self._stop_symbol_indexing()
+            # Stop background indexing but keep the finished index and
+            # folder list so reopening the same project skips re-indexing.
+            self._stop_symbol_indexing(clear_index=False)
 
             # Save the project's tabs before tearing down.
             self._save_context_session()
@@ -4598,10 +4599,18 @@ class MCAEditorPanel(QWidget):
         self._output.clear()
 
     def _show_settings(self):
+        # Hide MEL-related settings when the host doesn't support MEL
+        # (e.g. running inside Unreal Engine). Check whether "MEL" is
+        # still present in the language combo — ue_editor_host strips it.
+        mel_available = any(
+            self._lang_combo.itemText(i) == "MEL"
+            for i in range(self._lang_combo.count())
+        )
         dlg = SettingsDialog(
             self._settings,
             action_registry=self._action_registry,
             default_shortcuts=self._default_shortcuts,
+            hide_mel=not mel_available,
             parent=self,
         )
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
@@ -4861,12 +4870,20 @@ class MCAEditorPanel(QWidget):
 
         logger.info("Started background symbol indexing")
 
-    def _stop_symbol_indexing(self):
+    def _stop_symbol_indexing(self, clear_index=True):
         """
-        Cancel the running worker, join with a short timeout, stop the
-        progress timer, and clear the index.
+        Cancel the running worker, join with a short timeout, and stop the
+        progress timer.
 
-        Called on project close and editor cleanup.
+        When *clear_index* is False the finished index and cached folder
+        list are preserved so that ``_start_symbol_indexing`` can detect
+        that the same project is being reopened and skip the expensive
+        re-scan.  Pass ``clear_index=True`` (the default) only on full
+        panel shutdown or when the index data is no longer useful.
+
+        :param bool clear_index: If True, destroy the index data and
+            clear the cached folder list.  If False, only cancel the
+            worker and timers.
         """
         # Stop the progress polling timer.
         if self._index_progress_timer is not None:
@@ -4884,12 +4901,13 @@ class MCAEditorPanel(QWidget):
             self._index_worker.join(timeout=2.0)
             self._index_worker = None
 
-        # Clear the index data and the cached folder list.
-        if self._symbol_index is not None:
-            self._symbol_index.clear()
-            self._symbol_index = None
-        self._completion_provider.set_symbol_index(None)
-        self._indexed_folders = None
+        if clear_index:
+            # Full teardown — destroy index data and cached folder list.
+            if self._symbol_index is not None:
+                self._symbol_index.clear()
+                self._symbol_index = None
+            self._completion_provider.set_symbol_index(None)
+            self._indexed_folders = None
 
         # Clear the action bar indicator.
         self.index_status_changed.emit("")

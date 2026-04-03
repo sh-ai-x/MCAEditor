@@ -59,15 +59,33 @@
 
 | Platform | Version | Status |
 |----------|---------|--------|
-| Maya 2024 Windows | v1.0.9 | Built + deployed |
-| Maya 2025 Windows | v1.0.9 | Built + deployed |
-| Maya 2026 Windows | v1.0.9 | Built + deployed |
+| Maya 2024 Windows | v1.0.9 | Rebuilt + deployed (hide_mel) |
+| Maya 2025 Windows | v1.0.9 | Rebuilt + deployed (hide_mel) |
+| Maya 2026 Windows | v1.0.9 | Rebuilt + deployed (hide_mel) |
 | Maya 2024 macOS | v1.0.9 | Built + deployed |
 | Maya 2025 macOS | v1.0.9 | Built + deployed |
 | Maya 2026 macOS | v1.0.9 | Built + deployed |
-| UE 5.5 Windows | v1.0.9 | Built (zip ready) |
-| UE 5.6 Windows | v1.0.9 | Built + deployed to Wayward |
-| UE 5.7 Windows | v1.0.9 | Built (zip ready) |
+| UE 5.5 Windows | v1.0.9 | Rebuilt (zip ready, hide_mel) |
+| UE 5.6 Windows | v1.0.9 | Rebuilt + deployed to Wayward (hide_mel) |
+| UE 5.7 Windows | v1.0.9 | Rebuilt (zip ready, hide_mel) |
+
+---
+
+### 8. Hide MEL from UE Settings Dialog
+- **Problem**: Settings > Appearance showed MEL tokens, MEL page was accessible, and Maya-specific options (Script Editor override, PyMEL, echo suppress) were visible when running in Unreal Engine
+- **Fix**: Added `hide_mel` parameter to `SettingsDialog.__init__()`. When True:
+  - Removes "MEL" from the category list sidebar
+  - Skips building the MEL settings page entirely
+  - Removes MEL tokens from the Appearance color tree
+  - Removes "MEL" from the Appearance preview language combo
+  - Removes MEL items from Output highlight toggles
+  - Hides "Replace Maya Script Editor", "Pre-import PyMEL", "Suppress Maya echo-all", "MEL variable prefix ($)", and "Maya introspection fallback" checkboxes
+- `editor_panel.py:_show_settings()` detects MEL availability by checking if "MEL" is in the language combo (already stripped by `ue_editor_host.py:_strip_mel_from_ui()`)
+- **Files changed**: `settings_dialog.py`, `editor_panel.py`
+
+### 9. UE Deployment Fix
+- **Problem**: v1.0.9 UE builds existed in `dist/` but were never copied to Wayward — deployed plugin still had v1.0.8 files (Apr 1 timestamps)
+- **Fix**: Clean-deployed v1.0.9 Content/Python/ to Wayward and cleared runtime `__pycache__` dirs
 
 ---
 
@@ -108,28 +126,46 @@ Three root causes identified and fixed for autocomplete not working on macOS:
 
 ---
 
+## Windows Follow-up Session (2026-04-02 evening)
+
+### 10. Chat Panel Empty Space Fix (`chat_widget.py`)
+- **Problem**: Massive empty vertical gaps between messages in the AI chat panel, especially visible in UE
+- **Root cause**: QLabel with `setWordWrap(True)` + RichText inside nested layouts in a QScrollArea — `sizeHint()` returns height for the preferred (non-wrapped) text width, but the chat panel is narrow. Layout allocates inflated height, creating gaps.
+- **Fix**: Created `_WrappingLabel(QLabel)` subclass that overrides `sizeHint()` to use `heightForWidth(actualWidth)` and calls `updateGeometry()` on resize. Propagated `heightForWidth(True)` on size policies of intermediate containers (content widget, bubble frame, MessageBubble). Replaced `adjustSize()` with `updateGeometry()` in streaming token handler.
+- **Files changed**: `mca_core/plugins/ai_chat/chat_widget.py`
+
+### 11. Windows Autocomplete + macOS Fixes Merged
+- Pulled macOS autocomplete fixes to Windows and rebuilt all Maya + UE versions
+- Key fixes applied: `sys.modules` module filter (keeps `os.path`), limit 200→500, `__import__()` fallback, cross-tab completions in autocomplete, focusOut race condition fix
+
+### 12. Hide MEL from UE Settings Dialog (continued)
+- `settings_dialog.py` and `editor_panel.py` changes deployed with UE rebuild
+
+---
+
 ## Build Status (Updated)
 
 | Platform | Version | Status |
 |----------|---------|--------|
-| Maya 2024 Windows | v1.0.9 | Built + deployed |
-| Maya 2025 Windows | v1.0.9 | Built + deployed |
-| Maya 2026 Windows | v1.0.9 | Built + deployed |
-| Maya 2024 macOS | v1.0.9 | **Rebuilt + deployed (autocomplete fixed)** |
-| Maya 2025 macOS | v1.0.9 | **Rebuilt + deployed (autocomplete fixed)** |
-| Maya 2026 macOS | v1.0.9 | **Rebuilt + deployed (autocomplete fixed)** |
-| UE 5.5 Windows | v1.0.9 | Built (zip ready) |
-| UE 5.6 Windows | v1.0.9 | Built + deployed to Wayward |
-| UE 5.7 Windows | v1.0.9 | Built (zip ready) |
+| Maya 2024 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
+| Maya 2025 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
+| Maya 2026 Windows | v1.0.9 | **Rebuilt + deployed (autocomplete + chat fix)** |
+| Maya 2024 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
+| Maya 2025 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
+| Maya 2026 macOS | v1.0.9 | Rebuilt + deployed (autocomplete fixed) |
+| UE 5.5 Windows | v1.0.9 | **Rebuilt (zip ready, autocomplete + chat fix)** |
+| UE 5.6 Windows | v1.0.9 | **Rebuilt + deployed to Wayward** |
+| UE 5.7 Windows | v1.0.9 | **Rebuilt (zip ready, autocomplete + chat fix)** |
 
 ---
 
 ## Known Issues
-- Website not redeployed with v1.0.9 download zips yet — waiting on Mac/UE testing
+- **REGRESSION**: Maya Windows — editor re-indexes every time you close and reopen, bogging down Maya. Needs investigation.
+- Website not redeployed with v1.0.9 download zips yet — waiting on testing
 
 ---
 
-## Files Modified (12 files, original session)
+## Files Modified (original session)
 - `mca_core/__init__.py` — version bump 1.0.8 → 1.0.9
 - `mca_core/analyzer.py` — `known_globals` parameter for cross-tab suppression
 - `mca_core/config/color_scheme.py` — `imported_stdlib` + `imported_user` tokens
@@ -138,8 +174,8 @@ Three root causes identified and fixed for autocomplete not working on macOS:
 - `mca_core/adapters/blender_adapter.py` — autocomplete limit + module filter
 - `mca_core/adapters/internal_blender_adapter.py` — autocomplete limit + module filter
 - `mca_qt/widgets/code_editor.py` — smart home, smart backspace, imported name highlighting
-- `mca_qt/editor_panel.py` — `_collect_known_globals()` + provider wiring
-- `mca_qt/widgets/settings_dialog.py` — preview update for imported names
+- `mca_qt/editor_panel.py` — `_collect_known_globals()` + provider wiring + `hide_mel` detection
+- `mca_qt/widgets/settings_dialog.py` — preview update, imported names, `hide_mel` support
 - `website/docs/pricing.md` — new pricing
 - `website/docs/index.md` — new pricing on homepage buttons
 
@@ -150,3 +186,10 @@ Three root causes identified and fixed for autocomplete not working on macOS:
 - `mca_core/adapters/maya_adapter.py` — __import__ fallback, sys.modules filter, limit 200→500
 - `mca_core/adapters/blender_adapter.py` — limit 200→500
 - `mca_core/adapters/internal_blender_adapter.py` — limit 200→500
+
+## Files Modified (Windows follow-up session)
+- `mca_core/plugins/ai_chat/chat_widget.py` — `_WrappingLabel` fix for empty space in chat panel
+- `mca_qt/editor_panel.py` — hide_mel detection for UE settings
+- `mca_qt/widgets/settings_dialog.py` — hide_mel parameter support
+- `mca_unreal/Content/Python/ue_editor_host.py` — UE host updates
+- `CHANGELOG.md` — updated

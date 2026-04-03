@@ -1,5 +1,16 @@
 # MCA Editor Changelog
 
+## v1.0.9 — 2026-04-02
+- Smart Home key: first press goes to first non-whitespace character, second press to column 0
+- Smart Backspace: deletes to previous tab stop when cursor is in leading whitespace
+- Imported name highlighting: stdlib imports (teal) vs third-party/project imports (purple)
+- Cross-tab diagnostic suppression: imports from other open tabs no longer flagged as undefined
+- Autocomplete: fix missing completions after dot (raised adapter limit from 30 to 200)
+- Autocomplete: filter out module-type attributes from dot-completion results
+- Settings: hide MEL-related options when running in Unreal Engine
+- UE: preserve editor panel on close/reopen (skip re-indexing)
+- Pricing update: Maya/UE perpetual $49, annual $25, bundle perpetual $75, annual $30
+
 ## v1.0.8 — 2026-04-01
 - Fix terminal Ctrl+V paste when TUI apps (Claude Code, vim) are running
 - Fix ANSI parser: process all modes in multi-mode DEC private sequences

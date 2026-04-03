@@ -626,19 +626,18 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
     """
     global _mca_editor_window, _mca_app, _log_tailer, _last_qt_hwnd, _ue_owner_hwnd
 
-    # If already open and visible, just raise it.
+    # If the window already exists, just show and raise it.  The panel
+    # is kept alive when the user X-closes (not destroyed), so the
+    # symbol index, open tabs, and all state are preserved.
     if _mca_editor_window is not None:
         try:
-            if _mca_editor_window.isVisible():
-                _mca_editor_window.raise_()
-                _mca_editor_window.activateWindow()
-                _ue_log("Editor already open — raised to front")
-                return True
-            else:
-                # Window exists but user closed it with X — clean up so we
-                # can recreate fresh below.
-                _ue_log("Editor was closed (not visible) — cleaning up for reopen")
-                _close_editor()
+            _mca_editor_window.show()
+            _mca_editor_window.raise_()
+            _mca_editor_window.activateWindow()
+            if _window_geometry is not None:
+                _mca_editor_window.restoreGeometry(_window_geometry)
+            _ue_log("Editor reopened — panel preserved (no re-index)")
+            return True
         except RuntimeError:
             # C++ object deleted — recreate.
             _mca_editor_window = None
@@ -1250,17 +1249,19 @@ def _pump_qt():
     (this happens once after the first show). If so, re-applies the
     owner-window relationship with UE.
     """
-    global _last_qt_hwnd
+    global _last_qt_hwnd, _window_geometry
 
     # Detect if the user closed the editor via the X button while we were
-    # ticking. Save the log position so reopen picks up where we left off.
-    # Only check after the window has been shown at least once (_last_qt_hwnd != 0)
-    # to avoid a false positive on the first tick before show() completes.
+    # ticking.  Instead of destroying the panel (which wipes the symbol
+    # index), just hide the window and save geometry.  The panel stays
+    # alive so reopening is instant — no re-indexing or re-scanning.
+    # Full cleanup only happens on UE shutdown (_close_editor(shutting_down=True)).
     if _mca_editor_window is not None and _last_qt_hwnd:
         try:
             if not _mca_editor_window.isVisible():
-                _ue_log("Editor closed by user (X button) — saving state")
-                _close_editor()
+                _ue_log("Editor hidden by user (X button) — preserving panel")
+                _window_geometry = _mca_editor_window.saveGeometry()
+                _save_persistent_state(was_open=False, geometry=_window_geometry)
                 return
         except RuntimeError:
             # C++ object already deleted.
