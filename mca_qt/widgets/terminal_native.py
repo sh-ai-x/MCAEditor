@@ -170,6 +170,18 @@ class TerminalWidget(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
 
+        # Always show the vertical scrollbar so it permanently reserves
+        # its space in the viewport.  Without this, the scrollbar uses
+        # the default AsNeeded policy — it appears when scrollback grows
+        # (shrinking the viewport width), which triggers a resize that
+        # changes the column count, which clears the document and drops
+        # the scrollback, which hides the scrollbar, which re-grows the
+        # viewport...  This resize oscillation causes the terminal to
+        # "bounce" on every frame and destroys text selections instantly.
+        self._display.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+
         # Monospace font for terminal rendering.
         font = QFont("Consolas", self._font_size)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -447,9 +459,11 @@ class TerminalWidget(QWidget):
                     max_lines=new_scrollback_count
                 )
 
-                # Insert before the grid section.  The grid section starts
-                # at: (total blocks) - _rows.
-                grid_start = max(0, doc.blockCount() - self._rows)
+                # Insert before the grid section.  The grid boundary is
+                # tracked by _scrollback_rendered — everything from that
+                # block onward is the live grid.  This is more reliable
+                # than (blockCount - _rows) which breaks when rows change.
+                grid_start = self._scrollback_rendered
                 block = doc.findBlockByNumber(grid_start)
                 cursor = self._display.textCursor()
                 cursor.setPosition(block.position())
@@ -464,8 +478,12 @@ class TerminalWidget(QWidget):
             if self._dirty:
                 self._dirty = False
 
-                # The grid section is always the last _rows lines.
-                grid_start = max(0, doc.blockCount() - self._rows)
+                # The grid section starts right after rendered scrollback.
+                # Everything from _scrollback_rendered to end-of-document
+                # is replaced with the current parser grid.  This handles
+                # row count changes naturally — shrinking removes extra
+                # old grid blocks, growing adds new ones.
+                grid_start = self._scrollback_rendered
                 block = doc.findBlockByNumber(grid_start)
                 cursor = self._display.textCursor()
                 cursor.setPosition(block.position())
@@ -626,9 +644,27 @@ class TerminalWidget(QWidget):
                     # Fall through to default handler for selection support.
             elif etype == QEventType.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
-                    self._mouse_selecting = False
+                    # Don't clear _mouse_selecting immediately — Qt may
+                    # not have finalized the cursor selection state yet.
+                    # The render timer fires every 16ms and would find
+                    # hasSelection() == False, then destroy the grid text
+                    # before the selection is committed.  A short grace
+                    # period lets Qt finalize, after which hasSelection()
+                    # takes over as the render guard.
+                    QTimer.singleShot(150, self._finalize_mouse_selection)
 
         return super().eventFilter(obj, event)
+
+    def _finalize_mouse_selection(self):
+        """
+        End the mouse-selection guard after a short grace period.
+
+        Called via QTimer.singleShot(150ms) after MouseButtonRelease.
+        By this point Qt has finalized the cursor selection state, so
+        ``hasSelection()`` will return the correct value and take over
+        as the render-pause guard.
+        """
+        self._mouse_selecting = False
 
     def _handle_key_press(self, event):
         """
@@ -662,9 +698,15 @@ class TerminalWidget(QWidget):
                 self._backend.write(b"\x03")
             return True
 
-        # Any key other than copy clears the text selection so the
-        # render loop resumes.  Without this, hasSelection() stays True
-        # indefinitely after a selection and the display appears frozen.
+        # Bare modifier presses (Ctrl, Shift, Alt alone) must not clear
+        # the selection — the user is mid-chord (about to press Ctrl+C).
+        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift,
+                   Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            return False
+
+        # Any other key clears the text selection so the render loop
+        # resumes.  Without this, hasSelection() stays True indefinitely
+        # after a selection and the display appears frozen.
         cursor = self._display.textCursor()
         if cursor.hasSelection():
             cursor.clearSelection()
@@ -976,13 +1018,16 @@ class TerminalWidget(QWidget):
             if self._backend and self._alive:
                 self._backend.resize(new_rows, new_cols)
 
-            # Clear the document and reset scrollback tracking so the
-            # next render frame rebuilds from scratch.  Without this,
-            # a row-count change leaves stale blocks in the document
-            # that get mistaken for scrollback (blank lines at the top).
-            self._display.clear()
-            self._scrollback_rendered = 0
-
+            # Mark dirty so the next render frame rebuilds the grid.
+            # We do NOT clear the document here — Phase 2 of _render()
+            # uses _scrollback_rendered as the grid boundary and replaces
+            # everything from that point to the end of the document.
+            # This naturally handles both row increases (grid grows) and
+            # row decreases (old extra grid blocks are removed).
+            # Clearing the document on every resize caused a destructive
+            # oscillation: clear → scrollbar hides → viewport grows →
+            # cols change → clear again → loop forever, destroying any
+            # text selection and causing visible "bouncing".
             self._dirty = True
             logger.debug("Terminal resized to %dx%d", new_cols, new_rows)
 
