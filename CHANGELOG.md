@@ -1,5 +1,18 @@
 # MCA Editor Changelog
 
+## v1.0.10 — 2026-04-06
+- Fix Maya crash on editor close: replace blocking ReadFile with non-blocking PeekNamedPipe polling so terminal thread exits cleanly within 5ms
+- Fix Maya crash: QPlainTextEdit paint engine corruption — atomic edit blocks + signal blocking + re-entrancy guard during 60fps render
+- Fix Maya crash: keep QThread backend reference alive to prevent GC of running thread
+- Fix terminal: render timer lifecycle — only runs while process is alive (stops repaint cascade on exit)
+- Fix terminal: pywinpty read loop no longer exits on transient WinptyError
+- Fix terminal double cursor: track DECTCEM cursor visibility (ESC[?25l/h) so TUI apps render their own cursor without overlap
+- Fix terminal horizontal scrollbar: disable horizontal scroll, use exact monospace cell width, account for document margin
+- Add direct ConPTY fallback via ctypes for Windows 11 build 26200 where kernel32.CreatePseudoConsole is broken
+- Fix UE MCP server discovering zero tools: exclude unreal_tools/ from Cython compilation in setup.py
+- Fix MCP server venv: recreate with correct Python version to resolve pydantic_core ABI mismatch
+- Fix extraction cache: handle locked .pyd files when updating plugin while Maya is running (rename to .old.timestamp)
+
 ## v1.0.9 — 2026-04-02
 - Smart Home key: first press goes to first non-whitespace character, second press to column 0
 - Smart Backspace: deletes to previous tab stop when cursor is in leading whitespace

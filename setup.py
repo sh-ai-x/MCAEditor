@@ -158,8 +158,9 @@ def collect_extensions():
     py_files = []
     for package in packages:
         for root, dirs, files in os.walk(package):
-            # Skip __pycache__ and test directories.
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", "tests")]
+            # Skip __pycache__, test directories, and tool script directories.
+            # unreal_tools/ contains source text sent to UE — must stay as .py.
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", "tests", "unreal_tools")]
 
             for filename in files:
                 if not filename.endswith(".py"):

@@ -138,10 +138,12 @@ class TerminalWidget(QWidget):
         self._backend = None
 
         # Render timer — batches updates at ~60fps.
+        # Created here but NOT started until start() is called.  Running
+        # a 60fps timer with no active process causes repaint cascades
+        # that can crash Maya (ACCESS_VIOLATION in QRasterPaintEngine).
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(16)  # ~60fps.
         self._render_timer.timeout.connect(self._render)
-        self._render_timer.start()
 
     # --- UI Setup ------------------------------------------------------------
 
@@ -159,6 +161,14 @@ class TerminalWidget(QWidget):
         self._display.setUndoRedoEnabled(False)
         self._display.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._display.setCursorWidth(0)
+
+        # Hide the horizontal scrollbar — terminal lines should never
+        # exceed the widget width because the PTY column count matches
+        # the viewport.  A visible scrollbar wastes space and signals
+        # a mismatch between PTY cols and widget width.
+        self._display.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
 
         # Monospace font for terminal rendering.
         font = QFont("Consolas", self._font_size)
@@ -241,6 +251,10 @@ class TerminalWidget(QWidget):
         self._backend.start()
         self._alive = True
 
+        # Start the render timer now that we have an active process.
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
         logger.info("Terminal started: %dx%d", self._cols, self._rows)
 
         # Schedule a deferred dimension recalculation after 200ms.
@@ -255,9 +269,15 @@ class TerminalWidget(QWidget):
 
         Safe to call multiple times.
         """
+        self._render_timer.stop()
         if self._backend:
             self._backend.terminate()
-            self._backend = None
+            # Do NOT set self._backend = None here.  The QThread may
+            # still be running if wait() timed out.  Dropping the last
+            # reference causes Python to GC the QThread while its thread
+            # is active → ACCESS_VIOLATION crash.  The backend is a child
+            # of this widget, so Qt will destroy it when the widget dies
+            # (after the thread has had time to finish).
         self._alive = False
 
     def is_alive(self):
@@ -285,6 +305,11 @@ class TerminalWidget(QWidget):
 
         :param int exit_code: The child process exit code.
         """
+        # Flush remaining data, then stop the render timer.
+        if self._dirty:
+            self._render()
+        self._render_timer.stop()
+
         self._alive = False
         self.process_exited.emit(exit_code)
         logger.info("Terminal process exited with code %d", exit_code)
@@ -379,6 +404,12 @@ class TerminalWidget(QWidget):
         # Get the visible grid and cursor position.
         grid_lines = self._parser.get_visible_lines()
         cursor_row, cursor_col = self._parser.get_cursor_position()
+
+        # Only draw our block cursor when the parser reports it visible.
+        # TUI apps (Claude Code, vim) send ESC[?25l to hide the hardware
+        # cursor and render their own — drawing ours too causes double cursors.
+        if not self._parser.is_cursor_visible():
+            cursor_row, cursor_col = -1, -1
 
         # Check if the user has scrolled into the scrollback (history)
         # area above the live grid.  If they're reading history, don't
@@ -883,8 +914,11 @@ class TerminalWidget(QWidget):
         font = self._display.font()
         metrics = QFontMetricsF(font)
 
-        # Use the advance width of a space character for column calculation.
-        char_width = metrics.averageCharWidth()
+        # Use the advance width of a representative character.  For monospace
+        # fonts (Consolas), horizontalAdvance("M") gives the exact cell width.
+        # averageCharWidth() can be slightly smaller, leading to column counts
+        # that exceed the actual number of characters that fit in the viewport.
+        char_width = metrics.horizontalAdvance("M")
         char_height = metrics.height()
 
         if char_width <= 0 or char_height <= 0:
@@ -899,7 +933,12 @@ class TerminalWidget(QWidget):
         if width < 50 or height < 50:
             return
 
-        new_cols = max(20, int(width / char_width))
+        # Subtract the document margin (default 4px per side) so terminal
+        # lines fit inside the viewport without triggering overflow.
+        doc_margin = self._display.document().documentMargin()
+        usable_width = width - (doc_margin * 2)
+
+        new_cols = max(20, int(usable_width / char_width))
         new_rows = max(5, int(height / char_height))
 
         if new_cols != self._cols or new_rows != self._rows:

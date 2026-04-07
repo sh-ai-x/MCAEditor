@@ -180,12 +180,21 @@ def _extract_payload(extract_dir):
     Extracts into a temporary directory first, then moves into place.
     This prevents a partial extraction if Maya crashes mid-extract.
 
+    On Windows, compiled .pyd files may be locked by the running Maya
+    process, preventing shutil.rmtree() from deleting the old cache.
+    In that case, the old directory is renamed to a .old suffix and
+    cleaned up on the next extraction or Maya restart.
+
     :param str extract_dir: Target extraction directory.
     """
     import shutil
     import tempfile
 
     _logger.info("MCA Editor %s — extracting to %s", _VERSION, extract_dir)
+
+    # Clean up any leftover .old directories from previous extractions
+    # that couldn't be deleted because .pyd files were still locked.
+    _cleanup_old_dirs(extract_dir)
 
     # Decode
     payload_bytes = base64.b64decode(_PAYLOAD)
@@ -202,9 +211,26 @@ def _extract_payload(extract_dir):
         with open(version_file, "w") as f:
             f.write("{}:{}".format(_VERSION, _BUILD_HASH))
 
-        # Remove old install if it exists
+        # Remove old install if it exists.  On Windows, .pyd files
+        # loaded by the current Maya process are locked and cannot be
+        # deleted.  Fall back to renaming the old directory so the new
+        # one can take its place — the old one gets cleaned up next time.
         if os.path.isdir(extract_dir):
-            shutil.rmtree(extract_dir)
+            try:
+                shutil.rmtree(extract_dir)
+            except (PermissionError, OSError) as rm_err:
+                _logger.warning(
+                    "Cannot remove old cache (files locked by running process): %s "
+                    "— renaming to .old suffix", rm_err)
+                # Rename with timestamp to avoid collisions.
+                import time
+                old_dir = extract_dir + ".old.{}".format(int(time.time()))
+                try:
+                    os.rename(extract_dir, old_dir)
+                    _logger.info("Renamed locked cache to: %s", old_dir)
+                except OSError as rename_err:
+                    _logger.error("Cannot rename old cache either: %s", rename_err)
+                    raise rm_err
 
         # Move temp dir into place
         shutil.move(temp_dir, extract_dir)
@@ -216,6 +242,33 @@ def _extract_payload(extract_dir):
         if os.path.isdir(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
         raise
+
+
+def _cleanup_old_dirs(extract_dir):
+    """
+    Remove leftover ``.old.*`` directories from previous extractions.
+
+    When .pyd files are locked by a running Maya process, the old cache
+    directory is renamed instead of deleted.  This function cleans up
+    those renamed directories on subsequent launches (when the files are
+    no longer locked).
+
+    :param str extract_dir: The base extraction directory path.
+    """
+    import shutil
+    parent = os.path.dirname(extract_dir)
+    base = os.path.basename(extract_dir)
+    if not os.path.isdir(parent):
+        return
+    for entry in os.listdir(parent):
+        if entry.startswith(base + ".old."):
+            old_path = os.path.join(parent, entry)
+            try:
+                shutil.rmtree(old_path)
+                _logger.info("Cleaned up old cache: %s", old_path)
+            except OSError:
+                # Still locked — will get it next time.
+                pass
 
 
 def _ensure_extracted():

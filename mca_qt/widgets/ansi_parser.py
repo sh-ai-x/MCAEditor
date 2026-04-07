@@ -186,6 +186,14 @@ class AnsiParser:
         # vim, etc.) can distinguish pasted text from typed keystrokes.
         self._bracketed_paste = False
 
+        # Cursor visibility (DEC private mode 25 — DECTCEM).
+        # TUI apps (Claude Code, vim, etc.) send ESC[?25l to hide the
+        # hardware cursor and render their own cursor via ANSI escape
+        # sequences (inverse video, underline, etc.).  When hidden, the
+        # terminal frontend should NOT draw its own block cursor —
+        # otherwise both cursors are visible simultaneously.
+        self._cursor_visible = True
+
     # --- Grid Construction ---------------------------------------------------
 
     def _make_grid(self, rows, cols):
@@ -424,6 +432,19 @@ class AnsiParser:
         """
         return (self._cursor_row, self._cursor_col)
 
+    def is_cursor_visible(self):
+        """
+        Return whether the cursor should be drawn by the frontend.
+
+        TUI apps send ESC[?25l to hide the cursor and render their own
+        via ANSI escape sequences.  When False, the frontend must NOT
+        draw its own block cursor to avoid a double-cursor artifact.
+
+        :return: True if the cursor should be drawn.
+        :rtype: bool
+        """
+        return self._cursor_visible
+
     def get_title(self):
         """
         Return the terminal title (set via OSC escape sequences).
@@ -657,6 +678,11 @@ class AnsiParser:
                             self._enter_alt_screen()
                         else:
                             self._leave_alt_screen()
+                    elif mode == 25:
+                        # DECTCEM — cursor visibility.  TUI apps send
+                        # ?25l to hide the hardware cursor and render
+                        # their own.  ?25h restores it on exit.
+                        self._cursor_visible = (cmd == "h")
                     elif mode == 2004:
                         # Bracketed paste mode — when enabled, pasted
                         # text must be wrapped in ESC[200~ ... ESC[201~
@@ -666,7 +692,6 @@ class AnsiParser:
                         logger.debug("Bracketed paste mode %s (alt_screen=%s)",
                                      "ENABLED" if self._bracketed_paste else "DISABLED",
                                      self._in_alt_screen)
-            # Other modes (cursor visibility, etc.) are silently ignored.
 
         elif cmd == "X":
             # ECH — Erase Character (blank N chars at cursor).
@@ -975,6 +1000,7 @@ class AnsiParser:
         self._alt_scrollback = self._scrollback
         self._alt_scroll_region = (self._scroll_top, self._scroll_bottom)
         self._alt_bracketed_paste = self._bracketed_paste
+        self._alt_cursor_visible = self._cursor_visible
 
         # Switch to a fresh screen.
         self._grid = self._make_grid(self._rows, self._cols)
@@ -983,6 +1009,7 @@ class AnsiParser:
         self._cursor_col = 0
         self._scroll_top = 0
         self._scroll_bottom = self._rows - 1
+        self._cursor_visible = True
         self._in_alt_screen = True
 
         logger.debug("Entered alternate screen buffer")
@@ -1005,6 +1032,7 @@ class AnsiParser:
             self._scrollback = self._alt_scrollback
             self._scroll_top, self._scroll_bottom = self._alt_scroll_region
             self._bracketed_paste = self._alt_bracketed_paste
+            self._cursor_visible = getattr(self, "_alt_cursor_visible", True)
 
         # Clear saved state.
         self._alt_grid = None
