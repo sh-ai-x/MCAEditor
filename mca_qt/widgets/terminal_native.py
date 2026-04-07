@@ -293,6 +293,10 @@ class TerminalWidget(QWidget):
         """Terminate the current session and start a new one."""
         self.terminate()
         self._parser.clear()
+        # Clear the document too — otherwise old scrollback blocks
+        # remain in the QPlainTextEdit and appear as blank lines.
+        self._display.clear()
+        self._scrollback_rendered = 0
         self._dirty = True
         # Small delay to let the old process clean up.
         QTimer.singleShot(100, self.start)
@@ -376,13 +380,17 @@ class TerminalWidget(QWidget):
         current_sb_len = self._parser.get_scrollback_length()
         new_scrollback_count = current_sb_len - self._scrollback_rendered
 
-        # If scrollback was trimmed (exceeded max) or cleared, we need
-        # to adjust our counter.  The document may have stale scrollback
-        # lines at the top, but that's acceptable — they just won't be
-        # updated.  Worst case, a clear() call resets everything.
+        # If scrollback shrank (alt screen enter/exit, scrollback trim),
+        # the document contains stale blocks from the old scrollback that
+        # will never be updated.  Clear the entire document and rebuild
+        # from scratch so no orphaned content remains.  Without this,
+        # alt-screen transitions leave hundreds of blank lines in the
+        # document from the previous screen's scrollback.
         if new_scrollback_count < 0:
-            self._scrollback_rendered = current_sb_len
-            new_scrollback_count = 0
+            self._display.clear()
+            self._scrollback_rendered = 0
+            new_scrollback_count = current_sb_len
+            self._dirty = True
 
         if not self._dirty and new_scrollback_count == 0:
             return
@@ -399,6 +407,14 @@ class TerminalWidget(QWidget):
         # stays True indefinitely after any selection, permanently
         # blocking the render loop and making the cursor appear frozen.
         if self._mouse_selecting:
+            return
+
+        # Also pause while the user has a text selection so they can
+        # press Ctrl+C to copy without the 60fps grid rebuild destroying
+        # their selection.  The copy_selection() method clears the
+        # selection after copying, which resumes rendering.  Any other
+        # key press also clears the selection (see _handle_key_press).
+        if self._display.textCursor().hasSelection():
             return
 
         # Get the visible grid and cursor position.
@@ -645,6 +661,14 @@ class TerminalWidget(QWidget):
                     self._echo_buffer = ""
                 self._backend.write(b"\x03")
             return True
+
+        # Any key other than copy clears the text selection so the
+        # render loop resumes.  Without this, hasSelection() stays True
+        # indefinitely after a selection and the display appears frozen.
+        cursor = self._display.textCursor()
+        if cursor.hasSelection():
+            cursor.clearSelection()
+            self._display.setTextCursor(cursor)
 
         # Ctrl+D — send EOF.
         if key == Qt.Key.Key_D and modifiers & Qt.KeyboardModifier.ControlModifier:

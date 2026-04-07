@@ -1030,9 +1030,41 @@ class AnsiParser:
             self._grid = self._alt_grid
             self._cursor_row, self._cursor_col = self._alt_cursor
             self._scrollback = self._alt_scrollback
-            self._scroll_top, self._scroll_bottom = self._alt_scroll_region
             self._bracketed_paste = self._alt_bracketed_paste
             self._cursor_visible = getattr(self, "_alt_cursor_visible", True)
+
+            # The terminal may have been resized while in the alt screen.
+            # The restored grid has the dimensions from when alt screen was
+            # entered, which may differ from the current _rows/_cols.
+            # Resize the restored grid to match so get_visible_lines()
+            # returns the correct number of rows and _scroll_bottom is
+            # valid.  Without this, a dimension mismatch causes blank
+            # gaps, index errors, and stale scroll region bounds.
+            restored_rows = len(self._grid)
+            restored_cols = len(self._grid[0]) if self._grid else 0
+            if restored_rows != self._rows or restored_cols != self._cols:
+                old_grid = self._grid
+                self._grid = self._make_grid(self._rows, self._cols)
+                for r in range(min(restored_rows, self._rows)):
+                    for c in range(min(restored_cols, self._cols)):
+                        old_cell = old_grid[r][c]
+                        new_cell = self._grid[r][c]
+                        new_cell.char = old_cell.char
+                        new_cell.fg_color = old_cell.fg_color
+                        new_cell.bg_color = old_cell.bg_color
+                        new_cell.bold = old_cell.bold
+                        new_cell.underline = old_cell.underline
+                        new_cell.italic = old_cell.italic
+
+            # Always reset scroll region to full screen after leaving
+            # alt screen.  The saved region used old dimensions and the
+            # shell will re-send DECSTBM if it needs a custom region.
+            self._scroll_top = 0
+            self._scroll_bottom = self._rows - 1
+
+            # Clamp cursor to current grid bounds.
+            self._cursor_row = min(self._cursor_row, self._rows - 1)
+            self._cursor_col = min(self._cursor_col, self._cols - 1)
 
         # Clear saved state.
         self._alt_grid = None
