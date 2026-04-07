@@ -681,22 +681,42 @@ class TerminalWidget(QWidget):
         modifiers = event.modifiers()
         text = event.text()
 
-        # Ctrl+C — smart behavior like Windows Terminal and GNOME Terminal:
-        # if the user has selected text, copy it; otherwise send interrupt
-        # (SIGINT / \x03).  Ctrl+Shift+C always copies regardless.
-        if key == Qt.Key.Key_C and modifiers & Qt.KeyboardModifier.ControlModifier:
-            has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-            has_selection = self._display.textCursor().hasSelection()
+        # --- Ctrl+key shortcuts (handled BEFORE selection clearing) ------
+        # All modifier shortcuts must be checked first so the selection-
+        # clearing code below doesn't interfere with their execution.
 
-            if has_shift or has_selection:
-                # Copy the selection to the clipboard.
-                self.copy_selection()
-            else:
-                # No selection — send interrupt to the shell.
-                if self._local_echo:
-                    self._echo_buffer = ""
-                self._backend.write(b"\x03")
-            return True
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+C — smart copy/interrupt like Windows Terminal.
+            if key == Qt.Key.Key_C:
+                has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                has_selection = self._display.textCursor().hasSelection()
+                if has_shift or has_selection:
+                    self.copy_selection()
+                else:
+                    if self._local_echo:
+                        self._echo_buffer = ""
+                    self._backend.write(b"\x03")
+                return True
+
+            # Ctrl+V / Ctrl+Shift+V — paste clipboard.
+            if key == Qt.Key.Key_V:
+                self.paste_clipboard()
+                return True
+
+            # Ctrl+D — send EOF.
+            if key == Qt.Key.Key_D:
+                self._backend.write(b"\x04")
+                return True
+
+            # Ctrl+Z — suspend (SIGTSTP).
+            if key == Qt.Key.Key_Z:
+                self._backend.write(b"\x1a")
+                return True
+
+            # Ctrl+L — clear screen.
+            if key == Qt.Key.Key_L:
+                self._backend.write(b"\x0c")
+                return True
 
         # Bare modifier presses (Ctrl, Shift, Alt alone) must not clear
         # the selection — the user is mid-chord (about to press Ctrl+C).
@@ -711,27 +731,6 @@ class TerminalWidget(QWidget):
         if cursor.hasSelection():
             cursor.clearSelection()
             self._display.setTextCursor(cursor)
-
-        # Ctrl+D — send EOF.
-        if key == Qt.Key.Key_D and modifiers & Qt.KeyboardModifier.ControlModifier:
-            self._backend.write(b"\x04")
-            return True
-
-        # Ctrl+Z — suspend (SIGTSTP).
-        if key == Qt.Key.Key_Z and modifiers & Qt.KeyboardModifier.ControlModifier:
-            self._backend.write(b"\x1a")
-            return True
-
-        # Ctrl+L — clear screen.
-        if key == Qt.Key.Key_L and modifiers & Qt.KeyboardModifier.ControlModifier:
-            self._backend.write(b"\x0c")
-            return True
-
-        # Ctrl+V or Ctrl+Shift+V — paste clipboard.
-        if (key == Qt.Key.Key_V and
-            modifiers & Qt.KeyboardModifier.ControlModifier):
-            self.paste_clipboard()
-            return True
 
         # Arrow keys — send ANSI cursor movement sequences.
         if key == Qt.Key.Key_Up:
@@ -923,6 +922,11 @@ class TerminalWidget(QWidget):
                 logger.info("paste_clipboard: bracketed paste OFF (alt_screen=%s), "
                             "sending %d bytes raw", in_alt, len(payload))
             self._backend.write(payload)
+
+            # Restore focus to the terminal display.  Clipboard access on
+            # Windows can briefly activate the clipboard owner window,
+            # causing the editor to lose keyboard focus.
+            self._display.setFocus()
         else:
             logger.warning("paste_clipboard: clipboard is empty")
 
