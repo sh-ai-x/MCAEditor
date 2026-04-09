@@ -448,10 +448,18 @@ class _MayaHotkeyFilter(QObject):
         seq_str = key_seq.toString()
 
         # Check all registered actions for a matching shortcut.
-        for action in self._panel._action_registry.values():
-            shortcut = action.shortcut()
-            if not shortcut.isEmpty() and shortcut.toString() == seq_str:
-                return action
+        # Individual actions are guarded with try/except because a stale
+        # QAction whose C++ object was garbage-collected will raise
+        # RuntimeError on any attribute access.  Skip the dead action
+        # instead of aborting the entire search.
+        for action in list(self._panel._action_registry.values()):
+            try:
+                shortcut = action.shortcut()
+                if not shortcut.isEmpty() and shortcut.toString() == seq_str:
+                    return action
+            except RuntimeError:
+                # C++ QAction already deleted — skip it.
+                continue
 
         return None
 
@@ -584,7 +592,18 @@ class _MayaHotkeyFilter(QObject):
                 )
 
                 if has_action_modifier:
-                    action = self._find_matching_action(event)
+                    # Try registered editor actions first (Find, Save, etc.).
+                    # Wrapped in try/except because stale QActions whose C++
+                    # objects were deleted will raise RuntimeError when we
+                    # call .shortcut() or .isEnabled().  Without this guard,
+                    # a single stale action crashes the entire dispatch and
+                    # all modifier shortcuts (including paste) silently stop.
+                    action = None
+                    try:
+                        action = self._find_matching_action(event)
+                    except RuntimeError:
+                        logger.debug("Stale action in registry during "
+                                     "shortcut match — skipping action dispatch")
                     if action and action.isEnabled():
                         action.trigger()
                         return True
@@ -608,24 +627,62 @@ class _MayaHotkeyFilter(QObject):
                     # outside our editor (focus hasn't transferred yet),
                     # use the widget we tried to focus in Phase 0.
                     if not focus or not self._widget_in_editor(focus):
+                        old_focus = focus
                         focus = getattr(self, "_focus_forced_widget", None)
+                        if key == Qt.Key.Key_V:
+                            logger.debug(
+                                "Ctrl+V: focusWidget=%s not in editor, "
+                                "using _focus_forced_widget=%s",
+                                type(old_focus).__name__ if old_focus else None,
+                                type(focus).__name__ if focus else None
+                            )
 
+                    if not focus:
+                        if key == Qt.Key.Key_V:
+                            logger.warning(
+                                "Ctrl+V: no focus widget and no "
+                                "_focus_forced_widget — paste dropped"
+                            )
                     if focus:
                         # Walk up the parent chain looking for a terminal.
                         terminal = self._find_parent_terminal(focus)
                         try:
                             if terminal:
-                                # Route through the terminal's eventFilter which
-                                # handles Ctrl+V paste, Ctrl+C interrupt, etc.
-                                # Pass terminal._display (not `focus`) because
-                                # the eventFilter checks `if obj is self._display:`
-                                # and rejects any other object.
-                                terminal.eventFilter(terminal._display, event)
+                                # Route through the terminal's eventFilter
+                                # which handles Ctrl+V paste, Ctrl+C
+                                # interrupt, etc.  Check liveness first —
+                                # a dead terminal's eventFilter returns
+                                # False (unhandled), and we must NOT fall
+                                # through to the direct-method path because
+                                # calling _display.paste() would inject raw
+                                # text into the terminal's visual display.
+                                alive = getattr(terminal, "_alive", False)
+                                if alive:
+                                    # Pass terminal._display (not `focus`)
+                                    # because the eventFilter checks
+                                    # `if obj is self._display:` and rejects
+                                    # any other object.
+                                    handled = terminal.eventFilter(
+                                        terminal._display, event
+                                    )
+                                    if not handled:
+                                        logger.debug(
+                                            "Terminal eventFilter returned "
+                                            "False for key=%s — event "
+                                            "consumed to block Maya", key
+                                        )
+                                else:
+                                    logger.debug(
+                                        "Terminal is dead (alive=%s) — "
+                                        "key=%s consumed to block Maya",
+                                        alive, key
+                                    )
                             else:
                                 # Standard text editing shortcuts — call the
                                 # method directly for maximum reliability.
-                                # Going through keyPressEvent can fail if focus
-                                # hasn't fully transferred on the first click.
+                                # Going through keyPressEvent can fail if
+                                # focus hasn't fully transferred on the first
+                                # click after activateWindow() on Win11.
                                 method_name = None
                                 ctrl_only = (modifiers == Qt.KeyboardModifier.ControlModifier)
                                 ctrl_shift = (modifiers == (
@@ -644,17 +701,67 @@ class _MayaHotkeyFilter(QObject):
                                 elif ctrl_shift and key == Qt.Key.Key_Z:
                                     # Ctrl+Shift+Z = redo on most platforms.
                                     method_name = "redo"
-                                if method_name and hasattr(focus, method_name):
+                                # Check if the focused widget can actually
+                                # accept the text operation.  Read-only
+                                # widgets (output panel) have paste()/cut()
+                                # methods that silently do nothing.  When
+                                # the focus is on a read-only widget or one
+                                # that lacks the method entirely, redirect
+                                # the operation to the active code editor.
+                                focus_is_readonly = (
+                                    hasattr(focus, "isReadOnly")
+                                    and focus.isReadOnly()
+                                )
+                                # Paste and cut modify the document — redirect
+                                # if the target is read-only.  Copy and
+                                # selectAll are fine on read-only widgets.
+                                needs_writable = method_name in ("paste", "cut")
+                                can_use_focus = (
+                                    method_name
+                                    and hasattr(focus, method_name)
+                                    and not (needs_writable and focus_is_readonly)
+                                )
+
+                                if can_use_focus:
+                                    if key == Qt.Key.Key_V:
+                                        logger.debug(
+                                            "Ctrl+V: calling %s.%s()",
+                                            type(focus).__name__, method_name
+                                        )
                                     getattr(focus, method_name)()
+                                elif method_name:
+                                    # The focused widget is read-only or
+                                    # doesn't support this text operation
+                                    # (e.g. file tree, output panel).  Try
+                                    # the panel's active code editor as a
+                                    # last resort — the user likely expects
+                                    # paste to go there.
+                                    editor = self._panel._current_editor()
+                                    if editor and hasattr(editor, method_name):
+                                        if key == Qt.Key.Key_V:
+                                            logger.debug(
+                                                "Ctrl+V: focus=%s can't %s "
+                                                "(readonly=%s), redirecting "
+                                                "to active editor %s",
+                                                type(focus).__name__,
+                                                method_name,
+                                                focus_is_readonly,
+                                                type(editor).__name__
+                                            )
+                                        getattr(editor, method_name)()
+                                    elif hasattr(focus, "keyPressEvent"):
+                                        focus.keyPressEvent(event)
                                 elif hasattr(focus, "keyPressEvent"):
                                     # Not a standard text op — fall back to
                                     # keyPressEvent for everything else.
                                     focus.keyPressEvent(event)
                         except RuntimeError:
-                            # The focused widget's C++ object was deleted between
-                            # the focusWidget() call and the dispatch.  This
-                            # happens when tabs close or widgets rebuild mid-event.
-                            pass
+                            # The focused widget's C++ object was deleted
+                            # between the focusWidget() call and the dispatch.
+                            # This happens when tabs close or widgets rebuild
+                            # mid-event.
+                            logger.debug("Widget deleted during key dispatch "
+                                         "(key=%s) — event dropped", key)
                     return True
 
         return super().eventFilter(watched, event)
