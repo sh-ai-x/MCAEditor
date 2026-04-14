@@ -464,11 +464,46 @@ class AnsiParser:
         return len(self._scrollback)
 
     def clear(self):
-        """Clear the entire grid and scrollback buffer."""
+        """
+        Clear the entire grid and scrollback buffer.
+
+        Also resets DEC private modes (bracketed paste, cursor visibility,
+        alt screen) and SGR state so a new shell session starts from a
+        clean slate.  Without this, state leaks across ``restart()``:
+        if Claude Code enabled bracketed paste (mode 2004) but exited
+        without clearing it, the next shell receives pastes wrapped in
+        ``ESC[200~...ESC[201~`` which breaks paste on simple shells.
+        """
         self._grid = self._make_grid(self._rows, self._cols)
         self._scrollback = []
         self._cursor_row = 0
         self._cursor_col = 0
+        # Reset DEC private modes so a fresh shell starts clean.
+        self._bracketed_paste = False
+        self._cursor_visible = True
+        self._in_alt_screen = False
+        # Clear saved alt-screen snapshots so a future alt-screen exit
+        # doesn't restore stale state from a previous session.
+        self._alt_grid = None
+        self._alt_cursor = None
+        self._alt_scrollback = None
+        self._alt_scroll_region = None
+        self._alt_bracketed_paste = None
+        # Reset scroll region to the full grid.
+        self._scroll_top = 0
+        self._scroll_bottom = self._rows - 1
+        # Reset SGR (color / bold / underline / italic / reverse) state.
+        self._fg = DEFAULT_FG
+        self._bg = DEFAULT_BG
+        self._bold = False
+        self._underline = False
+        self._italic = False
+        self._reverse = False
+        # Clear partial escape buffer — a half-parsed sequence from the
+        # previous session must not leak into the new one.
+        self._partial = ""
+        # Clear title so we don't display the old shell's tab title.
+        self._title = ""
 
     # --- Character Output ----------------------------------------------------
 

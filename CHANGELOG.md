@@ -1,5 +1,20 @@
 # MCA Editor Changelog
 
+## v1.0.13 — 2026-04-14
+- Autocomplete: `from X import ...` now suggests names from module X, including submodules discovered via pkgutil
+- Autocomplete: `from X.Y.` and `import X.Y.` offer submodule completions even before the package has been imported
+- Autocomplete: fix dotted attribute completion silently hiding submodules (removed faulty `x in sys.modules` filter)
+- Autocomplete: module imports cached per session so typing in an import line doesn't re-run package init on every keystroke
+
+## v1.0.12 — 2026-04-14
+- Fix Ctrl+V silently failing in the terminal after the shell exits: the terminal now auto-restarts and queues the paste
+- Fix stale QAction and stale focus-widget crashes in the Maya hotkey filter that could silently kill all Ctrl+ shortcuts
+- Fix bracketed paste mode leaking across terminal restart — paste would insert escape sequences literally in simple shells after a TUI app exited
+- Fix paste when focus is on the read-only output panel — now redirects to the active code editor
+- Fix terminal selection being destroyed by the 60fps render timer (intermittent copy failures)
+- Fix terminal blank-line accumulation after alt-screen TUI apps (Claude Code, vim) exited or resized
+- Fix terminal restart leaving stale scrollback in the display
+
 ## v1.0.10 — 2026-04-06
 - Fix Maya crash on editor close: replace blocking ReadFile with non-blocking PeekNamedPipe polling so terminal thread exits cleanly within 5ms
 - Fix Maya crash: QPlainTextEdit paint engine corruption — atomic edit blocks + signal blocking + re-entrancy guard during 60fps render

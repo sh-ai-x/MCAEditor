@@ -234,6 +234,17 @@ class TerminalWidget(QWidget):
         self._first_data_logged = False
         self._scrollback_rendered = 0
 
+        # Fully reset the parser.  Without this, DEC private modes
+        # (bracketed paste, alt screen, cursor visibility) leak from
+        # the previous shell session — if Claude Code enabled mode
+        # 2004 and exited without clearing it, the next shell receives
+        # pastes wrapped in ESC[200~...ESC[201~, which most interactive
+        # shells ignore but the few that don't (older cmd.exe, raw
+        # subprocess pipes) break on.  Belt-and-suspenders with
+        # restart() which also calls clear().
+        self._parser.clear()
+        self._display.clear()
+
         # Calculate dimensions from current widget size.
         # If the widget hasn't been laid out yet (common in Maya docked
         # panels), _calculate_dimensions() may silently keep defaults.
@@ -700,8 +711,14 @@ class TerminalWidget(QWidget):
 
             # Ctrl+V / Ctrl+Shift+V — paste clipboard.
             if key == Qt.Key.Key_V:
-                self.paste_clipboard()
-                return True
+                # paste_clipboard() returns False when the terminal is
+                # unable to accept the paste (dead backend, empty
+                # clipboard, etc.).  Returning False from _handle_key_press
+                # propagates up to the Maya hotkey filter's eventFilter
+                # call, which will then restart the terminal so the next
+                # paste lands successfully.
+                ok = self.paste_clipboard()
+                return bool(ok)
 
             # Ctrl+D — send EOF.
             if key == Qt.Key.Key_D:
@@ -901,34 +918,70 @@ class TerminalWidget(QWidget):
         standard bracket sequences so the program can distinguish
         pasted text from typed keystrokes.  Programs like Claude
         Code, vim, and fish rely on this to handle pastes correctly.
+
+        Returns True when bytes were actually dispatched to the shell,
+        False otherwise.  The Maya hotkey filter uses this to detect
+        silent failures (dead backend, empty clipboard) and surface
+        them to the user.
+
+        :return: True if paste bytes reached the backend, else False.
+        :rtype: bool
         """
+        # Guard against dead terminal / missing backend.  Both conditions
+        # MUST be checked together with the backend's own _running flag,
+        # because there is a brief window after the shell exits where the
+        # widget's _alive is still True but the backend thread has
+        # already cleared _running.  Writing during that window silently
+        # drops bytes.
         if not self._alive or not self._backend:
             logger.warning("paste_clipboard: terminal not alive or no backend "
                            "(alive=%s, backend=%s)", self._alive, self._backend)
-            return
-        clipboard = QApplication.clipboard()
-        text = clipboard.text()
-        if text:
-            payload = text.encode("utf-8")
-            # Wrap in bracketed paste sequences when the running program
-            # has enabled mode 2004 (e.g. Claude Code, vim, fish shell).
-            bracketed = self._parser._bracketed_paste
-            in_alt = self._parser._in_alt_screen
-            if bracketed:
-                logger.info("paste_clipboard: bracketed paste ON (alt_screen=%s), "
-                            "wrapping %d bytes", in_alt, len(payload))
-                payload = b"\x1b[200~" + payload + b"\x1b[201~"
-            else:
-                logger.info("paste_clipboard: bracketed paste OFF (alt_screen=%s), "
-                            "sending %d bytes raw", in_alt, len(payload))
-            self._backend.write(payload)
+            return False
+        if not getattr(self._backend, "_running", False):
+            logger.warning("paste_clipboard: backend thread not running — "
+                           "shell likely exited; dropping paste")
+            return False
 
-            # Restore focus to the terminal display.  Clipboard access on
-            # Windows can briefly activate the clipboard owner window,
-            # causing the editor to lose keyboard focus.
-            self._display.setFocus()
-        else:
+        clipboard = QApplication.clipboard()
+        # Guard clipboard access — QApplication.clipboard().text() can
+        # raise on Windows when another process is holding the clipboard
+        # open (common after GUI paste-loops).  Treat failure as empty
+        # clipboard rather than crashing the key dispatch.
+        try:
+            text = clipboard.text()
+        except Exception as exc:
+            logger.error("paste_clipboard: clipboard read failed: %s", exc)
+            return False
+
+        if not text:
             logger.warning("paste_clipboard: clipboard is empty")
+            return False
+
+        payload = text.encode("utf-8")
+        # Wrap in bracketed paste sequences when the running program
+        # has enabled mode 2004 (e.g. Claude Code, vim, fish shell).
+        bracketed = self._parser._bracketed_paste
+        in_alt = self._parser._in_alt_screen
+        if bracketed:
+            # DEBUG-level: paste happens on every Ctrl+V.  Logging INFO
+            # here spammed Maya's Script Editor during heavy usage.
+            logger.debug("paste_clipboard: bracketed paste ON (alt_screen=%s), "
+                         "wrapping %d bytes", in_alt, len(payload))
+            payload = b"\x1b[200~" + payload + b"\x1b[201~"
+        else:
+            logger.debug("paste_clipboard: bracketed paste OFF (alt_screen=%s), "
+                         "sending %d bytes raw", in_alt, len(payload))
+
+        # The backend.write() call catches its own exceptions and logs
+        # them.  We still attempt; if it fails internally the user sees
+        # no paste but the error is in the log.
+        self._backend.write(payload)
+
+        # Restore focus to the terminal display.  Clipboard access on
+        # Windows can briefly activate the clipboard owner window,
+        # causing the editor to lose keyboard focus.
+        self._display.setFocus()
+        return True
 
     # --- Context Menu --------------------------------------------------------
 

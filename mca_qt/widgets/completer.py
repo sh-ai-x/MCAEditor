@@ -17,6 +17,8 @@ Dependencies:
 import re
 import sys
 import logging
+import importlib
+import pkgutil
 
 from mca_qt.qt_compat import (
     QFrame, QListWidget, QListWidgetItem, QVBoxLayout,
@@ -58,6 +60,31 @@ MEL_KEYWORDS = (
 
 # Regex to extract identifiers from document text (3+ chars, word boundary).
 _WORD_RE = re.compile(r"\b[a-zA-Z_]\w{2,}\b")
+
+# --- Import-Context Regexes -------------------------------------------------
+# These match the line before the cursor to detect that the user is typing
+# an import statement.  Completion behavior branches based on which context
+# fires.
+
+# Matches "from X.Y.Z import " with the cursor positioned at the end
+# (possibly after a comma-separated list of previously-imported names).
+# Group 1 captures the source module path (e.g. "mca.common.paths").
+# Group 2 captures the partial name being typed (may be empty).
+_FROM_IMPORT_RE = re.compile(
+    r"^\s*from\s+([\w\.]+)\s+import\s+(?:[\w\s,]*?,\s*)?(\w*)$"
+)
+
+# Matches "from X.Y" or "from X.Y." — cursor is in the source-module
+# portion of a "from ... import ..." statement, BEFORE "import".
+# Group 1 captures everything after "from " up to the cursor.
+_FROM_MODULE_RE = re.compile(r"^\s*from\s+([\w\.]*)$")
+
+# Matches "import X.Y" or "import X.Y." — cursor is in the module path
+# of a plain "import ..." statement.
+# Group 1 captures the module path up to the cursor.
+_IMPORT_MODULE_RE = re.compile(
+    r"^\s*import\s+(?:[\w\.\s,]*?,\s*)?([\w\.]*)$"
+)
 
 
 # =============================================================================
@@ -121,6 +148,160 @@ class CompletionProvider:
         self._adapter_manager = adapter_manager
         # Optional project-wide symbol index (set when a project is opened).
         self._symbol_index = None
+        # Cache of import results so each module is imported at most once
+        # per session.  Maps fully-qualified module name to either the
+        # imported module object or None (on import failure, to avoid
+        # retrying).  Without this, every keystroke in an import line
+        # re-runs module-level code in the target package.
+        self._module_cache = {}
+        # Cache of the per-module name lists so we don't rebuild the
+        # list of public attributes + submodules on every keystroke.
+        self._module_names_cache = {}
+
+    def _import_module_cached(self, module_name):
+        """
+        Import a module by fully-qualified name, memoizing the result.
+
+        Running ``importlib.import_module`` on every keystroke would
+        re-execute the top-level code of every package the user is
+        typing into.  The cache stores both successful imports and
+        failures (as None) so repeated lookups are O(1).
+
+        :param str module_name: Dotted module path, e.g. ``"mca.common.paths"``.
+        :return: The imported module, or ``None`` if the import failed
+            or the name is empty.
+        :rtype: module or None
+        """
+        # Reject empty names up front so we don't poison the cache.
+        if not module_name:
+            return None
+
+        if module_name in self._module_cache:
+            return self._module_cache[module_name]
+
+        try:
+            # import_module walks the full dotted path and executes
+            # each package's __init__, so "mca.common.paths" loads
+            # mca → mca.common → mca.common.paths correctly.
+            mod = importlib.import_module(module_name)
+        except Exception as exc:
+            # Cache the failure so we don't keep retrying.
+            logger.debug(
+                "Module import failed for %r: %s", module_name, exc
+            )
+            self._module_cache[module_name] = None
+            return None
+
+        self._module_cache[module_name] = mod
+        return mod
+
+    def _list_module_names(self, module_name):
+        """
+        Return all public names offered by a module for completion.
+
+        For a regular module, returns every non-dunder attribute listed
+        in ``dir(mod)``.  For a package, also appends the names of all
+        direct submodules discovered via ``pkgutil.iter_modules`` — so
+        ``mca.common`` offers ``paths`` even before anyone has done
+        ``import mca.common.paths``.
+
+        :param str module_name: Dotted module path to inspect.
+        :return: Sorted list of unique public names.
+        :rtype: list
+        """
+        # Serve from cache if available — callers hit this once per
+        # keystroke while the prefix narrows.
+        if module_name in self._module_names_cache:
+            return self._module_names_cache[module_name]
+
+        mod = self._import_module_cached(module_name)
+        if mod is None:
+            self._module_names_cache[module_name] = []
+            return []
+
+        names = set()
+
+        # Collect non-dunder attributes that the module already exposes.
+        # Skip re-exported submodule proxies — pkgutil picks those up
+        # more reliably and marks them with priority correctly.
+        for attr in dir(mod):
+            if attr.startswith("__"):
+                continue
+            names.add(attr)
+
+        # If this is a package (has __path__), enumerate its submodules.
+        # iter_modules only walks the immediate package — does NOT
+        # descend into sub-packages, which is what we want (one dot at
+        # a time matches how users type imports).
+        pkg_path = getattr(mod, "__path__", None)
+        if pkg_path:
+            try:
+                for finder, name, ispkg in pkgutil.iter_modules(pkg_path):
+                    # Filter out private submodules (leading underscore).
+                    if name.startswith("_"):
+                        continue
+                    names.add(name)
+            except Exception as exc:
+                # Some loaders don't support iter_modules (namespace
+                # packages in zip archives, for example) — fall back
+                # to just the dir() results.
+                logger.debug(
+                    "pkgutil.iter_modules failed for %r: %s",
+                    module_name, exc
+                )
+
+        sorted_names = sorted(names)
+        self._module_names_cache[module_name] = sorted_names
+        return sorted_names
+
+    def _module_path_completions(self, typed):
+        """
+        Produce completion items for a dotted module path being typed
+        in an ``import`` or ``from ... import`` statement.
+
+        ``typed`` is the raw text the user has keyed so far, e.g.
+        ``"mca.common."``, ``"mca.common.pa"``, or ``""``.  This helper
+        figures out which package to list submodules of and which
+        prefix to filter by.
+
+        :param str typed: The dotted module path the user has typed.
+        :return: List of CompletionItem for matching submodules.
+        :rtype: list
+        """
+        # Empty input — nothing to complete.  The caller may still
+        # want to offer top-level packages, but we don't have a sane
+        # universe to enumerate without scanning sys.path.
+        if not typed:
+            return []
+
+        # Trailing dot means the user wants to see children of the
+        # current package (e.g. "mca.common." → children of mca.common).
+        # No trailing dot means they're extending the last segment
+        # (e.g. "mca.common.pa" → children of mca.common filtered by "pa").
+        if typed.endswith("."):
+            parent = typed[:-1]
+            name_prefix = ""
+        elif "." in typed:
+            parent, _, name_prefix = typed.rpartition(".")
+        else:
+            # Single-segment input (no dot yet).  Can't enumerate
+            # top-level packages cheaply, so skip.
+            return []
+
+        if not parent:
+            return []
+
+        items = []
+        for name in self._list_module_names(parent):
+            if not name.startswith(name_prefix):
+                continue
+            items.append(CompletionItem(
+                label=name,
+                detail="module",
+                insert_text=name,
+                priority=0,
+            ))
+        return items
 
     def set_symbol_index(self, index):
         """
@@ -135,7 +316,7 @@ class CompletionProvider:
         self._symbol_index = index
 
     def get_completions(self, prefix, language, document_text="",
-                        known_globals=None):
+                        known_globals=None, line_before_cursor=""):
         """
         Gather completions from all sources for the given prefix.
 
@@ -145,11 +326,74 @@ class CompletionProvider:
             word scanning.
         :param set known_globals: Optional set of names imported in other
             open tabs (cross-tab completion).
+        :param str line_before_cursor: Text of the current line from the
+            start up to the cursor position.  Used to detect import-
+            statement contexts so we can offer module names instead of
+            arbitrary attributes.
         :return: Deduplicated, sorted list of CompletionItem instances.
         :rtype: list
         """
         seen = set()
         items = []
+
+        # --- Source 0: Import-statement context (Python only) ------------
+        # These branches run BEFORE the adapter so import completions
+        # show correctly even when Maya is connected but doesn't know
+        # about the user's project modules.  Each branch is mutually
+        # exclusive and returns early after adding its completions.
+        if language == "python" and line_before_cursor:
+            # --- "from X.Y.Z import <cursor>" case -----------------
+            # User has fully typed "from MODULE import " and is now
+            # typing the name(s) to import.  Offer both public
+            # attributes AND submodules of MODULE.
+            m = _FROM_IMPORT_RE.match(line_before_cursor)
+            if m:
+                src_module = m.group(1)
+                name_prefix = m.group(2) or ""
+                candidate_names = self._list_module_names(src_module)
+                for name in candidate_names:
+                    if name.startswith(name_prefix) and name not in seen:
+                        seen.add(name)
+                        items.append(CompletionItem(
+                            label=name,
+                            detail="from " + src_module,
+                            insert_text=name,
+                            priority=0,
+                        ))
+                # Import context is exclusive — skip all other sources
+                # so we don't pollute the list with unrelated words.
+                items.sort(key=lambda i: (i.priority, i.label.lower()))
+                return items
+
+            # --- "from X.Y." or "from X.<partial>" case ------------
+            # User is typing the source module path of a "from ..."
+            # statement.  Offer submodules that extend the current
+            # dotted path.
+            m = _FROM_MODULE_RE.match(line_before_cursor)
+            if m:
+                typed = m.group(1)
+                submodule_items = self._module_path_completions(typed)
+                for item in submodule_items:
+                    if item.label not in seen:
+                        seen.add(item.label)
+                        items.append(item)
+                items.sort(key=lambda i: (i.priority, i.label.lower()))
+                return items
+
+            # --- "import X.Y." case --------------------------------
+            # Plain "import PATH" — offer submodules of the current
+            # dotted path.  Handles comma-separated imports like
+            # "import os, sys.pa" by matching only the final segment.
+            m = _IMPORT_MODULE_RE.match(line_before_cursor)
+            if m:
+                typed = m.group(1)
+                submodule_items = self._module_path_completions(typed)
+                for item in submodule_items:
+                    if item.label not in seen:
+                        seen.add(item.label)
+                        items.append(item)
+                items.sort(key=lambda i: (i.priority, i.label.lower()))
+                return items
 
         # --- Source 1: DCC adapter (priority 0) ---
         adapter = self._adapter_manager.get_active_adapter() if self._adapter_manager else None
@@ -171,38 +415,31 @@ class CompletionProvider:
 
         # --- Source 1b: Module import fallback for dotted prefixes ---
         # When the adapter didn't return results for a dotted prefix
-        # (e.g. "os.pa" where os hasn't been executed), try importing
-        # the module directly.  Works for stdlib and any installed
-        # package regardless of adapter state.
+        # (e.g. "os.pa" where os hasn't been executed), resolve the
+        # module via importlib (loads the full dotted chain) and list
+        # both its public attributes and its submodules.  Works for
+        # stdlib and any installed package regardless of adapter state.
         if "." in prefix and language == "python":
             adapter_count = sum(1 for i in items if i.priority == 0)
             if adapter_count == 0:
-                try:
-                    import types as _types
-                    obj_part = prefix.rsplit(".", 1)[0]
-                    attr_prefix = prefix.rsplit(".", 1)[1]
-                    # Traverse the dotted module path.
-                    parts = obj_part.split(".")
-                    obj = __import__(parts[0])
-                    for part in parts[1:]:
-                        obj = getattr(obj, part)
-                    attrs = [
-                        x for x in dir(obj)
-                        if x.startswith(attr_prefix)
-                        and not x.startswith("__")
-                        and not (isinstance(getattr(obj, x, None), _types.ModuleType)
-                                 and x in sys.modules)
-                    ]
-                    for attr in attrs[:500]:
-                        if attr not in seen:
-                            seen.add(attr)
-                            items.append(CompletionItem(
-                                label=attr, detail="module",
-                                insert_text=attr,
-                                priority=0,
-                            ))
-                except Exception:
-                    pass
+                obj_part = prefix.rsplit(".", 1)[0]
+                attr_prefix = prefix.rsplit(".", 1)[1]
+                # _list_module_names handles both attributes and
+                # submodules (via pkgutil) and caches the result so
+                # this stays cheap across keystrokes.
+                candidate_names = self._list_module_names(obj_part)
+                matching = [
+                    n for n in candidate_names
+                    if n.startswith(attr_prefix)
+                ]
+                for attr in matching[:500]:
+                    if attr not in seen:
+                        seen.add(attr)
+                        items.append(CompletionItem(
+                            label=attr, detail="module",
+                            insert_text=attr,
+                            priority=0,
+                        ))
 
         # --- Source 2: Static keywords/builtins (priority 1) ---
         # Figure out which part of the prefix to match against static words.
@@ -611,8 +848,19 @@ class CodeCompleter(QFrame):
         # Gather completions from all sources.
         language = self._editor.language
         document_text = self._editor.toPlainText()
+
+        # Capture the text from the start of the current line up to the
+        # cursor so the provider can detect import-statement context
+        # ("from X import ...", "import X.Y.", etc.).  Without this,
+        # the provider can't tell that a bare "paths" identifier should
+        # be resolved against the source module in a from-import line.
+        cursor = self._editor.textCursor()
+        line_before_cursor = cursor.block().text()[:cursor.positionInBlock()]
+
         items = self._provider.get_completions(
-            full_prefix, language, document_text, known_globals=known_globals
+            full_prefix, language, document_text,
+            known_globals=known_globals,
+            line_before_cursor=line_before_cursor,
         )
 
         if not items:

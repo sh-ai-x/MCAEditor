@@ -475,11 +475,24 @@ class _MayaHotkeyFilter(QObject):
             from mca_qt.widgets.terminal_native import TerminalWidget
         except ImportError:
             return None
+        # Walk the parent chain with RuntimeError guards.  If ANY widget
+        # in the chain has had its C++ object deleted (common after tab
+        # close, panel rebuild, or editor shutdown), calling .parent() or
+        # isinstance() will raise and kill the whole Ctrl+V dispatch.
+        # Catch the stale-widget case and return None so Phase 2 can fall
+        # back to the direct-focus paste path instead of silently dropping
+        # the key event.
         parent = widget
-        while parent:
-            if isinstance(parent, TerminalWidget):
-                return parent
-            parent = parent.parent() if hasattr(parent, "parent") else None
+        depth = 0
+        while parent is not None and depth < 32:
+            try:
+                if isinstance(parent, TerminalWidget):
+                    return parent
+                parent = parent.parent()
+            except RuntimeError:
+                # Widget was deleted mid-walk — abort the search.
+                return None
+            depth += 1
         return None
 
     def eventFilter(self, watched, event):
@@ -604,9 +617,19 @@ class _MayaHotkeyFilter(QObject):
                     except RuntimeError:
                         logger.debug("Stale action in registry during "
                                      "shortcut match — skipping action dispatch")
-                    if action and action.isEnabled():
-                        action.trigger()
-                        return True
+                    # Guard isEnabled() / trigger() too — if the matched
+                    # action's C++ object was deleted after shortcut() succeeded
+                    # but before trigger() runs, we must NOT let the RuntimeError
+                    # escape the dispatch (it would kill Phase 2 for all keys
+                    # until the filter is reinstalled).
+                    if action:
+                        try:
+                            if action.isEnabled():
+                                action.trigger()
+                                return True
+                        except RuntimeError:
+                            logger.debug("Stale action during trigger — "
+                                         "falling through to direct dispatch")
 
                     # No matching editor action, but we MUST still consume
                     # the event to prevent it from propagating up the widget
@@ -629,6 +652,26 @@ class _MayaHotkeyFilter(QObject):
                     if not focus or not self._widget_in_editor(focus):
                         old_focus = focus
                         focus = getattr(self, "_focus_forced_widget", None)
+                        # Validate the stored widget — if the user closed
+                        # a terminal tab or the panel rebuilt, the stored
+                        # reference may point to a widget whose C++ object
+                        # was deleted.  Calling methods on it would raise
+                        # RuntimeError.  Drop the stale reference so we
+                        # fall back cleanly to the active code editor.
+                        if focus is not None:
+                            try:
+                                # Any method call on a dead PySide widget
+                                # raises; parent() is cheap and universal.
+                                focus.parent()
+                                if not self._widget_in_editor(focus):
+                                    focus = None
+                            except RuntimeError:
+                                logger.debug(
+                                    "_focus_forced_widget was stale — "
+                                    "clearing"
+                                )
+                                self._focus_forced_widget = None
+                                focus = None
                         if key == Qt.Key.Key_V:
                             logger.debug(
                                 "Ctrl+V: focusWidget=%s not in editor, "
@@ -637,12 +680,22 @@ class _MayaHotkeyFilter(QObject):
                                 type(focus).__name__ if focus else None
                             )
 
+                    # Last-resort fallback: if we still don't have a focus,
+                    # route modifier shortcuts to the panel's active editor.
+                    # Without this, Ctrl+V silently drops when no widget
+                    # has keyboard focus inside our tree (common when the
+                    # user has been interacting with non-focusable chrome).
                     if not focus:
-                        if key == Qt.Key.Key_V:
-                            logger.warning(
-                                "Ctrl+V: no focus widget and no "
-                                "_focus_forced_widget — paste dropped"
+                        try:
+                            focus = self._panel._current_editor()
+                        except Exception:
+                            focus = None
+                        if focus and key == Qt.Key.Key_V:
+                            logger.debug(
+                                "Ctrl+V: no focus — redirecting to active "
+                                "editor %s", type(focus).__name__
                             )
+
                     if focus:
                         # Walk up the parent chain looking for a terminal.
                         terminal = self._find_parent_terminal(focus)
@@ -651,11 +704,11 @@ class _MayaHotkeyFilter(QObject):
                                 # Route through the terminal's eventFilter
                                 # which handles Ctrl+V paste, Ctrl+C
                                 # interrupt, etc.  Check liveness first —
-                                # a dead terminal's eventFilter returns
-                                # False (unhandled), and we must NOT fall
-                                # through to the direct-method path because
-                                # calling _display.paste() would inject raw
-                                # text into the terminal's visual display.
+                                # a dead terminal needs special handling:
+                                # for paste, auto-restart the shell so the
+                                # paste actually works; for other keys,
+                                # drop silently (consistent with previous
+                                # behavior of blocking Maya hotkeys).
                                 alive = getattr(terminal, "_alive", False)
                                 if alive:
                                     # Pass terminal._display (not `focus`)
@@ -665,11 +718,55 @@ class _MayaHotkeyFilter(QObject):
                                     handled = terminal.eventFilter(
                                         terminal._display, event
                                     )
-                                    if not handled:
-                                        logger.debug(
-                                            "Terminal eventFilter returned "
-                                            "False for key=%s — event "
-                                            "consumed to block Maya", key
+                                    if not handled and key == Qt.Key.Key_V:
+                                        # Terminal refused to handle the
+                                        # paste (e.g. _backend is None or
+                                        # backend._running is False even
+                                        # though _alive was True).  Restart
+                                        # the terminal so the next paste
+                                        # has a working shell.
+                                        logger.warning(
+                                            "Ctrl+V: terminal eventFilter "
+                                            "refused paste — restarting "
+                                            "terminal"
+                                        )
+                                        try:
+                                            terminal.restart()
+                                        except Exception as exc:
+                                            logger.error(
+                                                "Terminal restart failed: %s",
+                                                exc
+                                            )
+                                elif key == Qt.Key.Key_V:
+                                    # Dead terminal + user pressed Ctrl+V.
+                                    # Previous behavior silently ate the
+                                    # event — the user has no idea why
+                                    # their paste failed.  Restart the
+                                    # shell and queue the paste to run
+                                    # once the new session is ready.
+                                    # restart() calls terminate() then
+                                    # singleShot(100, start).  start()
+                                    # creates the backend thread which
+                                    # takes a moment to spawn the shell
+                                    # and print its prompt.  500ms is a
+                                    # conservative wait; if the shell
+                                    # hasn't printed its prompt yet the
+                                    # paste still works because the PTY
+                                    # buffers input.
+                                    logger.warning(
+                                        "Ctrl+V: terminal is dead — "
+                                        "restarting and queueing paste"
+                                    )
+                                    try:
+                                        terminal.restart()
+                                        QTimer.singleShot(
+                                            500,
+                                            terminal.paste_clipboard
+                                        )
+                                    except Exception as exc:
+                                        logger.error(
+                                            "Terminal restart failed: %s",
+                                            exc
                                         )
                                 else:
                                     logger.debug(
@@ -971,6 +1068,12 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         """
         if new and self._hotkey_filter._widget_in_editor(new):
             self._hotkey_filter._focus_forced = True
+            # Keep _focus_forced_widget current.  If the user's most
+            # recent click-target was destroyed (e.g. a terminal tab
+            # closed), the stale reference can crash Phase 2's paste
+            # dispatch.  Updating here every time focus lands inside
+            # our tree guarantees the fallback widget is always alive.
+            self._hotkey_filter._focus_forced_widget = new
 
     # --- Maya Output Hook ---------------------------------------------------
 
