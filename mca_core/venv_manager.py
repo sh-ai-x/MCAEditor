@@ -581,6 +581,37 @@ def _get_pyvenv_home(venv_dir):
     return None
 
 
+def _get_pyvenv_version(venv_dir):
+    """
+    Parse the Python ``version`` field from a venv's ``pyvenv.cfg``.
+
+    The ``version`` key records the ``X.Y.Z`` version of the Python that
+    actually created the venv — which is what determines the ABI of any
+    compiled extensions (``.pyd`` / ``.so`` files) installed inside it.
+
+    :param str venv_dir: Path to the venv root.
+    :return: ``(major, minor)`` tuple of ints, or *None* if not parseable.
+    :rtype: tuple or None
+    """
+    cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
+    if not os.path.isfile(cfg_path):
+        return None
+    # Parse "version = X.Y.Z" — only the first two components matter for
+    # ABI compatibility (cp310 extensions load on any 3.10.x, etc.).
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("version"):
+                    _, _, value = line.partition("=")
+                    parts = value.strip().split(".")
+                    if len(parts) >= 2:
+                        return (int(parts[0]), int(parts[1]))
+    except (OSError, ValueError):
+        # Conservative: unparseable cfg is treated as "unknown", not "wrong".
+        pass
+    return None
+
+
 def _fix_maya_venv(venv_dir):
     """
     Apply platform-specific fixes for venvs created from Maya's Python.
@@ -789,6 +820,76 @@ def _pip_install_via_host(missing):
 
 # --- Convenience: Full Setup --------------------------------------------------
 
+def _check_venv_python_match():
+    """
+    Wipe the managed venv if its embedded Python version doesn't match
+    the running interpreter.
+
+    The venv directory name is chosen by ``get_venv_dir()`` based on the
+    running ``sys.version_info`` (e.g. ``.venv-3.11``).  Its *contents*,
+    however, are whatever the Python that created the venv installed.
+    These can diverge — for example:
+
+      * A Windows Update replaces the host Python under us, so the next
+        launch runs a different interpreter than the one that built the
+        venv.
+      * A third-party tool or IDE re-creates the venv using a different
+        Python that happens to resolve to the same folder name.
+      * The user installed a new Python version and the old venv's
+        ``home`` became stale.
+
+    When this happens, compiled extensions inside the venv (e.g.
+    ``winpty.cp310-win_amd64.pyd``) silently fail to import under the
+    running Python (``ModuleNotFoundError: No module named
+    'winpty.winpty'``), which degrades the terminal to the subprocess
+    fallback with no obvious root cause.
+
+    This check reads ``pyvenv.cfg`` at startup and compares its
+    ``version`` field against ``sys.version_info``.  On a confirmed
+    ``(major, minor)`` mismatch the venv is wiped so ``ensure_venv()``
+    rebuilds it from the current interpreter.  Ambiguous cases (missing
+    or unreadable ``pyvenv.cfg``) are left alone — we only act on a
+    definite mismatch.
+    """
+    venv_dir = get_venv_dir()
+    if not os.path.isdir(venv_dir):
+        # No venv yet — nothing to verify; ensure_venv() will create it.
+        return
+
+    venv_version = _get_pyvenv_version(venv_dir)
+    if venv_version is None:
+        # Couldn't parse pyvenv.cfg — be conservative, don't wipe.
+        return
+
+    # Running interpreter's major.minor — what the venv SHOULD match.
+    running_version = (sys.version_info.major, sys.version_info.minor)
+
+    if venv_version == running_version:
+        # Match — venv is consistent with the running Python's ABI.
+        return
+
+    # Confirmed mismatch — wipe and let ensure_venv() rebuild from the
+    # real interpreter.  Log loudly so it's obvious in session logs why
+    # first-launch-after-update takes a bit longer than usual.
+    logger.warning(
+        "Managed venv at %s was created with Python %d.%d but the editor "
+        "is running under Python %d.%d — wiping and rebuilding to restore "
+        "compiled extension compatibility.",
+        venv_dir,
+        venv_version[0], venv_version[1],
+        running_version[0], running_version[1],
+    )
+    try:
+        shutil.rmtree(venv_dir)
+        logger.info("Stale venv removed: %s", venv_dir)
+    except (OSError, shutil.Error) as exc:
+        # If the wipe fails (file lock, permission error), leave the
+        # broken venv in place — ensure_venv() will see it as "exists"
+        # and skip creation, so we'll degrade the same as before.  The
+        # user can delete the folder manually if needed.
+        logger.warning("Failed to remove stale venv: %s", exc)
+
+
 def _check_venv_version():
     """
     Wipe the managed venv if it was built by a different MCA Editor version.
@@ -880,7 +981,14 @@ def setup_venv(requirements=None, status_callback=None):
 
     all_ok = True
 
-    # Step 0: Wipe stale venv on version change.
+    # Step 0a: Wipe the venv if its embedded Python ABI doesn't match the
+    # running interpreter.  This catches cases like a Windows Update
+    # swapping the host Python out from under us — the venv's cp310
+    # extensions would then silently fail to import on cp311, degrading
+    # the terminal to its subprocess fallback with no obvious root cause.
+    _check_venv_python_match()
+
+    # Step 0b: Wipe stale venv on version change.
     # When the user installs a new plugin build, nuke the old venv so
     # all packages are reinstalled fresh — prevents stale dependency bugs.
     _check_venv_version()
