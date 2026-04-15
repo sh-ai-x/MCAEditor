@@ -21,7 +21,7 @@ import logging
 from mca_qt.qt_compat import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QCheckBox, QComboBox, QLabel, QTreeWidget, QTreeWidgetItem,
-    Qt, Signal, QThread,
+    Qt, Signal, QThread, QTimer,
 )
 from mca_qt.constants import SKIP_DIRS as _SKIP_DIRS, MAX_WALK_DEPTH as _MAX_DEPTH
 
@@ -34,6 +34,21 @@ _SKIP_EXTENSIONS = {
     ".jpeg", ".gif", ".bmp", ".ico", ".ttf", ".otf", ".woff", ".woff2",
     ".zip", ".gz", ".tar", ".7z", ".rar", ".db", ".sqlite",
 }
+
+# Matches an identifier-shaped string (letters, digits, underscore,
+# must not start with a digit).  Used by the dialog to decide whether
+# the pattern is safe to pre-filter through the symbol index's per-
+# file word set.  Substring search is still valid for these patterns
+# because the indexer tokenizes files on the same character class —
+# any substring hit in source code must appear inside one of the
+# cached identifiers.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_]\w*$")
+
+# Matches an identifier *fragment* — the user's pattern is pure
+# identifier characters but may start with a digit (e.g. searching
+# for the ``2D`` inside ``Texture2D``).  Substring filtering through
+# the word set still works in this case.
+_IDENT_FRAGMENT_RE = re.compile(r"^\w+$")
 
 
 # =============================================================================
@@ -64,7 +79,8 @@ class SearchWorker(QThread):
     search_finished = Signal(int)
 
     def __init__(self, workspace_folders, pattern, case_sensitive=False,
-                 whole_word=False, use_regex=False, file_filter=""):
+                 whole_word=False, use_regex=False, file_filter="",
+                 prebuilt_files=None):
         """
         Initialize the search worker.
 
@@ -74,6 +90,10 @@ class SearchWorker(QThread):
         :param bool whole_word: Whole-word matching.
         :param bool use_regex: Interpret pattern as regex.
         :param str file_filter: Comma-separated extension globs (e.g. ``"*.py, *.mel"``).
+        :param list prebuilt_files: Optional list of file paths from the
+            symbol index.  When provided the worker iterates this list
+            directly instead of walking the filesystem — dramatically
+            faster on large workspaces.
         """
         super().__init__()
         self._folders = workspace_folders
@@ -82,6 +102,7 @@ class SearchWorker(QThread):
         self._whole_word = whole_word
         self._use_regex = use_regex
         self._file_filter = file_filter
+        self._prebuilt_files = prebuilt_files
         self._cancelled = False
 
     # --- Public API -----------------------------------------------------------
@@ -116,13 +137,58 @@ class SearchWorker(QThread):
 
         total_matches = 0
 
-        for folder in self._folders:
-            folder = os.path.normpath(folder)
-            total_matches += self._walk_and_search(folder, folder, 0, regex, allowed_exts)
+        # Fast path: use the pre-built index file list when available.
+        # The symbol index already walked the workspace once and keeps
+        # the file list in memory, so searches skip re-enumerating the
+        # filesystem entirely.
+        #
+        # We distinguish ``None`` (index unavailable -> must walk) from
+        # ``[]`` (index consulted and produced no candidates -> finish
+        # immediately with zero matches).  The original ``if self._
+        # prebuilt_files:`` conflated the two, causing an index-filtered
+        # search that legitimately yielded zero candidates to silently
+        # fall back to the full filesystem walk.
+        if self._prebuilt_files is not None:
+            total_matches = self._search_prebuilt(regex, allowed_exts)
+        else:
+            # Fallback: walk the filesystem (used if no index is ready).
+            for folder in self._folders:
+                folder = os.path.normpath(folder)
+                total_matches += self._walk_and_search(folder, folder, 0, regex, allowed_exts)
+                if self._cancelled:
+                    break
+
+        self.search_finished.emit(total_matches)
+
+    def _search_prebuilt(self, regex, allowed_exts):
+        """
+        Search the pre-built file list from the symbol index.
+
+        Skips the ``os.listdir``/recursion overhead entirely — the
+        indexer already did that work, so we just iterate the known
+        file paths and apply the same extension/filter rules.
+
+        :param re.Pattern regex: Compiled search regex.
+        :param set allowed_exts: Allowed extensions (empty = all).
+        :return: Total match count.
+        :rtype: int
+        """
+        total = 0
+        for filepath in self._prebuilt_files:
             if self._cancelled:
                 break
 
-        self.search_finished.emit(total_matches)
+            # Apply the same extension filters the walker would apply.
+            _, ext = os.path.splitext(filepath)
+            ext_lower = ext.lower()
+            if ext_lower in _SKIP_EXTENSIONS:
+                continue
+            if allowed_exts and ext_lower not in allowed_exts:
+                continue
+
+            total += self._search_file(filepath, regex)
+
+        return total
 
     # --- Internal Helpers -----------------------------------------------------
 
@@ -338,7 +404,8 @@ class FindInFilesDialog(QDialog):
     """
 
     def __init__(self, parent, workspace_folders, open_callback, mode="find",
-                 replace_done_callback=None):
+                 replace_done_callback=None, symbol_index=None,
+                 initial_text=""):
         """
         Initialize the Find in Files dialog.
 
@@ -348,13 +415,22 @@ class FindInFilesDialog(QDialog):
         :param str mode: ``"find"`` for search-only, ``"replace"`` to show replace row.
         :param callable replace_done_callback: Called with a list of modified file paths
             after Replace All so the host can reload open editors.
+        :param SymbolIndex symbol_index: Optional symbol index used to skip the
+            workspace filesystem walk — the worker iterates the index's known
+            file list directly, which is dramatically faster on large projects.
+        :param str initial_text: Optional seed text to pre-fill the search
+            box with.  When non-empty, the dialog also auto-runs the
+            search immediately after showing — matches the VS Code
+            behavior of "find this selection".
         """
         super().__init__(parent)
         self._workspace_folders = workspace_folders
         self._open_callback = open_callback
         self._replace_done_callback = replace_done_callback
+        self._symbol_index = symbol_index
         self._mode = mode
         self._worker = None
+        self._initial_text = initial_text or ""
 
         # Window setup.
         title = "Replace in Files" if mode == "replace" else "Find in Files"
@@ -364,6 +440,22 @@ class FindInFilesDialog(QDialog):
         self.setStyleSheet(_DIALOG_STYLE)
 
         self._build_ui()
+
+        # Pre-fill and fire the search after the UI is built.  When
+        # the user opened the dialog with a selection in the editor,
+        # we want the results to be visible as soon as the window
+        # paints — no extra click needed.  When no seed was supplied
+        # we just focus the empty search box like before.
+        if self._initial_text:
+            self._search_input.setText(self._initial_text)
+            # Select-all so the user can immediately overtype if the
+            # seed wasn't what they wanted.
+            self._search_input.selectAll()
+            # Kick off the search on the next event-loop tick so the
+            # dialog is fully shown first (results emit on the main
+            # thread via signals).
+            QTimer.singleShot(0, self._on_search)
+        self._search_input.setFocus()
 
     # --- UI Construction ------------------------------------------------------
 
@@ -479,8 +571,75 @@ class FindInFilesDialog(QDialog):
         self._results_tree.clear()
         self._file_count = 0
         self._match_count = 0
-        self._status_label.setText("Searching...")
         self._search_btn.setEnabled(False)
+
+        # Pull a snapshot of the indexed file list when the index is
+        # ready.  Falls back to filesystem walk if indexing is still
+        # in progress or no index is available.
+        #
+        # Three levels of optimization depending on what the pattern
+        # looks like:
+        #   1. Regex mode or pattern includes non-identifier characters
+        #      (spaces, punctuation) -> can't pre-filter, hand the
+        #      worker the full file list.
+        #   2. Pure identifier + whole word -> exact lookup in the
+        #      per-file word set (same trick Ctrl+B uses).
+        #   3. Pure identifier fragment, substring search -> substring
+        #      lookup against the cached identifiers in each file's
+        #      word set.  A typical 10k-file project has a few hundred
+        #      unique words per file; doing ``needle in word`` on that
+        #      is dramatically cheaper than opening every file.
+        #
+        # The original implementation only covered case 2, so users
+        # who didn't check "Whole Word" (the default) silently fell
+        # back to reading every file -- which made Ctrl+Shift+F feel
+        # completely unindexed on large projects.
+        prebuilt = None
+        case_sensitive = self._chk_case.isChecked()
+        if self._symbol_index is not None and self._symbol_index.is_ready():
+            use_regex = self._chk_regex.isChecked()
+            whole_word = self._chk_word.isChecked()
+            looks_like_ident = _IDENTIFIER_RE.match(pattern) is not None
+            looks_like_frag = _IDENT_FRAGMENT_RE.match(pattern) is not None
+
+            if use_regex:
+                # Regex patterns can match anything; word-set pre-filter
+                # is not safe.  We still skip os.listdir by handing over
+                # the full indexed file list.
+                prebuilt = self._symbol_index.get_all_files()
+            elif whole_word and looks_like_ident:
+                # Exact identifier search -- fastest path.  Case
+                # sensitivity doesn't matter here because Python/MEL
+                # identifiers are themselves case-sensitive: the word
+                # set stores "MyClass" once, so a case-insensitive
+                # search for "myclass" still funnels through the
+                # worker's own IGNORECASE regex for the full text check.
+                prebuilt = self._symbol_index.get_files_with_word(pattern)
+            elif looks_like_frag:
+                # Substring search of an identifier fragment -- e.g.
+                # typing "Curves" to find "AnimatedCurvesComponent".
+                # The cached word sets contain complete identifiers,
+                # so a substring match against them is safe.
+                prebuilt = self._symbol_index.get_files_containing_substring(
+                    pattern, case_sensitive=case_sensitive,
+                )
+            else:
+                # Pattern has punctuation / spaces; we can't use the
+                # word-set filter, but handing over the full file list
+                # still skips the ``os.listdir`` recursion.
+                prebuilt = self._symbol_index.get_all_files()
+
+        # Give the user visible feedback showing the index is in use.
+        # ``prebuilt is None`` means we fell through to filesystem walk
+        # (indexing still in progress or unavailable); otherwise we
+        # show the narrowed candidate count so long searches don't
+        # feel like a hang.
+        if prebuilt is None:
+            self._status_label.setText("Searching (walking filesystem)...")
+        else:
+            self._status_label.setText(
+                "Searching {} indexed file(s)...".format(len(prebuilt))
+            )
 
         # Launch background search.
         self._worker = SearchWorker(
@@ -490,6 +649,7 @@ class FindInFilesDialog(QDialog):
             whole_word=self._chk_word.isChecked(),
             use_regex=self._chk_regex.isChecked(),
             file_filter=self._file_filter_input.text().strip(),
+            prebuilt_files=prebuilt,
         )
         self._worker.match_found.connect(self._on_match_found)
         self._worker.search_finished.connect(self._on_search_finished)

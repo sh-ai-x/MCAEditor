@@ -129,6 +129,25 @@ class MCAEditorPanel(QWidget):
     # Signal emitted when the user toggles the activity bar (bottom status bar).
     activity_bar_toggled = Signal()
 
+    # --- Cross-thread marshalling signals -----------------------------------
+    # PySide6's QMetaObject.invokeMethod / QTimer.singleShot do NOT accept
+    # a bare Python callable as a target from a background thread (the
+    # 3-arg form wants a bytes slot name).  Qt Signals, on the other hand,
+    # DO marshal cross-thread automatically (AutoConnection becomes
+    # QueuedConnection when emitter and receiver live on different threads),
+    # so we funnel all background-thread → main-thread calls through these.
+    #
+    # _update_check_result: (latest_version, download_url, up_to_date)
+    #   Emitted by the daemon fetch worker in _check_for_updates().
+    # _declaration_search_done: (word, on_definition, results, popup_title)
+    #   Emitted by the Go-to-Declaration background scan worker.
+    # update_available_notification: (version, url)
+    #   Emitted by the plug-in's launch-time auto-update check.
+    #   Writes a yellow warning into the output panel on the main thread.
+    _update_check_result = Signal(object, object, bool)
+    _declaration_search_done = Signal(str, bool, object, str)
+    update_available_notification = Signal(str, str)
+
     def __init__(self, settings, adapter_manager=None, dcc_version=None, parent=None):
         """
         Initialize the editor panel and all UI components.
@@ -140,6 +159,13 @@ class MCAEditorPanel(QWidget):
         :param QWidget parent: Optional parent widget.
         """
         super().__init__(parent)
+
+        # Wire the cross-thread notification signal to its main-thread
+        # slot so the auto-update check can safely emit from a daemon.
+        self.update_available_notification.connect(
+            self._on_update_available_notification
+        )
+
         self._settings = settings
         self._adapter_manager = adapter_manager or AdapterManager()
         # Track whether the editor is embedded inside a DCC (e.g. Maya).
@@ -1176,11 +1202,149 @@ class MCAEditorPanel(QWidget):
 
         help_menu.addSeparator()
 
+        # --- Update check ---
+        # Manual on-demand version check.  Auto-check runs once at launch;
+        # this action lets the user re-poll at any time (e.g. after the
+        # session has been open for days).
+        self._create_action(help_menu, "Check for Updates...",
+                            callback=self._check_for_updates)
+
+        help_menu.addSeparator()
+
         # --- About / licensing ---
         self._create_action(help_menu, "Licensing...",
                             callback=self._show_licensing)
         self._create_action(help_menu, "About MCA Editor",
                             callback=self._show_about)
+
+    def _check_for_updates(self):
+        """
+        Manually check for a newer MCA Editor release.
+
+        Runs the same background fetch used at launch, but bypasses the
+        once-per-session guard so users can re-check on demand.  Shows a
+        modal dialog summarising the result: update available (with a
+        Download button), up-to-date, or offline.
+        """
+        # Local imports so the version_check module (and its thread) are
+        # only loaded when the user actually triggers the check.
+        from mca_core import version_check
+        from mca_core import __version__
+
+        # Bypass the once-per-session guard by clearing the flag.  The
+        # launch-time auto-check has already fired by the time the user
+        # can click the menu, so we always want a fresh fetch here.
+        version_check._checked = False
+
+        # Connect the cross-thread result signal to the main-thread
+        # handler.  We use a unique-connection flag by disconnecting
+        # first so repeated clicks don't stack duplicate handlers.
+        try:
+            self._update_check_result.disconnect(self._on_update_check_result)
+        except (TypeError, RuntimeError):
+            pass  # Nothing was connected yet — first call.
+        self._update_check_result.connect(self._on_update_check_result)
+
+        # Snapshot self for the worker closure.  The worker only emits
+        # the signal — it never touches Qt objects directly, so Qt is
+        # free to marshal the emission to the main thread.
+        panel_ref = self
+
+        def _worker():
+            """Synchronous fetch so we can report up-to-date / offline too."""
+            logger.info("Check for Updates: fetching version info...")
+            try:
+                data = version_check._fetch_version_info()
+            except Exception as exc:
+                logger.exception("Check for Updates: fetch crashed: %s", exc)
+                data = None
+
+            if data is None:
+                logger.info("Check for Updates: fetch failed (offline?).")
+                panel_ref._update_check_result.emit(None, None, False)
+                return
+            latest = data.get("latest_version", "")
+            url = data.get("download_url", "")
+            logger.info(
+                "Check for Updates: server says latest=%s, current=%s",
+                latest, __version__,
+            )
+            if not latest:
+                panel_ref._update_check_result.emit(None, None, False)
+                return
+            current_tuple = version_check._parse_version(__version__)
+            latest_tuple = version_check._parse_version(latest)
+            if latest_tuple > current_tuple:
+                panel_ref._update_check_result.emit(latest, url, False)
+            else:
+                panel_ref._update_check_result.emit(latest, url, True)
+
+        # Fire the fetch in a daemon thread so the menu click returns
+        # immediately — network latency won't stall the UI.
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_update_available_notification(self, version, url):
+        """
+        Write a yellow warning into the output panel announcing an
+        available update.
+
+        Connected to ``update_available_notification`` so Maya's launch-
+        time auto-check (which runs on a daemon thread) can safely
+        notify us — Qt marshals the signal onto the main thread before
+        invoking this slot.
+
+        :param str version: Newly-available version string.
+        :param str url: Download URL.
+        """
+        try:
+            self._output.write_warning(
+                "MCA Editor v{} is available.  Download at: {}".format(
+                    version, url,
+                )
+            )
+        except Exception as exc:
+            logger.debug("Update notification failed: %s", exc)
+
+    def _on_update_check_result(self, latest, url, up_to_date):
+        """
+        Main-thread handler for the version-check result.
+
+        Connected to ``self._update_check_result`` (a Qt signal) so that
+        cross-thread emission from the background fetch worker is
+        queued onto the main thread before any UI code runs.
+
+        :param str or None latest: Latest version string, or ``None`` on
+            fetch failure.
+        :param str or None url: Download URL, or ``None`` on fetch failure.
+        :param bool up_to_date: True if the current build is already the
+            latest version.
+        """
+        from mca_core import __version__
+
+        if up_to_date:
+            QMessageBox.information(
+                self, "MCA Editor",
+                "You're on the latest version (v{}).".format(__version__),
+            )
+        elif latest:
+            msg = (
+                "MCA Editor v{latest} is available.\n"
+                "You're currently running v{current}.\n\n"
+                "Open the download page?"
+            ).format(latest=latest, current=__version__)
+            btn = QMessageBox.question(
+                self, "Update Available", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if btn == QMessageBox.StandardButton.Yes and url:
+                webbrowser.open(url)
+        else:
+            QMessageBox.warning(
+                self, "MCA Editor",
+                "Couldn't reach the update server.  Check your "
+                "internet connection and try again.",
+            )
 
     # =========================================================================
     # Project System
@@ -4456,13 +4620,31 @@ class MCAEditorPanel(QWidget):
 
         Searches across all workspace folders for text matches and
         displays results in a tree.  Double-clicking navigates.
+
+        When the current editor has a non-empty selection, the
+        dialog pre-fills that text and kicks off the search
+        automatically — matches the VS Code / PyCharm behavior users
+        expect when pressing Ctrl+Shift+F on a highlighted identifier.
         """
         folders = self._get_workspace_folders()
         if not folders:
             self._show_status("No workspace folders — add one first")
             return
 
-        dlg = FindInFilesDialog(self, folders, self._navigate_to_file_line, mode="find")
+        # Pull the current editor's selection, if any.  We only accept
+        # single-line selections so that accidentally highlighting a
+        # whole block doesn't dump newline-laden text into the search
+        # field.
+        seed_text = self._current_selection_for_search()
+
+        # Pass the symbol index so the search can use the pre-built
+        # file list instead of re-walking the workspace on every query.
+        dlg = FindInFilesDialog(
+            self, folders, self._navigate_to_file_line,
+            mode="find",
+            symbol_index=self._symbol_index,
+            initial_text=seed_text,
+        )
         dlg.show()
 
     def _replace_in_files(self):
@@ -4477,12 +4659,48 @@ class MCAEditorPanel(QWidget):
             self._show_status("No workspace folders — add one first")
             return
 
+        # Pre-fill the search input from the current editor selection
+        # — same convenience as Find in Files.
+        seed_text = self._current_selection_for_search()
+
         dlg = FindInFilesDialog(
             self, folders, self._navigate_to_file_line,
             mode="replace",
             replace_done_callback=self._reload_editors_for_paths,
+            symbol_index=self._symbol_index,
+            initial_text=seed_text,
         )
         dlg.show()
+
+    def _current_selection_for_search(self):
+        """
+        Return a suitable seed string for the Find/Replace-in-Files dialog.
+
+        Pulls the selected text from the active editor.  Multi-line
+        selections are rejected (they usually mean the user selected
+        a block of code, not a search target) and the result is
+        stripped of surrounding whitespace.  Returns an empty string
+        when no editor is active or nothing is selected.
+
+        :return: The seed text, or an empty string.
+        :rtype: str
+        """
+        editor = self._current_editor()
+        if editor is None:
+            return ""
+
+        cursor = editor.textCursor()
+        if not cursor.hasSelection():
+            return ""
+
+        # ``selectedText`` returns U+2029 for paragraph separators.
+        # Reject any selection that crosses line boundaries so we
+        # never pre-fill with a newline that breaks regex mode.
+        text = cursor.selectedText()
+        if "\u2029" in text or "\n" in text or "\r" in text:
+            return ""
+
+        return text.strip()
 
     def _reload_editors_for_paths(self, filepaths):
         """
@@ -4786,8 +5004,12 @@ class MCAEditorPanel(QWidget):
             self._show_status("No workspace folders — add one first")
             return
 
-        # Show the popup; on confirm it calls _open_file_path.
-        popup = GoToFilePopup(self, folders, self._open_file_path)
+        # Pass the symbol index so the popup can skip the filesystem
+        # walk and use the pre-built file list for instant results.
+        popup = GoToFilePopup(
+            self, folders, self._open_file_path,
+            symbol_index=self._symbol_index,
+        )
         popup.exec()
 
     def _go_to_symbol(self):
@@ -5104,29 +5326,116 @@ class MCAEditorPanel(QWidget):
             return
 
         # Use the background symbol index if it's ready (instant O(1) lookup).
-        # Otherwise fall back to the synchronous filesystem scan.
+        # Otherwise fall back to a filesystem scan (see below).
         use_index = (self._symbol_index is not None and self._symbol_index.is_ready())
 
+        # --- Fast path: definition lookup through the index -----------------
+        # ``find_definitions`` is an O(1) dict read — safe to run on the
+        # main thread.  This is the only path that won't block.
+        if not on_definition and use_index:
+            results = self._symbol_index.find_definitions(word)
+            self._handle_declaration_results(
+                word, on_definition, results,
+                "Definition of '{}'".format(word),
+            )
+            return
+
+        # --- Slow path: filesystem scan — must go off the main thread -------
+        # Everything else ultimately reads every workspace file:
+        #   * on_definition + use_index   -> ``find_usages`` (reads all files)
+        #   * not on_definition + no idx  -> fallback def scan (walks folders)
+        #   * on_definition + no idx      -> fallback usage scan (walks folders)
+        # Running any of these on the main thread freezes Maya for a second
+        # or more, so we dispatch to a background thread and marshal the
+        # results back via QMetaObject.invokeMethod.
         if on_definition:
-            # Cursor is on a definition — find all usages of this symbol.
-            if use_index:
-                results = self._symbol_index.find_usages(word)
-            else:
-                results = self._find_symbol_usages(word, folders)
             popup_title = "Usages of '{}'".format(word)
         else:
-            # Cursor is on a usage — find the definition.
-            if use_index:
-                results = self._symbol_index.find_definitions(word)
-            else:
-                results = self._find_symbol_definition(word, folders)
             popup_title = "Definition of '{}'".format(word)
 
+        self._show_status("Searching for '{}'…".format(word))
+
+        # Wire up the cross-thread completion signal.  We disconnect
+        # any stale connections first so repeated Ctrl+B presses
+        # never fire multiple popups.
+        try:
+            self._declaration_search_done.disconnect(
+                self._handle_declaration_results
+            )
+        except (TypeError, RuntimeError):
+            pass
+        self._declaration_search_done.connect(
+            self._handle_declaration_results
+        )
+
+        # Snapshot values needed by the worker.  Capturing self is fine —
+        # the worker only calls thread-safe index methods or folder
+        # scanners, and signals results back via Qt's auto-queued emit.
+        panel_ref = self
+        symbol_index_ref = self._symbol_index if use_index else None
+        folders_snapshot = list(folders)
+        word_snapshot = word
+        on_definition_snapshot = on_definition
+
+        def _worker():
+            """Background thread: do the slow filesystem scan."""
+            try:
+                if on_definition_snapshot:
+                    # Need usages.
+                    if symbol_index_ref is not None:
+                        scan_results = symbol_index_ref.find_usages(
+                            word_snapshot
+                        )
+                    else:
+                        scan_results = panel_ref._find_symbol_usages(
+                            word_snapshot, folders_snapshot
+                        )
+                else:
+                    # Need definitions — index wasn't ready, full scan.
+                    scan_results = panel_ref._find_symbol_definition(
+                        word_snapshot, folders_snapshot
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "Go to Declaration worker crashed: %s", exc
+                )
+                scan_results = []
+
+            # Emit the signal — Qt's AutoConnection will queue it to
+            # the main thread because we're on a worker thread here.
+            panel_ref._declaration_search_done.emit(
+                word_snapshot, on_definition_snapshot,
+                scan_results, popup_title,
+            )
+
+        import threading
+        threading.Thread(
+            target=_worker, daemon=True, name="MCA-GoToDeclaration"
+        ).start()
+
+    def _handle_declaration_results(self, word, on_definition, results, popup_title):
+        """
+        Main-thread handler for Go-to-Declaration results.
+
+        Called either directly (fast index path) or via
+        ``QMetaObject.invokeMethod`` from the background scan worker.
+
+        :param str word: The symbol the user searched for.
+        :param bool on_definition: True if cursor was on a definition
+            (so ``results`` are usages), False if it was a usage
+            (so ``results`` are definitions).
+        :param list results: List of ``(filepath, line, line_text)`` tuples.
+        :param str popup_title: Title string for the results popup.
+        """
         if not results:
             if on_definition:
-                self._show_status("No usages of '{}' found in workspace".format(word))
+                self._show_status(
+                    "No usages of '{}' found in workspace".format(word)
+                )
             else:
-                self._show_status("No definition of '{}' found in workspace".format(word))
+                self._show_status(
+                    "No definition of '{}' found in workspace".format(word)
+                )
             return
 
         if len(results) == 1:
@@ -5135,7 +5444,9 @@ class MCAEditorPanel(QWidget):
             self._navigate_to_file_line(filepath, line_num)
         else:
             # Multiple results — show popup.
-            popup = GoToDeclarationPopup(self, results, self._navigate_to_file_line, popup_title)
+            popup = GoToDeclarationPopup(
+                self, results, self._navigate_to_file_line, popup_title,
+            )
             popup.exec()
 
     def _is_on_definition(self, word, line_text):

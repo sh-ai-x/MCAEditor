@@ -669,6 +669,10 @@ class MCACodeEditor(QPlainTextEdit):
         # Wider cursor for visibility on dark backgrounds.
         self.setCursorWidth(2)
 
+        # Disable word wrap — long lines scroll horizontally (IDE-style).
+        # The default NoWrap gives a horizontal scrollbar automatically.
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+
     # --- Language / Highlighter ----------------------------------------------
 
     def set_language(self, language):

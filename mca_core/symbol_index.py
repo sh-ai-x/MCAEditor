@@ -80,6 +80,12 @@ _GROUP_TO_KIND = {
     4: "proc",
 }
 
+# Regex matching any Python-ish identifier in a line.  Used at index time
+# to build a per-file word set so ``find_usages`` can skip files whose
+# contents don't include the target symbol at all — a massive speedup
+# when the target only appears in a handful of files.
+_IDENT_REGEX = re.compile(r"[A-Za-z_]\w*")
+
 
 # --- SymbolIndex -------------------------------------------------------
 
@@ -109,6 +115,12 @@ class SymbolIndex:
 
         # All indexed file paths (used by find_usages to avoid re-walking).
         self._all_files = []
+
+        # "/path/file.py" -> frozenset of identifiers seen in that file.
+        # Populated at index time; used by find_usages to skip files
+        # that cannot possibly contain the target symbol (O(1) set
+        # membership vs. reading the entire file).
+        self._file_words = {}
 
         # Current indexer state: "idle" | "indexing" | "ready".
         self._state = "idle"
@@ -184,12 +196,28 @@ class SymbolIndex:
                     re.compile(tmpl.format(symbol=re.escape(name)))
                 )
 
-        # Snapshot the file list under lock, then release for I/O.
+        # Snapshot the file list and per-file word sets under lock,
+        # then release for I/O.
         with self._lock:
             files = list(self._all_files)
+            file_words = dict(self._file_words)
+
+        # Pre-filter files by the cached word sets — only files whose
+        # index-time word set contains *name* can possibly have usages.
+        # This turns an O(N * file_size) scan into O(N) dict lookups
+        # plus a few reads of the files that actually matter.
+        candidate_files = []
+        for filepath in files:
+            words = file_words.get(filepath)
+            if words is None:
+                # No cached word set (indexing didn't see the file fully)
+                # — fall back to re-reading it, preserving correctness.
+                candidate_files.append(filepath)
+            elif name in words:
+                candidate_files.append(filepath)
 
         results = []
-        for filepath in files:
+        for filepath in candidate_files:
             try:
                 with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
                     for i, line in enumerate(fh, start=1):
@@ -216,13 +244,14 @@ class SymbolIndex:
         # Remove old entries for this file.
         self._remove_file(filepath)
 
-        # Re-scan and insert new entries.
-        entries = _parse_file(filepath)
+        # Re-scan and insert new entries + refreshed word set.
+        entries, word_set = _parse_file(filepath)
         if entries is None:
             return
 
         with self._lock:
             self._symbols_by_file[filepath] = entries
+            self._file_words[filepath] = word_set
 
             # Update the mtime cache.
             try:
@@ -247,6 +276,7 @@ class SymbolIndex:
             self._symbols_by_name.clear()
             self._symbols_by_file.clear()
             self._file_mtimes.clear()
+            self._file_words.clear()
             self._all_files = []
             self._state = "idle"
             self._progress = (0, 0)
@@ -279,6 +309,119 @@ class SymbolIndex:
         with self._lock:
             return self._progress
 
+    def get_all_files(self):
+        """
+        Return a snapshot of the indexed file paths.
+
+        Callers (e.g. Find in Files) can use this pre-built list to
+        skip re-walking the filesystem on every search.
+
+        :return: Copy of the indexed file-path list.
+        :rtype: list[str]
+        """
+        # Snapshot under lock so callers get a stable list.
+        with self._lock:
+            return list(self._all_files)
+
+    def get_files_with_word(self, name):
+        """
+        Return the subset of indexed files whose cached word set contains *name*.
+
+        Mirrors the pre-filter used inside ``find_usages``: any file
+        whose index-time word set does NOT include *name* cannot
+        contain a whole-word occurrence of it, so the caller can skip
+        opening/reading it entirely.  Files that were not fully word-
+        indexed (``_file_words`` miss) are included to preserve
+        correctness — the caller is expected to scan them anyway.
+
+        :param str name: The identifier to look up.  Caller should
+            verify this is a plain word (no regex metacharacters) since
+            the word set stores raw identifiers.
+        :return: Candidate file paths.  Empty list if *name* is empty.
+        :rtype: list[str]
+        """
+        if not name:
+            return []
+
+        # Snapshot under lock so the returned list is stable even if
+        # the indexer continues updating ``_file_words`` in the
+        # background after we release the lock.
+        with self._lock:
+            files = list(self._all_files)
+            file_words = dict(self._file_words)
+
+        candidates = []
+        for filepath in files:
+            words = file_words.get(filepath)
+            # No word set recorded -> be conservative and include the
+            # file; the search worker will open it and decide.
+            if words is None or name in words:
+                candidates.append(filepath)
+        return candidates
+
+    def get_files_containing_substring(self, substring, case_sensitive=True):
+        """
+        Return files whose cached word set has an identifier containing *substring*.
+
+        Used by Find-in-Files substring searches when the pattern is
+        a pure identifier fragment (e.g. ``"Curves"`` matching
+        ``"AnimatedCurvesComponent"``).  Because the indexer extracts
+        every ``[A-Za-z_]\\w*`` token into the word set, a substring
+        match against that set is equivalent to a substring match
+        against the file's code — minus string-literal text that
+        spans whitespace or punctuation, which the optimization
+        intentionally leaves to the full filesystem walker.
+
+        Files without a cached word set are included to preserve
+        correctness — callers will open and scan them anyway.
+
+        :param str substring: The fragment to look up.  Caller must
+            guarantee this is pure-identifier text (letters, digits,
+            underscore) or the match will silently miss legitimate
+            hits that cross token boundaries.
+        :param bool case_sensitive: When False, compares lowercased.
+        :return: Candidate absolute file paths.
+        :rtype: list[str]
+        """
+        if not substring:
+            return []
+
+        # Snapshot the index state once; the big identifier sets may
+        # be large and we want to release the lock before the loop
+        # below does any substring work.
+        with self._lock:
+            files = list(self._all_files)
+            file_words = dict(self._file_words)
+
+        # Case-insensitive lookups compare lowercased forms.  This is
+        # a few percent slower than direct ``in`` checks but avoids
+        # maintaining two word caches per file.
+        if case_sensitive:
+            needle = substring
+        else:
+            needle = substring.lower()
+
+        candidates = []
+        for filepath in files:
+            words = file_words.get(filepath)
+            if words is None:
+                # Conservative fallback -- index didn't capture the
+                # file fully, so we let the caller open it.
+                candidates.append(filepath)
+                continue
+
+            # Short-circuit as soon as we find any matching token.
+            # The word set is typically a few hundred entries, and
+            # Python's ``in`` on strings is implemented in C.
+            if case_sensitive:
+                found = any(needle in w for w in words)
+            else:
+                found = any(needle in w.lower() for w in words)
+
+            if found:
+                candidates.append(filepath)
+        return candidates
+
     def get_symbol_count(self):
         """
         Return the total number of indexed symbol entries.
@@ -308,6 +451,7 @@ class SymbolIndex:
         with self._lock:
             old_entries = self._symbols_by_file.pop(filepath, [])
             self._file_mtimes.pop(filepath, None)
+            self._file_words.pop(filepath, None)
 
             # Remove from by-name dict.
             for entry in old_entries:
@@ -338,7 +482,7 @@ class SymbolIndex:
         with self._lock:
             self._progress = (done, total)
 
-    def _bulk_insert(self, filepath, entries, mtime):
+    def _bulk_insert(self, filepath, entries, mtime, word_set=None):
         """
         Insert entries for a single file during initial indexing.
 
@@ -347,10 +491,14 @@ class SymbolIndex:
         :param str filepath: Normalized absolute path.
         :param list entries: List of ``SymbolEntry`` namedtuples.
         :param float mtime: File modification time.
+        :param frozenset word_set: Identifiers seen in the file (used by
+            ``find_usages`` to skip files that cannot contain the target).
         """
         with self._lock:
             self._symbols_by_file[filepath] = entries
             self._file_mtimes[filepath] = mtime
+            if word_set is not None:
+                self._file_words[filepath] = word_set
 
             for entry in entries:
                 bucket = self._symbols_by_name.setdefault(entry.name, [])
@@ -364,21 +512,34 @@ class SymbolIndex:
 
 def _parse_file(filepath):
     """
-    Parse a single file and return a list of ``SymbolEntry`` for every
-    definition found.
+    Parse a single file and return definitions plus a word set.
+
+    Walks the file once, extracting both the list of ``SymbolEntry``
+    for class/def/proc lines and a frozenset of every identifier
+    in the file.  The identifier set powers the fast word-filter in
+    ``SymbolIndex.find_usages``.
 
     :param str filepath: Absolute path to the file.
-    :return: List of ``SymbolEntry`` or ``None`` on read failure.
-    :rtype: list[SymbolEntry] or None
+    :return: ``(entries, word_set)`` tuple, or ``(None, None)`` on read failure.
+    :rtype: tuple
     """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except (OSError, IOError):
-        return None
+        return (None, None)
 
     entries = []
+    # Build the per-file identifier set.  Using a plain set for
+    # construction, frozen at the end for immutability + slightly
+    # better lookup performance.
+    words = set()
+
     for i, raw_line in enumerate(lines, start=1):
+        # Collect all identifiers on this line for the word set.
+        for tok in _IDENT_REGEX.findall(raw_line):
+            words.add(tok)
+
         match = _INDEX_REGEX.search(raw_line)
         if not match:
             continue
@@ -402,7 +563,7 @@ def _parse_file(filepath):
                 entries.append(entry)
                 break
 
-    return entries
+    return (entries, frozenset(words))
 
 
 # --- IndexWorker -------------------------------------------------------
@@ -454,19 +615,19 @@ class IndexWorker(threading.Thread):
         self._index._set_progress(0, total)
         logger.info("Symbol indexer found %d files to scan", total)
 
-        # Phase 2 -- parse each file for definitions.
+        # Phase 2 -- parse each file for definitions + word set.
         for i, filepath in enumerate(file_list):
             if self._cancelled:
                 logger.info("Symbol indexing cancelled at file %d/%d", i, total)
                 break
 
-            entries = _parse_file(filepath)
+            entries, word_set = _parse_file(filepath)
             if entries is not None:
                 try:
                     mtime = os.path.getmtime(filepath)
                 except OSError:
                     mtime = 0.0
-                self._index._bulk_insert(filepath, entries, mtime)
+                self._index._bulk_insert(filepath, entries, mtime, word_set)
 
             # Update progress after each file.
             self._index._set_progress(i + 1, total)

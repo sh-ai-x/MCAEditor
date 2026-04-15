@@ -646,6 +646,31 @@ class _MayaHotkeyFilter(QObject):
                     # hasn't caught up after activateWindow() on Win11.
                     focus = QApplication.instance().focusWidget()
 
+                    # Terminal-intent override: if the user's last click
+                    # landed inside a terminal widget, prefer that target
+                    # over Qt's current focusWidget().  Focus can drift
+                    # away from the terminal due to non-click focus
+                    # transients (menu popups, dialog dismissals, internal
+                    # reparenting), and users expect Ctrl+V to paste into
+                    # the terminal they last clicked — not the editor they
+                    # were typing in before clicking the terminal.
+                    if key == Qt.Key.Key_V:
+                        clicked = getattr(self, "_focus_forced_widget", None)
+                        if clicked is not None:
+                            try:
+                                clicked.parent()  # Liveness probe.
+                                if self._widget_in_editor(clicked):
+                                    if self._find_parent_terminal(clicked):
+                                        logger.debug(
+                                            "Ctrl+V: last click was in "
+                                            "terminal — overriding focus"
+                                        )
+                                        focus = clicked
+                            except RuntimeError:
+                                # Dead reference — let the existing fallback
+                                # chain below handle it.
+                                pass
+
                     # Fallback: if focusWidget() returns None or a widget
                     # outside our editor (focus hasn't transferred yet),
                     # use the widget we tried to focus in Phase 0.
@@ -1068,12 +1093,31 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         """
         if new and self._hotkey_filter._widget_in_editor(new):
             self._hotkey_filter._focus_forced = True
-            # Keep _focus_forced_widget current.  If the user's most
-            # recent click-target was destroyed (e.g. a terminal tab
-            # closed), the stale reference can crash Phase 2's paste
-            # dispatch.  Updating here every time focus lands inside
-            # our tree guarantees the fallback widget is always alive.
-            self._hotkey_filter._focus_forced_widget = new
+
+            # Refresh _focus_forced_widget ONLY when the stored reference
+            # is dead / missing / outside our tree.  Overwriting on every
+            # transient focus change stomped on the click-tracked widget:
+            # if the user clicked the terminal (_focus_forced_widget =
+            # terminal display), a non-click focus transient (menu close,
+            # dialog dismiss, internal reparent) would flip the reference
+            # to some other widget in our tree.  The next Ctrl+V would
+            # then route through _find_parent_terminal() starting from the
+            # wrong widget — so paste went to the editor instead of the
+            # terminal the user just clicked.
+            current = getattr(self._hotkey_filter, "_focus_forced_widget", None)
+            need_refresh = False
+            if current is None:
+                need_refresh = True
+            else:
+                try:
+                    # Any method call on a deleted PySide widget raises.
+                    current.parent()
+                    if not self._hotkey_filter._widget_in_editor(current):
+                        need_refresh = True
+                except RuntimeError:
+                    need_refresh = True
+            if need_refresh:
+                self._hotkey_filter._focus_forced_widget = new
 
     # --- Maya Output Hook ---------------------------------------------------
 
@@ -1939,9 +1983,21 @@ def show_mca_editor():
 
         def _on_update_available(version, url):
             """Write update notification to the output panel from the main thread."""
-            QTimer.singleShot(0, lambda: _update_win._panel._output.write_warning(
-                "MCA Editor v{} is available.  Download at: {}".format(version, url)
-            ))
+            # This callback runs on the version_check daemon thread.
+            # PySide6 won't marshal arbitrary Python callables via
+            # QMetaObject.invokeMethod or QTimer.singleShot — both
+            # require a bytes slot name in the cross-thread form.  Qt
+            # Signals, however, DO marshal automatically (AutoConnection
+            # promotes to QueuedConnection when emitter and receiver
+            # live on different threads), so we emit through the
+            # panel's dedicated ``update_available_notification`` signal
+            # and let the main-thread slot write to the output panel.
+            try:
+                _update_win._panel.update_available_notification.emit(
+                    version, url,
+                )
+            except Exception as exc:
+                logger.debug("Update signal emit failed: %s", exc)
 
         check_for_update(_on_update_available)
     except Exception as exc:

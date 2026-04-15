@@ -43,19 +43,17 @@ class DropZone:
     """
     Enumeration of drop zone positions within an editor group.
 
-    Zones divide the group area into five regions:
-        - TOP: upper 25% of the widget
-        - BOTTOM: lower 25% of the widget
-        - LEFT: left 25% of the middle 50% band
-        - RIGHT: right 25% of the middle 50% band
+    Zones divide the group area into three regions (vertical splits
+    were removed — the tab header/content layout doesn't have a
+    meaningful top-vs-bottom axis, and drops there were error-prone):
+        - LEFT: left 25% of the widget (split left)
+        - RIGHT: right 25% of the widget (split right)
         - CENTER: remaining central area (merge into existing group)
         - NONE: cursor is not over any valid zone
     """
     NONE = "none"
     LEFT = "left"
     RIGHT = "right"
-    TOP = "top"
-    BOTTOM = "bottom"
     CENTER = "center"
 
 
@@ -149,11 +147,10 @@ class DropZoneOverlay(QWidget):
         # Convert global position to overlay-local coordinates.
         local_pos = self.mapFromGlobal(global_pos)
 
-        # Test zones in priority order: edges first, then center.
+        # Test zones in priority order: LEFT/RIGHT first (side splits
+        # are the common want), then CENTER for merge.
         new_zone = DropZone.NONE
-        for zone_name in (DropZone.TOP, DropZone.BOTTOM,
-                          DropZone.LEFT, DropZone.RIGHT,
-                          DropZone.CENTER):
+        for zone_name in (DropZone.LEFT, DropZone.RIGHT, DropZone.CENTER):
             rect = self._zone_rects.get(zone_name)
             if rect and rect.contains(local_pos):
                 new_zone = zone_name
@@ -195,33 +192,30 @@ class DropZoneOverlay(QWidget):
 
     def _compute_zone_rects(self, w, h):
         """
-        Compute the five drop zone rectangles for a given size.
+        Compute the three drop zone rectangles for a given size.
 
         Layout:
-            - TOP: full width, top 25% of height
-            - BOTTOM: full width, bottom 25% of height
-            - LEFT: left 25% of width, middle 50% of height
-            - RIGHT: right 25% of width, middle 50% of height
-            - CENTER: remaining central rectangle
+            - LEFT: left 25% of width, FULL height
+            - RIGHT: right 25% of width, FULL height
+            - CENTER: the remaining middle column, FULL height
+
+        Vertical (TOP/BOTTOM) splits were removed — they conflicted with
+        the tab bar at the top and the editor's normal scroll/footer
+        area at the bottom, and drops there raised errors.
 
         :param int w: Overlay width in pixels.
         :param int h: Overlay height in pixels.
         """
-        # Vertical band boundaries (top 25%, middle 50%, bottom 25%).
-        top_h = int(h * 0.25)
-        bottom_y = h - int(h * 0.25)
-        mid_h = bottom_y - top_h
-
-        # Horizontal band boundaries for the middle section.
+        # Horizontal edge bands run the FULL height so side drops work
+        # even when the cursor is near the tab bar or bottom of panel.
         left_w = int(w * 0.25)
         right_x = w - int(w * 0.25)
+        mid_col_w = right_x - left_w
 
         self._zone_rects = {
-            DropZone.TOP: QRect(0, 0, w, top_h),
-            DropZone.BOTTOM: QRect(0, bottom_y, w, h - bottom_y),
-            DropZone.LEFT: QRect(0, top_h, left_w, mid_h),
-            DropZone.RIGHT: QRect(right_x, top_h, w - right_x, mid_h),
-            DropZone.CENTER: QRect(left_w, top_h, right_x - left_w, mid_h),
+            DropZone.LEFT: QRect(0, 0, left_w, h),
+            DropZone.RIGHT: QRect(right_x, 0, w - right_x, h),
+            DropZone.CENTER: QRect(left_w, 0, mid_col_w, h),
         }
 
     # --- Painting ------------------------------------------------------------

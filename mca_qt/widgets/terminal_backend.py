@@ -412,10 +412,12 @@ class TerminalBackend(QThread):
         except _ConPTYBrokenError:
             # pywinpty's ConPTY spawned but didn't forward output.
             # Try calling conpty.dll directly — works on Windows 11
-            # Insider builds where kernel32's path is broken.
+            # Insider builds where kernel32's path is broken.  This
+            # fallback is the normal working path on newer Win11 builds,
+            # so log at debug level to avoid alarming the user.
             if HAS_DIRECT_CONPTY:
-                logger.warning("pywinpty ConPTY broken — trying direct "
-                               "conpty.dll fallback")
+                logger.debug("pywinpty ConPTY unavailable — using direct "
+                             "conpty.dll path")
                 # Clear any stale data from the broken pywinpty session
                 # so the ANSI parser starts fresh with the new ConPTY.
                 with self._buffer_lock:
@@ -497,8 +499,11 @@ class TerminalBackend(QThread):
                 time.sleep(0.05)
 
         if not prompt_received and self._running and not self._pty.iseof():
-            logger.warning("ConPTY sanity check failed — no visible output "
-                           "after 3s (pywinpty/kernel32 path broken)")
+            # Expected on newer Windows 11 builds where pywinpty's
+            # kernel32 path is broken — the direct conpty.dll fallback
+            # handles this cleanly, so keep the log quiet.
+            logger.debug("pywinpty ConPTY sanity check failed after 3s — "
+                         "falling back to direct conpty.dll")
             self._pty = None
             raise _ConPTYBrokenError("ConPTY not forwarding shell output")
 

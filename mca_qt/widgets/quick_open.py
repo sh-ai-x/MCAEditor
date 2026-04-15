@@ -381,38 +381,88 @@ class GoToFilePopup(QuickOpenPopup):
     :param callable open_callback: Function to call with the selected filepath.
     """
 
-    def __init__(self, parent, workspace_folders, open_callback):
+    def __init__(self, parent, workspace_folders, open_callback,
+                 symbol_index=None):
         """
         Initialize the Go to File popup.
 
         :param QWidget parent: Parent window for positioning.
         :param list workspace_folders: Paths to scan for files.
         :param callable open_callback: Called with the absolute filepath on confirm.
+        :param SymbolIndex symbol_index: Optional symbol index used to skip
+            the filesystem walk — the popup builds its list from the index's
+            cached file paths when the index is ready.
         """
         super().__init__(parent, placeholder="Go to File (type to filter)...")
         self._workspace_folders = workspace_folders
         self._open_callback = open_callback
+        self._symbol_index = symbol_index
 
     def _get_items(self):
         """
-        Walk workspace folders and return discovered files.
+        Build the candidate file list.
+
+        Prefers the pre-built symbol index file list (fast path — no
+        filesystem I/O) and falls back to a recursive walk when no
+        index is ready.
 
         :return: List of (display_text, search_text, filepath) tuples.
         :rtype: list
         """
         items = []
-        seen = set()
 
-        for folder in self._workspace_folders:
-            # Normalize the folder path for consistent display.
-            folder = os.path.normpath(folder)
+        # Fast path: use the pre-built symbol index when it's ready.
+        if (self._symbol_index is not None
+                and self._symbol_index.is_ready()):
+            index_files = self._symbol_index.get_all_files()
+            items = self._items_from_files(index_files)
+            logger.debug("GoToFilePopup: %d files from index", len(items))
+        else:
+            # Fallback: walk the filesystem (used before indexing finishes).
+            seen = set()
+            for folder in self._workspace_folders:
+                folder = os.path.normpath(folder)
+                self._walk_folder(folder, folder, 0, items, seen)
+            logger.debug("GoToFilePopup: %d files from walk", len(items))
 
-            self._walk_folder(folder, folder, 0, items, seen)
-
-        # Sort by filename for consistent ordering.
+        # Sort by search text for consistent ordering.
         items.sort(key=lambda x: x[1].lower())
+        return items
 
-        logger.debug("GoToFilePopup: discovered %d files", len(items))
+    def _items_from_files(self, file_paths):
+        """
+        Convert an absolute-path list into popup item tuples.
+
+        Each file is displayed as "filename    relative/path" where the
+        relative path is resolved against the first workspace folder the
+        file lives under.
+
+        :param list file_paths: Absolute file paths.
+        :return: List of (display, search, abs_path) tuples.
+        :rtype: list
+        """
+        # Normalize workspace folders once for fast prefix matching.
+        norm_folders = [os.path.normpath(f) for f in self._workspace_folders]
+
+        items = []
+        for abs_path in file_paths:
+            filename = os.path.basename(abs_path)
+
+            # Find the matching workspace root for the relative display.
+            rel_path = filename
+            for folder in norm_folders:
+                try:
+                    if abs_path.startswith(folder):
+                        rel_path = os.path.relpath(abs_path, folder)
+                        break
+                except ValueError:
+                    # Different drive on Windows — skip.
+                    continue
+
+            display = "{}    {}".format(filename, rel_path)
+            search_text = filename + " " + rel_path
+            items.append((display, search_text, abs_path))
+
         return items
 
     def _walk_folder(self, root, current, depth, items, seen):

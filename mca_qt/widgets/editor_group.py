@@ -22,7 +22,7 @@ import logging
 
 from mca_qt.qt_compat import (
     QWidget, QVBoxLayout, QTabWidget, QTabBar,
-    QPushButton, QMenu, QApplication,
+    QPushButton, QMenu, QApplication, QToolTip,
     Qt, Signal, QEvent, QPoint, QTimer, QRect,
     QDrag, QMimeData, QByteArray, QPixmap, QColor, QPainter,
 )
@@ -83,8 +83,26 @@ class SplittableTabBar(QTabBar):
         # -1 means no indicator shown.
         self._drop_indicator_index = -1
 
+        # When True, the "lock tabs" setting is active — we suppress
+        # drag initiation entirely so tabs cannot be rearranged or
+        # split out by dragging.  Kept in sync by EditorGroup.apply_settings.
+        self._tabs_locked = False
+
         # Accept drops so tabs can be merged onto this bar.
         self.setAcceptDrops(True)
+
+    def set_tabs_locked(self, locked):
+        """
+        Enable or disable the tab drag-to-reorder / drag-to-split flow.
+
+        When locked, left-click drags on the tab bar are ignored and
+        tabs stay put.  Used to mirror the ``lock_tabs`` user setting
+        now that Qt's native ``setMovable`` is permanently disabled
+        (our custom QDrag replaced it).
+
+        :param bool locked: True to block drags, False to allow them.
+        """
+        self._tabs_locked = bool(locked)
 
     # --- Mouse Events (drag initiation) --------------------------------------
 
@@ -119,10 +137,13 @@ class SplittableTabBar(QTabBar):
 
         :param QMouseEvent event: The mouse move event.
         """
-        # Only process left-button drags on a valid tab.
+        # Only process left-button drags on a valid tab.  When the
+        # user has locked tabs, skip the drag path entirely so the
+        # click falls through as a plain tab selection.
         if (self._drag_start_pos is not None
                 and self._drag_tab_index >= 0
-                and not self._drag_triggered):
+                and not self._drag_triggered
+                and not self._tabs_locked):
             # Manhattan distance from the original press point.
             # This works in all directions — no need for the cursor
             # to leave the tab bar bounds.
@@ -176,12 +197,27 @@ class SplittableTabBar(QTabBar):
         """
         Reset the drag state on mouse release.
 
+        When the click did NOT escalate to a drag, transfer keyboard
+        focus to the now-active editor.  We do this here (rather than
+        in the group's ``_on_tab_changed`` handler) because the tab
+        bar still owns the mouse grab during press/move, and stealing
+        focus mid-click prevents QDrag from ever starting.
+
         :param QMouseEvent event: The mouse release event.
         """
+        # Capture drag state BEFORE clearing so we can decide whether
+        # to hand focus to the editor.
+        was_drag = self._drag_triggered
         self._drag_start_pos = None
         self._drag_tab_index = -1
         self._drag_triggered = False
         super().mouseReleaseEvent(event)
+        # Pure tab click (no drag) — safe to move focus now.  The
+        # mouse grab has been released and QDrag has been ruled out.
+        if not was_drag:
+            group = self._find_parent_editor_group()
+            if group is not None:
+                group.focus_current_editor()
 
     # --- Drop Events (tab merge onto bar) ------------------------------------
 
@@ -314,6 +350,11 @@ class SplittableTabBar(QTabBar):
         actual_idx = tw.insertTab(insert_index, editor_widget, tab_name)
         if icon:
             tw.setTabIcon(actual_idx, icon)
+        # Restore the full-path hover tooltip on the new tab — Qt does NOT
+        # carry tooltips across insertTab, so without this call tabs that
+        # were merged by dropping onto another group's bar would silently
+        # lose their hover tooltip (regression users noticed after drag).
+        tw.setTabToolTip(actual_idx, file_path if file_path else tab_name)
         # Update internal tracking list.
         editor_group._editors.insert(actual_idx, (editor_widget, tab_name, file_path))
         tw.setCurrentIndex(actual_idx)
@@ -507,7 +548,15 @@ class EditorGroup(QWidget):
         self._tab_widget.setTabBar(self._splittable_bar)
 
         self._tab_widget.setTabsClosable(True)
-        self._tab_widget.setMovable(True)
+        # Qt's built-in movable-tab machinery must stay OFF.  We ship our
+        # own QDrag flow (SplittableTabBar.mouseMoveEvent) that hijacks
+        # the mouse via ``drag.exec()``.  When ``setMovable(True)`` is on,
+        # Qt starts tracking a tab-move the moment a tab is pressed and
+        # waits for a matching release; our QDrag eats that release, so
+        # Qt stays stuck in "reorder in progress" forever.  That sticky
+        # state breaks subsequent clicks (no focus transfer) and tab
+        # tooltips on the dragged tab after any drag.
+        self._tab_widget.setMovable(False)
         self._tab_widget.setDocumentMode(True)
         self._tab_widget.setUsesScrollButtons(True)
         self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
@@ -645,6 +694,10 @@ class EditorGroup(QWidget):
         idx = self._tab_widget.addTab(editor, tab_name)
         if icon:
             self._tab_widget.setTabIcon(idx, icon)
+        # Show the full file path on hover so users can disambiguate
+        # tabs with the same base name (e.g. two __init__.py files).
+        # For unsaved buffers (file_path is None) fall back to tab_name.
+        self._tab_widget.setTabToolTip(idx, file_path if file_path else tab_name)
         self._editors.append((editor, tab_name, file_path))
         self._tab_widget.setCurrentIndex(idx)
         self.editors_changed.emit()
@@ -792,6 +845,11 @@ class EditorGroup(QWidget):
         """
         if 0 <= index < len(self._editors):
             self._editors[index] = (editor, tab_name, file_path)
+            # Keep the hover tooltip in sync with the backing path so
+            # Save As / rename operations don't leave the old path.
+            self._tab_widget.setTabToolTip(
+                index, file_path if file_path else tab_name
+            )
 
     def index_of_editor(self, editor):
         """
@@ -890,7 +948,17 @@ class EditorGroup(QWidget):
         # Apply tab bar settings.
         self._tab_widget.tabBar().setVisible(settings.get("show_tab_bar"))
         self._tab_widget.setTabsClosable(settings.get("show_close_button_on_tab"))
-        self._tab_widget.setMovable(not settings.get("lock_tabs"))
+        # NOTE: setMovable stays permanently False (see _setup_ui for
+        # rationale).  Qt's built-in tab reorder conflicts with our
+        # custom QDrag flow — our drag code replaces Qt's behavior.
+        # The "lock_tabs" setting is enforced in SplittableTabBar by
+        # gating when the drag can begin, not by touching setMovable.
+        self._tab_widget.setMovable(False)
+        # Propagate the lock flag to the custom tab bar so it can
+        # suppress drag initiation when the user has locked tabs.
+        bar = self._tab_widget.tabBar()
+        if hasattr(bar, "set_tabs_locked"):
+            bar.set_tabs_locked(bool(settings.get("lock_tabs")))
 
     # --- Internal Event Handling ---------------------------------------------
 
@@ -910,6 +978,23 @@ class EditorGroup(QWidget):
                 if tab_index == -1:
                     self.new_tab_requested.emit()
                     return True
+
+            # Explicit tooltip handling.  After a QDrag on the tab bar,
+            # QTabBar's default tooltip path can get wedged by the
+            # press/move state left behind by ``drag.exec()`` — driving
+            # QToolTip.showText ourselves keeps the full-path hover
+            # working on tabs that have been dragged between groups.
+            if event.type() == QEvent.Type.ToolTip:
+                bar = self._tab_widget.tabBar()
+                tab_index = bar.tabAt(event.pos())
+                if tab_index >= 0:
+                    text = bar.tabToolTip(tab_index)
+                    if text:
+                        QToolTip.showText(event.globalPos(), text, bar)
+                    else:
+                        QToolTip.hideText()
+                    return True
+                QToolTip.hideText()
 
         # Reposition overlay widgets when the tab widget resizes.
         if obj is self._tab_widget and event.type() == QEvent.Type.Resize:
@@ -943,6 +1028,45 @@ class EditorGroup(QWidget):
             if self._find_bar.isVisible():
                 self._find_bar.set_editor(editor)
             self.current_editor_changed.emit(editor)
+
+            # Transfer keyboard focus to the newly active editor so the
+            # user's next keystroke (Ctrl+Enter, Ctrl+V, etc.) lands on
+            # the editor instead of the tab bar.
+            #
+            # BUT: `currentChanged` fires on MousePress when the user
+            # clicks a tab.  If we setFocus() immediately (or via
+            # singleShot(0)), it races with a potential drag operation
+            # on the same click — QDrag has to install a mouse grab from
+            # the tab bar, and stealing focus mid-press can stop drag
+            # from ever initiating.
+            #
+            # Skip the focus transfer if the tab bar is currently
+            # tracking a potential drag.  The tab bar's mouseReleaseEvent
+            # calls back into our public focus_current_editor() method
+            # when the click completes without a drag.
+            bar = getattr(self, "_splittable_bar", None)
+            drag_pending = bool(
+                bar is not None and bar._drag_start_pos is not None
+            )
+            if not drag_pending:
+                # Safe to transfer now — no drag in flight.  Defer with
+                # singleShot so any post-click focus juggling by Qt
+                # settles before we take over.
+                QTimer.singleShot(0, editor.setFocus)
+
+    def focus_current_editor(self):
+        """
+        Move keyboard focus to the currently active editor in this group.
+
+        Called by SplittableTabBar.mouseReleaseEvent after a click that
+        did NOT become a drag — this is the safe moment to transfer
+        focus (drag has been ruled out and Qt's mouse grab is released).
+
+        :rtype: None
+        """
+        editor = self.current_editor()
+        if editor:
+            editor.setFocus()
 
     def _on_tab_close_requested(self, index):
         """

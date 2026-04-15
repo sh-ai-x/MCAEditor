@@ -796,6 +796,39 @@ class OutputWindow(QWidget):
         # Insert the search bar at index 1 (between header and output).
         layout.insertWidget(1, self._search_bar)
 
+        # --- Scroll-to-Bottom Overlay Button ---
+        # Floating button in the bottom-right of the output area.  Shown
+        # only when the user has scrolled up; clicking snaps the view
+        # back to the latest output.  Parent is the output widget so the
+        # button paints on top of the text area.
+        self._scroll_bottom_btn = QPushButton("\u2193 Scroll to bottom", self._output)
+        self._scroll_bottom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._scroll_bottom_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: #ffffff;
+                border: 1px solid #1177bb;
+                border-radius: 10px;
+                padding: 4px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QPushButton:pressed {
+                background-color: #094771;
+            }
+        """)
+        self._scroll_bottom_btn.clicked.connect(self._scroll_to_bottom)
+        self._scroll_bottom_btn.hide()
+        # Show/hide the button based on scroll position.
+        self._output.verticalScrollBar().valueChanged.connect(
+            self._update_scroll_bottom_visibility
+        )
+        # Install event filter on the viewport so we can reposition the
+        # floating button whenever the output area resizes.
+        self._output.viewport().installEventFilter(self)
+
         # --- Pre-build text formats for each message type ---
         self._fmt_normal = self._make_format(COLOR_NORMAL)
         self._fmt_error = self._make_format(COLOR_ERROR)
@@ -853,6 +886,74 @@ class OutputWindow(QWidget):
         :param QPlainTextEdit.LineWrapMode mode: The wrap mode to apply.
         """
         self._output.setLineWrapMode(mode)
+
+    # --- Scroll-to-Bottom Overlay --------------------------------------------
+
+    def _scroll_to_bottom(self):
+        """
+        Snap the output view to the most recent line.
+
+        Called by the floating overlay button.  Simply sets the vertical
+        scrollbar to its maximum value.
+        """
+        scrollbar = self._output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_scroll_bottom_visibility(self, _value=None):
+        """
+        Show or hide the scroll-to-bottom button based on scroll state.
+
+        Hidden when the user is within a small threshold of the bottom
+        (meaning auto-scroll is effectively on).  Visible when they've
+        scrolled up — gives them a quick way back without dragging the
+        scrollbar.
+
+        :param int _value: Scrollbar value (ignored; we re-read current).
+        """
+        scrollbar = self._output.verticalScrollBar()
+        # 8px threshold matches the smart auto-scroll "near bottom" check.
+        near_bottom = scrollbar.value() >= scrollbar.maximum() - 8
+        if near_bottom:
+            self._scroll_bottom_btn.hide()
+        else:
+            self._reposition_scroll_bottom_btn()
+            self._scroll_bottom_btn.show()
+            self._scroll_bottom_btn.raise_()
+
+    def _reposition_scroll_bottom_btn(self):
+        """
+        Place the floating button in the bottom-right of the output area.
+
+        Keeps a small margin from the edges and leaves room for the
+        vertical scrollbar so the button doesn't sit on top of it.
+        """
+        btn = self._scroll_bottom_btn
+        btn.adjustSize()
+        viewport = self._output.viewport()
+        vw = viewport.width()
+        vh = viewport.height()
+        # 12px margin; scrollbar is painted outside the viewport so we
+        # don't need extra horizontal offset.
+        x = max(0, vw - btn.width() - 12)
+        y = max(0, vh - btn.height() - 12)
+        btn.move(x, y)
+
+    def eventFilter(self, obj, event):
+        """
+        Watch the output viewport for resize events and reposition the
+        floating scroll-to-bottom button.
+
+        :param QObject obj: The object that generated the event.
+        :param QEvent event: The event itself.
+        :return: False (never consume the event).
+        :rtype: bool
+        """
+        # Reposition the overlay button on every viewport resize so it
+        # stays anchored to the bottom-right corner.
+        if obj is self._output.viewport() and event.type() == QEvent.Type.Resize:
+            if self._scroll_bottom_btn.isVisible():
+                self._reposition_scroll_bottom_btn()
+        return super().eventFilter(obj, event)
 
     def _make_format(self, hex_color):
         """

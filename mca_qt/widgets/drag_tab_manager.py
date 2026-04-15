@@ -228,12 +228,6 @@ class DragTabManager(QObject):
         elif zone == DropZone.LEFT:
             self._split_tab(source_group, tab_index, group,
                             Qt.Orientation.Horizontal, before=True)
-        elif zone == DropZone.BOTTOM:
-            self._split_tab(source_group, tab_index, group,
-                            Qt.Orientation.Vertical, before=False)
-        elif zone == DropZone.TOP:
-            self._split_tab(source_group, tab_index, group,
-                            Qt.Orientation.Vertical, before=True)
 
         return True
 
