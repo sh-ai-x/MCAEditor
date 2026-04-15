@@ -1,5 +1,17 @@
 # MCA Editor Changelog
 
+## v1.0.15 — 2026-04-14
+- Fix Maya 2024 Windows tab drag regression — PySide2 now falls back to Qt's native tab reorder while PySide6 keeps the custom QDrag flow
+- `drag.exec_()` called directly on PySide2 to avoid relying on the qt_compat lambda patch firing first; wrapped in try/except so a binding failure can't kill the mouse handler
+- `lock_tabs` now drives `setMovable(not locked)` on PySide2 in addition to the custom bar flag
+
+## v1.0.14 — 2026-04-14
+- Find in Files now routes through the SymbolIndex for identifier and substring searches — roughly an order of magnitude faster than the old filesystem walk
+- Added `get_files_with_word` and `get_files_containing_substring` to SymbolIndex; status label shows the candidate count
+- Find / Replace in Files auto-populate with the current editor selection and auto-run on open
+- Fix merged-tab tooltip: dragging a tab between groups no longer drops its full-path hover text
+- Fix post-drag click jank: `setMovable(False)` on PySide6 so Qt's reorder state doesn't get stuck after the custom QDrag eats the mouse release
+
 ## v1.0.13 — 2026-04-14
 - Autocomplete: `from X import ...` now suggests names from module X, including submodules discovered via pkgutil
 - Autocomplete: `from X.Y.` and `import X.Y.` offer submodule completions even before the package has been imported
