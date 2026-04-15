@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 from collections import namedtuple
 
@@ -36,10 +37,29 @@ SymbolEntry = namedtuple(
 # --- Constants ---------------------------------------------------------
 
 # Directories to skip during filesystem walk.
+# Covers: Python tooling (__pycache__, .venv, site-packages), JS/TS tooling
+# (node_modules, bower_components, .next, .nuxt), vendored dependencies
+# (vendor, third_party), build outputs (build, dist, out, target, bin, obj),
+# UE/Unity engine caches (Binaries, Intermediate, DerivedDataCache, Saved,
+# Library), and IDE metadata (.git, .idea, .vs, .vscode).  Skipping these
+# avoids indexing generated or vendored code that users rarely "goto-def"
+# into and that dominates the file count in game / web projects.
 _SKIP_DIRS = {
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    ".mypy_cache", ".pytest_cache", ".tox", ".eggs", "dist",
-    "build", ".idea", ".vs", ".vscode",
+    # Python
+    "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+    ".tox", ".eggs", "site-packages",
+    # JavaScript / TypeScript
+    "node_modules", "bower_components", ".next", ".nuxt",
+    # Vendored deps
+    "vendor", "third_party",
+    # Build outputs
+    "build", "dist", "out", "target", "bin", "obj",
+    # Unreal Engine per-project caches
+    "Binaries", "Intermediate", "DerivedDataCache", "Saved",
+    # Unity per-project caches
+    "Library", "Temp",
+    # Version control + IDE
+    ".git", ".hg", ".svn", ".idea", ".vs", ".vscode",
 }
 
 # File extensions to skip (binary / non-source).
@@ -51,6 +71,40 @@ _SKIP_EXTS = {
 
 # Maximum directory depth to recurse into.
 _MAX_DEPTH = 15
+
+# Skip files larger than this many bytes — generated code, minified
+# bundles, vendored single-file libraries, and lockfiles can be multiple
+# megabytes and dominate indexing time for zero user-visible benefit
+# (symbols in these files are almost never "goto-def" targets).
+_MAX_FILE_SIZE = 512 * 1024  # 512 KB
+
+# --- Indexer responsiveness knobs --------------------------------------
+#
+# The indexer runs as a background daemon thread, but CPython's GIL
+# serializes Python bytecode across threads.  When the indexer is busy
+# scanning thousands of files, Maya's main-thread Python (scriptJobs,
+# idle callbacks, plug-in events) gets starved.  Combined with disk I/O
+# contention from reading every source file, this has historically
+# made Maya feel unusable for several minutes after project open.
+#
+# These constants tune the trade-off between total indexing time and
+# main-thread responsiveness.  Defaults err toward responsiveness — it's
+# fine if indexing takes an extra 20% as long, so long as Maya stays
+# interactive the whole time.
+
+# Delay (seconds) before the indexer begins walking folders after being
+# started.  Gives Maya's own startup reads (UI fonts, workspace restore,
+# plug-in autoload) time to finish before we start hammering the disk.
+# Checked cooperatively against ``_cancelled`` in short slices so a
+# quick project close doesn't leave the thread sleeping.
+_STARTUP_DELAY_SECS = 3.0
+
+# Release the GIL every N files parsed in Phase 2.  A small ``sleep()``
+# (not ``sleep(0)``, which can be a near-no-op under heavy load) yields
+# to the main thread's Python callbacks.  Total indexer overhead is
+# ``(file_count / _YIELD_EVERY_N_FILES) * _YIELD_SLEEP_SECS``.
+_YIELD_EVERY_N_FILES = 20
+_YIELD_SLEEP_SECS = 0.005  # 5 ms
 
 # Regex templates for definition lines.  ``{symbol}`` is replaced with a
 # concrete name during lookup; during indexing we use a generic capture
@@ -523,6 +577,19 @@ def _parse_file(filepath):
     :return: ``(entries, word_set)`` tuple, or ``(None, None)`` on read failure.
     :rtype: tuple
     """
+    # Size gate — skip generated/bundled files that would dominate
+    # indexing time without contributing useful "goto-def" targets.
+    # Keeping the check here (not in the walker) means the single-file
+    # ``update_file()`` path also benefits when the user saves a huge
+    # generated file into an indexed folder.
+    try:
+        if os.path.getsize(filepath) > _MAX_FILE_SIZE:
+            return (None, None)
+    except OSError:
+        # Broken symlink, permission denied, or race with a delete —
+        # treat like a read failure.
+        return (None, None)
+
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
@@ -594,13 +661,39 @@ class IndexWorker(threading.Thread):
         """
         self._cancelled = True
 
+    def _interruptible_sleep(self, total_secs):
+        """
+        Sleep for *total_secs* but check the cancel flag every 100 ms
+        so project-close doesn't leave the thread blocked in sleep.
+
+        :param float total_secs: Total duration to sleep.
+        """
+        slice_secs = 0.1
+        remaining = total_secs
+        while remaining > 0 and not self._cancelled:
+            chunk = slice_secs if remaining > slice_secs else remaining
+            time.sleep(chunk)
+            remaining -= chunk
+
     def run(self):
         """
         Entry point for the background thread.
 
+        Phase 0: Wait a short startup grace period so Maya's own init
+                 disk I/O doesn't collide with ours.
         Phase 1: Walk folders and collect file paths.
-        Phase 2: Parse each file and insert definitions into the index.
+        Phase 2: Parse each file and insert definitions into the index,
+                 yielding the GIL periodically so the main thread can
+                 run Python callbacks responsively.
         """
+        # Phase 0 -- startup delay.  When Maya auto-opens the editor
+        # with a large project, this thread starts while Maya is still
+        # finishing its own load.  Wait a few seconds before hitting
+        # the disk so Maya's startup reads have room to finish.
+        self._interruptible_sleep(_STARTUP_DELAY_SECS)
+        if self._cancelled:
+            return
+
         self._index._set_state("indexing")
         logger.info("Symbol indexing started for %d folder(s)", len(self._folders))
 
@@ -616,6 +709,9 @@ class IndexWorker(threading.Thread):
         logger.info("Symbol indexer found %d files to scan", total)
 
         # Phase 2 -- parse each file for definitions + word set.
+        # ``yield_counter`` tracks files processed since the last GIL
+        # yield so we sleep briefly every _YIELD_EVERY_N_FILES files.
+        yield_counter = 0
         for i, filepath in enumerate(file_list):
             if self._cancelled:
                 logger.info("Symbol indexing cancelled at file %d/%d", i, total)
@@ -631,6 +727,16 @@ class IndexWorker(threading.Thread):
 
             # Update progress after each file.
             self._index._set_progress(i + 1, total)
+
+            # GIL-yield throttle — every N files, briefly sleep so
+            # Maya's main-thread Python callbacks can actually run.
+            # Without this, the indexer holds the GIL across tight
+            # regex loops and Maya's scriptJobs / idle callbacks get
+            # starved until the whole index is done.
+            yield_counter += 1
+            if yield_counter >= _YIELD_EVERY_N_FILES:
+                yield_counter = 0
+                time.sleep(_YIELD_SLEEP_SECS)
 
         # Mark indexing as complete (unless cancelled).
         if not self._cancelled:
