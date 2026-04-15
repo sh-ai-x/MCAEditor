@@ -189,3 +189,12 @@ Re-deployed UE 5.6 build to Wayward by copying the `unreal_tools/`
 tree in place; user will need to restart UE for the MCP server to
 re-scan for tool definitions.  No version bump — runtime code is
 unchanged; only the build script was fixed.
+
+### Website Upload
+
+After the rebuild, UE 5.5/5.6/5.7 v1.0.15 zips were staged into
+`dist/latest/` (which is what `tools/deploy_website.py` iterates to
+upload) and pushed to the VPS.  Worth remembering: `dist/` holds the
+raw build output, `dist/latest/` is the upload staging dir —
+`deploy_website.py` does not automatically pick up new versions sitting
+in `dist/`.
