@@ -20,6 +20,7 @@ Dependencies:
     - mca_core (adapters, settings)
 """
 
+import hashlib
 import importlib
 import io
 import os
@@ -5108,6 +5109,36 @@ class MCAEditorPanel(QWidget):
             )
             return
 
+        # Third check: on-disk cache from a previous Maya session.
+        # The module cache vanishes on Maya restart or plugin reload; the
+        # on-disk pickle survives both.  This is the layer that makes the
+        # user-visible rule "don't reindex on every open" hold even across
+        # Maya restarts, not just within one session.
+        cache_path = self._get_index_cache_path(normalized)
+        if cache_path is not None:
+            disk_index = SymbolIndex.load_from_disk(cache_path)
+            if disk_index is not None:
+                # Validate on-disk mtimes against what's currently on the
+                # filesystem before trusting the cache.  If anything has
+                # changed (file edited, added, deleted), fall through and
+                # reindex instead of serving stale data.
+                if self._disk_cache_still_valid(disk_index, folders, excluded):
+                    logger.info("Restoring symbol index from disk cache — skipping re-index")
+                    self._symbol_index = disk_index
+                    self._indexed_folders = normalized
+                    self._completion_provider.set_symbol_index(self._symbol_index)
+                    # Seed the module cache so future opens in this session
+                    # hit the cheap module-level branch above.
+                    _cached_symbol_index = disk_index
+                    _cached_indexed_folders = normalized
+                    file_count = self._symbol_index.get_file_count()
+                    self.index_status_changed.emit(
+                        "Indexed {} files".format(file_count)
+                    )
+                    return
+                else:
+                    logger.info("Disk symbol index is stale — will reindex")
+
         # Cancel any previous indexing run first.
         self._stop_symbol_indexing()
 
@@ -5126,6 +5157,84 @@ class MCAEditorPanel(QWidget):
         self._index_progress_timer.start()
 
         logger.info("Started background symbol indexing")
+
+    def _get_index_cache_path(self, normalized_folders):
+        """
+        Return the on-disk path where the symbol-index cache for this
+        workspace should live, or None if the prefs directory is
+        unavailable.
+
+        The cache filename is derived from a short SHA-1 of the sorted,
+        normalized folder list, so different projects get different
+        cache files and there is no chance of loading the wrong index
+        for the current workspace.
+
+        :param list normalized_folders: Sorted, normalized (and on
+            Windows lowercased) workspace folder list as built at the
+            top of ``_start_symbol_indexing``.
+        :return: Absolute path to the per-project cache file, or None.
+        :rtype: str | None
+        """
+        if not normalized_folders:
+            return None
+        try:
+            import mca_core
+            prefs_dir = mca_core.get_prefs_dir()
+        except Exception as exc:
+            logger.debug("Could not resolve prefs dir for index cache: %s", exc)
+            return None
+
+        # Hash the folder list so the filename is short, stable, and
+        # free of path separators / illegal characters.
+        key = "\n".join(normalized_folders).encode("utf-8", "replace")
+        digest = hashlib.sha1(key).hexdigest()[:16]
+        return os.path.join(prefs_dir, "index_cache", "idx_{}.pkl".format(digest))
+
+    def _disk_cache_still_valid(self, disk_index, folders, excluded):
+        """
+        Return True if *disk_index* (freshly loaded from disk) still
+        matches what's on disk for the given workspace folders.
+
+        Wraps ``SymbolIndex.is_fresh_for`` in a try/except so a hiccup
+        during validation causes a clean reindex rather than raising
+        into the panel's init path.
+
+        :param SymbolIndex disk_index: Index instance loaded via
+            ``SymbolIndex.load_from_disk``.
+        :param list folders: Workspace folder paths to validate against.
+        :param set excluded: Folder names to skip (from project config).
+        :return: True if the cache can be reused as-is, False otherwise.
+        :rtype: bool
+        """
+        try:
+            return disk_index.is_fresh_for(folders, excluded)
+        except Exception as exc:
+            logger.warning("Symbol-index freshness check failed: %s", exc)
+            return False
+
+    def _save_index_to_disk_if_ready(self):
+        """
+        Persist the current ``_symbol_index`` to the per-project cache
+        file if it is in the ``ready`` state.
+
+        Called when indexing completes and on panel cleanup so the
+        index survives Maya restarts and plugin reloads -- not just
+        close/reopen within a single session.
+        """
+        if self._symbol_index is None:
+            return
+        if self._symbol_index.get_state() != "ready":
+            return
+        folders = getattr(self, "_indexed_folders", None)
+        if not folders:
+            return
+        path = self._get_index_cache_path(folders)
+        if path is None:
+            return
+        try:
+            self._symbol_index.save_to_disk(path)
+        except Exception as exc:
+            logger.warning("Failed to persist symbol index to disk: %s", exc)
 
     def _stop_symbol_indexing(self, clear_index=True):
         """
@@ -5169,6 +5278,10 @@ class MCAEditorPanel(QWidget):
                     and self._symbol_index.get_state() == "ready"):
                 _cached_symbol_index = self._symbol_index
                 _cached_indexed_folders = getattr(self, "_indexed_folders", None)
+                # Belt-and-braces: also persist to disk on shutdown in
+                # case _poll_index_progress never got a tick where it
+                # saw state=="ready" (e.g. a sub-500ms run to completion).
+                self._save_index_to_disk_if_ready()
 
             # Detach from this instance but don't destroy the data (it
             # lives on in the module-level cache now).
@@ -5222,6 +5335,10 @@ class MCAEditorPanel(QWidget):
             _cached_indexed_folders = getattr(self, "_indexed_folders", None)
             logger.info("Stashed symbol index in module cache (%d files)",
                         file_count)
+
+            # Persist to disk so it survives Maya restart / plugin
+            # reload, not just close-and-reopen within one session.
+            self._save_index_to_disk_if_ready()
 
     def _on_workspace_directory_changed(self, path):
         """

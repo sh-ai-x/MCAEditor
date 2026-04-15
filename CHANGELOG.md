@@ -1,5 +1,14 @@
 # MCA Editor Changelog
 
+## v1.0.17 — 2026-04-15
+- Fix symbol-index disk cache save failing with `Can't pickle <class 'importlib._bootstrap.SymbolEntry'>` — SymbolEntry namedtuple's `__module__` gets mis-pinned by the SourcelessFileLoader used by the single-file plugin wrapper; pickled snapshots now use plain tuples and `__module__` is set explicitly. Schema version bumped to v2.
+
+## v1.0.16 — 2026-04-15
+- Symbol index survives Maya restart: persist ready index to `~/Documents/mca_preferences/MCAEditor/index_cache/` and reuse on next launch if file mtimes still match
+- `SymbolIndex.save_to_disk` / `load_from_disk` / `is_fresh_for` — magic header + schema version + atomic temp-file write
+- Editor no longer kicks off a full re-scan on every close/reopen of the panel (6th fix for this regression; disk layer closes the hole that module-level cache alone couldn't)
+- Self-heal managed venv when Windows Update swaps host Python: wipe `.venv-3.X` if `pyvenv.cfg` version disagrees with running Python so `pywinpty` cp-ABI mismatches can't silently break the terminal
+
 ## v1.0.15 — 2026-04-14
 - Fix Maya 2024 Windows tab drag regression — PySide2 now falls back to Qt's native tab reorder while PySide6 keeps the custom QDrag flow
 - `drag.exec_()` called directly on PySide2 to avoid relying on the qt_compat lambda patch firing first; wrapped in try/except so a binding failure can't kill the mouse handler

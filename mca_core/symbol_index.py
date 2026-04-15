@@ -17,6 +17,7 @@ Dependencies:
 
 import logging
 import os
+import pickle
 import re
 import threading
 import time
@@ -29,10 +30,20 @@ logger = logging.getLogger(__name__)
 # --- Data Structures ---------------------------------------------------
 
 # A single symbol definition found during indexing.
+#
+# NOTE: we explicitly pin ``__module__`` to the real module name after
+# construction.  When this file is imported as a ``.pyc`` via the
+# SourcelessFileLoader used by the single-file Maya plugin wrapper,
+# ``namedtuple``'s ``sys._getframe`` lookup can land on the importer's
+# frame and set ``__module__`` to ``importlib._bootstrap``.  That makes
+# ``pickle.dump`` fail at save_to_disk with ``attribute lookup
+# SymbolEntry on importlib._bootstrap failed``.  Pinning the module
+# attribute ensures pickle can resolve the class on reload.
 SymbolEntry = namedtuple(
     "SymbolEntry",
     ["name", "kind", "filepath", "line", "line_text", "indent"],
 )
+SymbolEntry.__module__ = __name__
 
 # --- Constants ---------------------------------------------------------
 
@@ -105,6 +116,33 @@ _STARTUP_DELAY_SECS = 3.0
 # ``(file_count / _YIELD_EVERY_N_FILES) * _YIELD_SLEEP_SECS``.
 _YIELD_EVERY_N_FILES = 20
 _YIELD_SLEEP_SECS = 0.005  # 5 ms
+
+# --- Disk cache format -------------------------------------------------
+#
+# The index is expensive to build (minutes for large workspaces) but
+# almost trivial to reload from a pickle.  We persist the finished
+# index to disk so re-opening the editor — or even restarting Maya —
+# doesn't force the user to sit through another full scan when
+# nothing has actually changed on disk.
+#
+# The cache key is derived from the sorted workspace-folder list, so
+# different projects get different cache files and there's no chance
+# of loading an index that covers the wrong folders.
+
+# Magic header to identify our cache format.  Protects against
+# accidentally unpickling an unrelated file with the same extension.
+_CACHE_MAGIC = b"MCAIDX\x00"
+
+# Bump this whenever the pickled structures change shape (e.g. adding
+# a new field to SymbolEntry, changing which dicts we persist, etc.).
+# Old caches with a mismatching version are silently discarded.
+#
+# v2: SymbolEntry serialized as plain tuples instead of the namedtuple
+#     class.  Needed because the Cython/.pyc import path can mis-pin
+#     ``SymbolEntry.__module__`` to ``importlib._bootstrap``, making
+#     pickle unable to resolve the class name on save.  Plain tuples
+#     sidestep the whole class-lookup path.
+_CACHE_SCHEMA_VERSION = 2
 
 # Regex templates for definition lines.  ``{symbol}`` is replaced with a
 # concrete name during lookup; during indexing we use a generic capture
@@ -494,6 +532,226 @@ class SymbolIndex:
         with self._lock:
             return len(self._symbols_by_file)
 
+    def is_fresh_for(self, folders, excluded_folders=None):
+        """
+        Check whether the current index still matches the files on disk.
+
+        Walks *folders* using the same rules as ``IndexWorker`` and
+        compares the resulting file set + per-file mtimes against what
+        the index already holds.  Returns True only when every eligible
+        file on disk has an entry in the index AND the mtimes agree AND
+        the index doesn't know about extra files that have been deleted.
+
+        Intended for validating a disk-loaded cache before reusing it:
+        a stat-only walk of a large project is far cheaper than a full
+        reparse, so we can afford to verify freshness on every open.
+
+        :param list folders: Workspace folder paths to validate against.
+        :param set excluded_folders: Folder names to skip (from project
+            config), mirroring ``IndexWorker.__init__``.
+        :return: True if the cache is still valid, False otherwise.
+        :rtype: bool
+        """
+        excluded_folders = excluded_folders or set()
+
+        # Walk the disk with the same filters the indexer uses.
+        file_list = []
+        for folder in folders:
+            folder = os.path.normpath(folder)
+            _walk_folder_for_freshness(
+                folder, folder, 0, file_list, excluded_folders,
+            )
+        disk_files = set(file_list)
+
+        with self._lock:
+            # File-set mismatch means something was added or deleted.
+            cached_files = set(self._file_mtimes.keys())
+            if disk_files != cached_files:
+                return False
+
+            # Compare mtimes with a small tolerance (FAT32 / network
+            # shares round to 2s; os.path.getmtime can jitter slightly
+            # between reads).
+            tol = 1.0
+            for filepath in disk_files:
+                try:
+                    disk_mtime = os.path.getmtime(filepath)
+                except OSError:
+                    return False
+                cached_mtime = self._file_mtimes.get(filepath, 0.0)
+                if abs(disk_mtime - cached_mtime) > tol:
+                    return False
+
+        return True
+
+    # --- Disk persistence ----------------------------------------------
+
+    def save_to_disk(self, path):
+        """
+        Write a pickled snapshot of the ready index to *path*.
+
+        Only saves when ``get_state() == "ready"`` — partial progress
+        is intentionally not persisted because the caller has no safe
+        way to tell whether the missing files were skipped (size cap,
+        read error) or simply not reached before cancellation.  A
+        partial snapshot would reload as "ready" and silently hide
+        real goto-def targets.
+
+        The write is atomic: serialize into ``<path>.tmp`` first, then
+        rename on top of *path*.  A crash mid-write leaves the old
+        cache file intact rather than producing a half-written pickle.
+
+        :param str path: Destination cache file path.  Parent directory
+            is created if it doesn't exist.
+        :return: *True* on success, *False* on any failure (error is
+            logged, caller can carry on with the in-memory index).
+        :rtype: bool
+        """
+        # Snapshot the in-memory state under the lock so concurrent
+        # update_file() / _bulk_insert() can't change a dict while
+        # pickle is walking it.  ``SymbolEntry`` is a namedtuple, but
+        # we flatten every instance to a plain tuple here so pickle
+        # doesn't need to resolve the class name -- the Cython/.pyc
+        # import path can mis-pin ``SymbolEntry.__module__`` to
+        # ``importlib._bootstrap``, which breaks pickle lookup.
+        with self._lock:
+            if self._state != "ready":
+                return False
+            symbols_by_name = {
+                name: [tuple(e) for e in entries]
+                for name, entries in self._symbols_by_name.items()
+            }
+            symbols_by_file = {
+                fp: [tuple(e) for e in entries]
+                for fp, entries in self._symbols_by_file.items()
+            }
+            data = {
+                "magic": _CACHE_MAGIC,
+                "version": _CACHE_SCHEMA_VERSION,
+                "symbols_by_name": symbols_by_name,
+                "symbols_by_file": symbols_by_file,
+                "file_mtimes": dict(self._file_mtimes),
+                "file_words": dict(self._file_words),
+                "all_files": list(self._all_files),
+            }
+
+        # Ensure the cache dir exists (first run on a fresh install).
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError as exc:
+            logger.warning("Could not create symbol-index cache dir: %s", exc)
+            return False
+
+        # Atomic write: temp then rename.  ``os.replace`` is atomic on
+        # both POSIX and Windows (unlike the older ``os.rename``).
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp_path, path)
+            logger.info(
+                "Saved symbol index to disk: %d files (%s)",
+                len(data["all_files"]), path,
+            )
+            return True
+        except (OSError, pickle.PickleError) as exc:
+            logger.warning("Failed to save symbol index to %s: %s", path, exc)
+            # Best-effort cleanup of the abandoned temp file.
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+
+    @classmethod
+    def load_from_disk(cls, path):
+        """
+        Reconstruct a ready ``SymbolIndex`` from a pickled snapshot.
+
+        Returns *None* on any failure — missing file, wrong magic,
+        schema mismatch, corruption.  The caller should fall through
+        to a full scan in that case.
+
+        :param str path: Cache file path created by ``save_to_disk``.
+        :return: Populated ``SymbolIndex`` in ``"ready"`` state, or
+                 ``None`` if the cache is unusable.
+        :rtype: SymbolIndex or None
+        """
+        if not os.path.isfile(path):
+            return None
+
+        # Any exception here (corrupted pickle, truncated file, class
+        # renamed since the pickle was written, etc.) means we can't
+        # trust the cache — return None so the caller rebuilds fresh.
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+        except (OSError, pickle.UnpicklingError, EOFError, AttributeError,
+                ImportError, ValueError) as exc:
+            logger.warning("Failed to load symbol index from %s: %s", path, exc)
+            return None
+
+        # Shape check first: if the file doesn't even look like our
+        # format, silently ignore it.
+        if not isinstance(data, dict):
+            return None
+        if data.get("magic") != _CACHE_MAGIC:
+            return None
+        if data.get("version") != _CACHE_SCHEMA_VERSION:
+            logger.info(
+                "Symbol index cache schema %s != current %s — rebuilding",
+                data.get("version"), _CACHE_SCHEMA_VERSION,
+            )
+            return None
+
+        # All required keys present?  Guard against truncated caches
+        # that happened to land on a valid magic + version by chance.
+        required_keys = (
+            "symbols_by_name", "symbols_by_file", "file_mtimes",
+            "file_words", "all_files",
+        )
+        for key in required_keys:
+            if key not in data:
+                logger.warning("Symbol index cache missing key %r", key)
+                return None
+
+        # Rehydrate plain tuples back into SymbolEntry namedtuples so
+        # callers can keep using attribute access (``entry.name``,
+        # ``entry.line``, etc.) without knowing the cache stored them
+        # as tuples.  A defensive try/except protects against weirdly
+        # shaped entries in a cache from a future schema.
+        try:
+            symbols_by_name = {
+                name: [SymbolEntry(*t) for t in entries]
+                for name, entries in data["symbols_by_name"].items()
+            }
+            symbols_by_file = {
+                fp: [SymbolEntry(*t) for t in entries]
+                for fp, entries in data["symbols_by_file"].items()
+            }
+        except (TypeError, ValueError) as exc:
+            logger.warning("Symbol index cache has malformed entries: %s", exc)
+            return None
+
+        # Reconstruct the index in "ready" state so callers see it as
+        # a finished index and don't kick off a redundant IndexWorker.
+        index = cls()
+        with index._lock:
+            index._symbols_by_name = symbols_by_name
+            index._symbols_by_file = symbols_by_file
+            index._file_mtimes = data["file_mtimes"]
+            index._file_words = data["file_words"]
+            index._all_files = data["all_files"]
+            index._state = "ready"
+            file_count = len(index._all_files)
+            index._progress = (file_count, file_count)
+
+        logger.info(
+            "Loaded symbol index from disk: %d files (%s)",
+            file_count, path,
+        )
+        return index
+
     # --- Internal helpers (called under lock or by worker) -------------
 
     def _remove_file(self, filepath):
@@ -560,6 +818,48 @@ class SymbolIndex:
 
             if filepath not in self._all_files:
                 self._all_files.append(filepath)
+
+
+# --- Freshness Walk (used by SymbolIndex.is_fresh_for) -----------------
+
+def _walk_folder_for_freshness(root, current, depth, file_list, excluded_folders):
+    """
+    Recursively enumerate eligible source files under *current*.
+
+    Mirrors ``IndexWorker._walk_folder`` but without cancellation,
+    progress, or parsing -- it is meant to be called from the main
+    thread before indexing starts, solely to compare the disk state
+    against a cached index's file set and mtimes.
+
+    :param str root: Top-level workspace folder (for logging context).
+    :param str current: Directory currently being walked.
+    :param int depth: Current recursion depth.
+    :param list file_list: Accumulator for normalized file paths.
+    :param set excluded_folders: Folder names to skip (from project config).
+    """
+    if depth > _MAX_DEPTH:
+        return
+
+    try:
+        entries = os.listdir(current)
+    except (PermissionError, OSError):
+        return
+
+    for entry in entries:
+        full_path = os.path.join(current, entry)
+        if os.path.isdir(full_path):
+            if entry in _SKIP_DIRS:
+                continue
+            if entry in excluded_folders:
+                continue
+            _walk_folder_for_freshness(
+                root, full_path, depth + 1, file_list, excluded_folders,
+            )
+        elif os.path.isfile(full_path):
+            _, ext = os.path.splitext(entry)
+            if ext.lower() in _SKIP_EXTS:
+                continue
+            file_list.append(os.path.normpath(full_path))
 
 
 # --- File Parsing (module-level, no lock needed) -----------------------
