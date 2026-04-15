@@ -424,7 +424,21 @@ def bundle_python_packages(output_python_dir):
             # plugin.json manifests for the plugin system.
             json_manifests = [f for f in files if f == "plugin.json"]
 
-            files_to_copy = pyd_files + init_files + pure_files + json_manifests
+            # unreal_tools/ source files — UE's MCP server reads these as
+            # source text at runtime to discover tool definitions, so they
+            # must ship as .py and cannot be compiled to .pyd or .pyc.
+            # Detect by path component so every nested subdir is included.
+            path_parts = rel_root.replace("\\", "/").split("/")
+            in_unreal_tools = "unreal_tools" in path_parts
+            unreal_tools_files = (
+                [f for f in files if f.endswith(".py")]
+                if in_unreal_tools else []
+            )
+
+            files_to_copy = (
+                pyd_files + init_files + pure_files
+                + json_manifests + unreal_tools_files
+            )
 
             if files_to_copy:
                 os.makedirs(dest_root, exist_ok=True)

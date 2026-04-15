@@ -143,3 +143,49 @@ Files changed:
 - Fast candidate filtering via `_file_words` frozensets turns Find
   in Files from a filesystem walk into an in-memory set scan — the
   same pattern already used by Ctrl+B.
+
+## v1.0.15 UE Build Fix — `unreal_tools/` Not Bundled
+
+### Problem
+
+After deploying v1.0.15 UE plugin to the Wayward project, UE logged:
+
+```
+[LogPython] Unreal tools source not found at E:\Rascal\depot\Wayward\Plugins\MCAEditor\Content\Python\mca_core\unreal_tools
+```
+
+The `mca_core/unreal_tools/` directory is read as **source text** at
+runtime by the UE MCP server to discover tool definitions.  It cannot
+be compiled to `.pyd` or `.pyc` — it must ship as `.py` source files.
+`setup.py` already excludes the directory from Cython compilation, but
+`build_unreal.py`'s `bundle_python_packages()` only copies `.pyd` +
+`__init__.py` + explicit `DIST_PURE_PYTHON` files + `plugin.json`.
+The entire `unreal_tools/` tree was silently dropped from every UE
+zip since the build system was introduced.
+
+### Fix
+
+`build_unreal.py` — inside the `os.walk` loop, detect when we're
+inside a `unreal_tools/` subdirectory (by path component) and include
+every `.py` file in that subtree alongside the normal copy list.
+
+```python
+path_parts = rel_root.replace("\\", "/").split("/")
+in_unreal_tools = "unreal_tools" in path_parts
+unreal_tools_files = (
+    [f for f in files if f.endswith(".py")]
+    if in_unreal_tools else []
+)
+```
+
+### Builds
+
+All three UE versions rebuilt with the fix — each zip now contains
+51 `.py` files under `Content/Python/mca_core/unreal_tools/` covering
+10 tool subdirs (actor, asset, blueprint, control_rig, execution,
+level, material, project, python, viewport).
+
+Re-deployed UE 5.6 build to Wayward by copying the `unreal_tools/`
+tree in place; user will need to restart UE for the MCP server to
+re-scan for tool definitions.  No version bump — runtime code is
+unchanged; only the build script was fixed.
