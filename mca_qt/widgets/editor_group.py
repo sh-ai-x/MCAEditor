@@ -25,6 +25,7 @@ from mca_qt.qt_compat import (
     QPushButton, QMenu, QApplication, QToolTip,
     Qt, Signal, QEvent, QPoint, QTimer, QRect,
     QDrag, QMimeData, QByteArray, QPixmap, QColor, QPainter,
+    PYSIDE_VERSION,
 )
 from mca_qt.widgets.find_replace_bar import FindReplaceBar
 from mca_qt.widgets.drag_tab_manager import MCA_TAB_MIME_TYPE
@@ -181,14 +182,34 @@ class SplittableTabBar(QTabBar):
                 drag_pixmap = self._create_drag_pixmap(tab_index)
 
                 # Start the QDrag (this blocks until drop or cancel).
+                # PySide2's QDrag.exec_() signature differs — call the
+                # native method directly on PySide2 so we don't depend
+                # on the qt_compat lambda patch firing at the right time.
                 drag = QDrag(self)
                 drag.setMimeData(mime_data)
                 drag.setPixmap(drag_pixmap)
-                drag.exec(Qt.DropAction.MoveAction)
+                try:
+                    if PYSIDE_VERSION == 2:
+                        drag.exec_(Qt.DropAction.MoveAction)
+                    else:
+                        drag.exec(Qt.DropAction.MoveAction)
+                except Exception as exc:
+                    # If QDrag cannot start (rare Qt binding quirks on
+                    # some platforms), log and swallow — we'd rather
+                    # have a no-op drag than a hard crash in the tab
+                    # bar's mouse path.
+                    logger.warning("QDrag.exec failed: %s", exc)
                 return
 
-            # Below threshold — suppress super() to prevent Qt's internal
-            # tab reorder from activating and changing tab indices.
+            # On PySide6 the custom QDrag is authoritative and we
+            # must suppress super() to avoid double-handling.  On
+            # PySide2 (Maya 2024) we let Qt's native tab reorder
+            # process the move — it's used as a fallback for in-bar
+            # reordering when the custom QDrag path has binding
+            # quirks.  See ``_setup_ui`` for the matching setMovable
+            # branching.
+            if PYSIDE_VERSION == 2:
+                super().mouseMoveEvent(event)
             return
 
         super().mouseMoveEvent(event)
@@ -548,15 +569,19 @@ class EditorGroup(QWidget):
         self._tab_widget.setTabBar(self._splittable_bar)
 
         self._tab_widget.setTabsClosable(True)
-        # Qt's built-in movable-tab machinery must stay OFF.  We ship our
-        # own QDrag flow (SplittableTabBar.mouseMoveEvent) that hijacks
-        # the mouse via ``drag.exec()``.  When ``setMovable(True)`` is on,
-        # Qt starts tracking a tab-move the moment a tab is pressed and
-        # waits for a matching release; our QDrag eats that release, so
-        # Qt stays stuck in "reorder in progress" forever.  That sticky
-        # state breaks subsequent clicks (no focus transfer) and tab
-        # tooltips on the dragged tab after any drag.
-        self._tab_widget.setMovable(False)
+        # Tab-reorder handling is split by Qt binding:
+        #   * PySide6 — setMovable(False).  Our custom QDrag flow
+        #     (SplittableTabBar.mouseMoveEvent) is authoritative for
+        #     both in-bar reorder and split-out.  setMovable(True)
+        #     here would leave Qt stuck in "reorder in progress"
+        #     after our QDrag eats the mouse release.
+        #   * PySide2 (Maya 2024) — setMovable(True) is required.
+        #     PySide2's QDrag has binding quirks on Windows that can
+        #     stop the custom drag from initiating; keeping Qt's
+        #     native reorder on guarantees the common case (drag a
+        #     tab left/right inside the same group) still works even
+        #     if the custom QDrag never fires.
+        self._tab_widget.setMovable(PYSIDE_VERSION == 2)
         self._tab_widget.setDocumentMode(True)
         self._tab_widget.setUsesScrollButtons(True)
         self._tab_widget.setElideMode(Qt.TextElideMode.ElideNone)
@@ -948,17 +973,23 @@ class EditorGroup(QWidget):
         # Apply tab bar settings.
         self._tab_widget.tabBar().setVisible(settings.get("show_tab_bar"))
         self._tab_widget.setTabsClosable(settings.get("show_close_button_on_tab"))
-        # NOTE: setMovable stays permanently False (see _setup_ui for
-        # rationale).  Qt's built-in tab reorder conflicts with our
-        # custom QDrag flow — our drag code replaces Qt's behavior.
-        # The "lock_tabs" setting is enforced in SplittableTabBar by
-        # gating when the drag can begin, not by touching setMovable.
-        self._tab_widget.setMovable(False)
+        # NOTE: setMovable branches by Qt binding (see ``_setup_ui`` for
+        # the full rationale).  On PySide2 we leave Qt's native tab
+        # reorder ON so Maya 2024 always has a working in-bar drag
+        # path; on PySide6 the custom QDrag owns the interaction and
+        # setMovable must stay OFF.  The "lock_tabs" setting is
+        # enforced via ``set_tabs_locked`` on the custom bar — gating
+        # the drag-start check — plus disabling Qt reorder on PySide2.
+        locked = bool(settings.get("lock_tabs"))
+        if PYSIDE_VERSION == 2:
+            self._tab_widget.setMovable(not locked)
+        else:
+            self._tab_widget.setMovable(False)
         # Propagate the lock flag to the custom tab bar so it can
         # suppress drag initiation when the user has locked tabs.
         bar = self._tab_widget.tabBar()
         if hasattr(bar, "set_tabs_locked"):
-            bar.set_tabs_locked(bool(settings.get("lock_tabs")))
+            bar.set_tabs_locked(locked)
 
     # --- Internal Event Handling ---------------------------------------------
 
