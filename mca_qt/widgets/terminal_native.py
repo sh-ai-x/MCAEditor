@@ -528,6 +528,14 @@ class TerminalWidget(QWidget):
                 pos_cursor.setPosition(target_pos)
                 self._display.setTextCursor(pos_cursor)
 
+                # setTextCursor() triggers ensureCursorVisible() which
+                # can scroll the viewport horizontally when the cursor
+                # column exceeds the visible width (e.g. a long prompt
+                # after a narrow resize).  The horizontal scrollbar is
+                # policy-hidden so the user has no way to scroll back
+                # — line starts appear clipped.  Force column 0.
+                self._display.horizontalScrollBar().setValue(0)
+
         except Exception as exc:
             logger.error("Terminal render error: %s", exc, exc_info=True)
         finally:
@@ -1074,6 +1082,18 @@ class TerminalWidget(QWidget):
             # Notify the backend to resize the PTY.
             if self._backend and self._alive:
                 self._backend.resize(new_rows, new_cols)
+
+            # Reset the horizontal scroll offset.  The scrollbar is
+            # policy-hidden (ScrollBarAlwaysOff) but QPlainTextEdit's
+            # internal viewport still scrolls horizontally when a
+            # later setTextCursor() / ensureCursorVisible() call lands
+            # on a column that no longer fits.  After a horizontal
+            # shrink the cursor column from the old grid may push the
+            # viewport left, clipping the start of every line with no
+            # visible scrollbar to reveal it.  Snap back to column 0
+            # on every dimension change so the line start is always
+            # visible after a resize.
+            self._display.horizontalScrollBar().setValue(0)
 
             # Mark dirty so the next render frame rebuilds the grid.
             # We do NOT clear the document here — Phase 2 of _render()
