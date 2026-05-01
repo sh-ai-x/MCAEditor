@@ -436,28 +436,103 @@ def inject_venv_path():
 
 # --- Internal Helpers ---------------------------------------------------------
 
+def _find_unreal_bundled_python():
+    """
+    Locate Unreal Engine's bundled Python interpreter.
+
+    Unreal Engine 5.x ships a Python interpreter at
+    ``Engine/Binaries/ThirdParty/Python3/Win64/python.exe`` (Win) or
+    ``.../Mac/bin/python3`` (macOS).  When the editor's Python plugin
+    initializes, ``sys.prefix`` points at this directory, so we can derive
+    the executable path from ``sys.prefix`` directly.
+
+    Using UE's bundled Python for venv creation guarantees the resulting
+    venv has the exact same ABI as the running interpreter — critical for
+    pywinpty's compiled extension to load.
+
+    :return: Path to UE's bundled Python, or *None* if not detected.
+    :rtype: str or None
+    """
+    # When running inside UE, sys.executable is the editor binary, but
+    # sys.prefix still points at UE's bundled Python install dir.
+    prefix = getattr(sys, "prefix", None)
+    if not prefix:
+        return None
+
+    # Look for python.exe / python3 within sys.prefix.  We require that the
+    # path contains "ThirdParty" or "UE_" segments so we don't accidentally
+    # match a non-UE Python that happens to set sys.prefix.
+    norm = os.path.normcase(prefix)
+    if "thirdparty" not in norm and "ue_" not in norm and "epic games" not in norm:
+        return None
+
+    if platform.system() == "Windows":
+        candidate = os.path.join(prefix, "python.exe")
+    else:
+        # macOS UE layout: <prefix>/bin/python3
+        candidate = os.path.join(prefix, "bin", "python3")
+        if not os.path.isfile(candidate):
+            candidate = os.path.join(prefix, "bin", "python")
+
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
 def _find_system_python():
     """
-    Find a system Python 3.10+ interpreter on PATH.
+    Find a Python 3.10+ interpreter suitable for creating the managed venv.
 
     Used when running inside a host application (UE, Maya) where
     ``sys.executable`` is the host binary rather than a Python interpreter.
     We need a real Python to run ``-m venv``, ``-m ensurepip``, etc.
 
-    Search order on Windows: ``py -3`` launcher, ``python``, ``python3``.
-    Search order on POSIX: ``python3``, ``python``.
+    **Selection priority** (most → least preferred):
+
+    1. **UE's bundled Python** — when running inside Unreal, prefer the
+       bundled interpreter because it guarantees ABI match with the running
+       process (compiled extensions like pywinpty must match).
+    2. **Exact major.minor match** — any system Python whose version equals
+       ``sys.version_info[:2]`` of the running interpreter.
+    3. **Any 3.10+** — last-resort fallback so the venv builds even if the
+       host doesn't have a perfectly matched Python on PATH.  This is
+       imperfect but better than failing outright; ``_check_venv_python_match``
+       will detect the resulting ABI drift and trigger a rebuild on next
+       launch.
 
     :return: Path to a suitable Python executable, or *None* if not found.
     :rtype: str or None
     """
+    # Priority 1: UE's bundled Python — only when inside UE.  This avoids
+    # building the venv with a system Python whose minor version differs
+    # from the bundled one (e.g. Python 3.10 system vs UE-bundled 3.11).
+    bundled = _find_unreal_bundled_python()
+    if bundled is not None:
+        logger.debug("Found UE bundled Python: %s", bundled)
+        return bundled
+
+    # Build candidate command list.  On Windows we try the py launcher first
+    # because it can target a specific minor version (``py -3.11``) — that
+    # lets us match the running ABI exactly when multiple Pythons exist.
+    target_major = sys.version_info.major
+    target_minor = sys.version_info.minor
+
     candidates = []
     if platform.system() == "Windows":
-        candidates.append(["py", "-3"])
+        # Try py launcher with exact running minor version first.
+        candidates.append(["py", "-{}.{}".format(target_major, target_minor)])
+        candidates.append(["py", "-{}".format(target_major)])
         candidates.append(["python"])
         candidates.append(["python3"])
     else:
+        # POSIX: try the version-tagged interpreter first.
+        candidates.append(["python{}.{}".format(target_major, target_minor)])
         candidates.append(["python3"])
         candidates.append(["python"])
+
+    # First pass: prefer an exact (major, minor) match against the running
+    # interpreter.  Second pass: accept any 3.10+ as a fallback.
+    fallback = None
 
     for cmd in candidates:
         try:
@@ -471,36 +546,53 @@ def _find_system_python():
             )
             version_str = result.stdout.decode(errors="replace").strip()
 
-            # Parse version to ensure 3.10+. Output format: "Python 3.X.Y".
+            # Parse version. Output format: "Python 3.X.Y".
             parts = version_str.split()
-            if len(parts) >= 2:
-                version_parts = parts[1].split(".")
-                major = int(version_parts[0])
-                minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+            if len(parts) < 2:
+                continue
+            version_parts = parts[1].split(".")
+            major = int(version_parts[0])
+            minor = int(version_parts[1]) if len(version_parts) > 1 else 0
 
-                if major >= 3 and minor >= 10:
-                    # For multi-arg commands like "py -3", resolve the
-                    # actual executable path for subprocess.run() calls.
-                    if len(cmd) == 1:
-                        return shutil.which(cmd[0]) or cmd[0]
-                    else:
-                        py_result = subprocess.run(
-                            cmd + ["-c", "import sys; print(sys.executable)"],
-                            check=True,
-                            timeout=10,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            creationflags=_CREATION_FLAGS,
-                        )
-                        exe = py_result.stdout.decode(errors="replace").strip()
-                        if os.path.isfile(exe):
-                            return exe
+            if major < 3 or minor < 10:
+                continue
+
+            # Resolve the actual executable path for subprocess use.
+            if len(cmd) == 1:
+                exe = shutil.which(cmd[0]) or cmd[0]
+            else:
+                py_result = subprocess.run(
+                    cmd + ["-c", "import sys; print(sys.executable)"],
+                    check=True,
+                    timeout=10,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=_CREATION_FLAGS,
+                )
+                exe = py_result.stdout.decode(errors="replace").strip()
+                if not os.path.isfile(exe):
+                    continue
+
+            # Exact ABI match — return immediately.
+            if major == target_major and minor == target_minor:
+                logger.debug("Found matching Python %d.%d: %s", major, minor, exe)
+                return exe
+
+            # Otherwise remember the first compatible fallback we see.
+            if fallback is None:
+                fallback = exe
 
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
                 OSError, FileNotFoundError, ValueError):
             continue
 
-    return None
+    if fallback is not None:
+        logger.warning(
+            "No Python %d.%d found for venv creation — falling back to %s. "
+            "ABI mismatch may force a rebuild on next launch.",
+            target_major, target_minor, fallback,
+        )
+    return fallback
 
 
 def _pip_name(requirement):

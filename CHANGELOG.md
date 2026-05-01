@@ -1,5 +1,13 @@
 # MCA Editor Changelog
 
+## v1.0.19 — 2026-05-01
+- Fix Unreal terminal silently degrading to subprocess pipes when only Python 3.10 is on PATH — managed venv was being built with the system 3.10 interpreter even though UE 5.5+ runs Python 3.11, leaving a `cp310` pywinpty extension that couldn't import
+- `_find_system_python` now prefers UE's bundled interpreter (`Engine/Binaries/ThirdParty/Python3/Win64/python.exe`) and otherwise prefers an exact `(major, minor)` match against the running Python before falling back to any 3.10+
+- New `_find_unreal_bundled_python` derives the path from `sys.prefix` so the venv ABI always matches the host process
+
+## v1.0.18 — 2026-04-22
+- Ctrl+V terminal routing defense in depth + resize clip fix
+
 ## v1.0.17 — 2026-04-15
 - Fix symbol-index disk cache save failing with `Can't pickle <class 'importlib._bootstrap.SymbolEntry'>` — SymbolEntry namedtuple's `__module__` gets mis-pinned by the SourcelessFileLoader used by the single-file plugin wrapper; pickled snapshots now use plain tuples and `__module__` is set explicitly. Schema version bumped to v2.
 
