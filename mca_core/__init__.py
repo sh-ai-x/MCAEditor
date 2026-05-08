@@ -19,7 +19,7 @@ import sys
 # --- Version & App Metadata -----------------------------------------------
 
 # Semantic version for the application.
-__version__ = "1.0.19"
+__version__ = "1.0.32"
 
 # Display name shown in title bars and dialogs.
 __app_name__ = "MCA Editor"

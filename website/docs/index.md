@@ -1,5 +1,5 @@
 ---
-description: "MCA Editor — professional Python code editor for Maya and Unreal Engine. Syntax highlighting, AI chat, integrated terminal, and plugin architecture."
+description: "MCA Editor — professional Python code editor for Maya and Unreal Engine. Syntax highlighting, AI chat, and plugin architecture."
 ---
 
 # MCA Editor
@@ -20,7 +20,6 @@ MCA Editor is a modern, full-featured code editor that lives inside your DCC. Wr
 - **Dual Mode** — Quick script execution or full project mode with file trees and multi-tab editing
 - **AI Integration** — Orange Slice, a built-in AI assistant that understands your scene and code
 - **Plugin Architecture** — Extend the editor with Python plugins using a clean, documented API
-- **Integrated Terminal** — Run shell commands without leaving your DCC
 - **Syntax Highlighting** — Python and MEL with automatic language detection
 - **Code Completion** — Context-aware suggestions as you type
 - **Find & Replace** — Search across files in your project

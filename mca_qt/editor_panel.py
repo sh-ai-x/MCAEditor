@@ -50,8 +50,6 @@ from mca_core.project import (
 from mca_core.session_manager import SessionManager
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_qt.widgets.output_window import OutputWindow
-from mca_qt.widgets.terminal_tab_panel import TerminalTabPanel
-from mca_qt.widgets.terminal_factory import is_terminal_available
 from mca_qt.widgets.tool_stripe import ToolStripe
 from mca_qt.widgets.sidebar import MCASidebar
 from mca_qt.widgets.settings_dialog import SettingsDialog
@@ -64,7 +62,7 @@ from mca_qt.widgets.quick_open import GoToFilePopup, GoToSymbolPopup, GoToDeclar
 from mca_qt.widgets.editor_group_container import EditorGroupContainer
 from mca_core.adapters import AdapterManager, DCCType, ConnectionState
 from mca_core.symbol_index import SymbolIndex, IndexWorker
-from mca_qt.icons import python_logo, maya_logo, text_icon, terminal_icon, sidebar_icon, settings_icon
+from mca_qt.icons import python_logo, maya_logo, text_icon, sidebar_icon, settings_icon
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -234,10 +232,17 @@ class MCAEditorPanel(QWidget):
         self._session_manager.migrate_buffers_to_scripts()
 
         # Restore previous session or create default starter tabs.
+        #
+        # Skip the default-session restore if a project is set to auto-open
+        # below.  ``_auto_open_last_project`` immediately tears down whatever
+        # we'd build here and rebuilds from the project's own manifest --
+        # so the work is just thrown away.  This was costing ~0.6s on every
+        # editor open.
+        will_auto_open_project = self._will_auto_open_project()
         restored = False
-        if settings.get("restore_session"):
+        if settings.get("restore_session") and not will_auto_open_project:
             restored = self._restore_session()
-        if not restored:
+        if not restored and not will_auto_open_project:
             # First launch (or no session to restore) — start with a
             # Python and a MEL buffer so both languages are ready to go.
             self._new_python_buffer()
@@ -269,9 +274,8 @@ class MCAEditorPanel(QWidget):
         self._splitter_restore_pending = True
 
         # Restore the output panel content from the previous session.
-        # Skip when embedded in a DCC (e.g. Maya) — the host window
-        # loads the DCC's own session history instead.  Loading BOTH
-        # caused exponential output duplication across sessions.
+        # Skip when embedded in a DCC (e.g. Maya) -- the host window
+        # loads the DCC's own session history instead.
         if not self._embedded_in_dcc:
             self._restore_output()
 
@@ -282,6 +286,13 @@ class MCAEditorPanel(QWidget):
         # Called synchronously during __init__ (before show()) so the
         # layout rebuild doesn't trigger Qt reflows that collapse splitters.
         self._auto_open_last_project()
+        # When the project auto-opens, the default-session restore was
+        # skipped (see ``_will_auto_open_project`` gate above).  The
+        # editors created by the project's manifest still need settings
+        # applied -- run apply_settings again so font, color scheme, and
+        # tab size land on the project's tabs.
+        if will_auto_open_project:
+            self._apply_settings_to_editors()
 
         # --- EditorAPI & JSON-RPC Server ------------------------------------
         # Register this panel with the public API singleton so external
@@ -302,7 +313,7 @@ class MCAEditorPanel(QWidget):
         self._api_dispatch_timer.start()
 
         # --- Plugin System ---------------------------------------------------
-        # Create plugin objects but don't load yet — plugins need the
+        # Create plugin objects but don't load yet -- plugins need the
         # Plugins menu to exist, which is built by build_menus().
         # Actual loading happens in _init_plugins(), called at the end
         # of build_menus() by the host.
@@ -350,6 +361,25 @@ class MCAEditorPanel(QWidget):
 
     # --- Auto-Open Last Project -----------------------------------------------
 
+    def _will_auto_open_project(self):
+        """
+        Predict whether ``_auto_open_last_project`` will end up loading a
+        project on this open.
+
+        Used by ``__init__`` to skip the default-session restore when a
+        project is about to overwrite the layout anyway.  Mirrors the
+        gate conditions in :meth:`_auto_open_last_project`.
+
+        :return: True if a project will be auto-opened.
+        :rtype: bool
+        """
+        last_path = self._settings.get("last_project_path", "")
+        if not last_path or not os.path.isdir(last_path):
+            return False
+        if not has_project_file(last_path):
+            return False
+        return True
+
     def _auto_open_last_project(self):
         """
         Auto-open the last project if it has ``open_on_editor_open`` enabled.
@@ -365,14 +395,10 @@ class MCAEditorPanel(QWidget):
             2. The path and its .mca-project file exist on disk
             3. The project's open_on_editor_open flag is True
         """
+        if not self._will_auto_open_project():
+            return
+
         last_path = self._settings.get("last_project_path", "")
-        if not last_path or not os.path.isdir(last_path):
-            return
-
-        # Check that the .mca-project file exists before loading.
-        if not has_project_file(last_path):
-            return
-
         logger.info("Auto-opening last project: %s", last_path)
         self._open_project(last_path)
 
@@ -414,7 +440,6 @@ class MCAEditorPanel(QWidget):
         # --- Left tool stripe (thin vertical button bar) ---
         self._left_stripe = ToolStripe()
         self._left_stripe.add_button("sidebar", sidebar_icon(), "Toggle Sidebar")
-        self._left_stripe.add_button("terminal", terminal_icon(), "Terminal (Bottom)", bottom=True)
         self._left_stripe.add_button("settings", settings_icon(), "Settings", bottom=True)
         self._left_stripe.button_clicked.connect(self._on_left_stripe_clicked)
         main_layout.addWidget(self._left_stripe)
@@ -429,13 +454,13 @@ class MCAEditorPanel(QWidget):
         self._sidebar.setMaximumWidth(400)
         self._main_splitter.addWidget(self._sidebar)
 
-        # --- Center: toolbar + output + editor tabs + bottom terminal ---
+        # --- Center: toolbar + output + editor tabs ---
         center_widget = QWidget()
         self._center_layout = QVBoxLayout(center_widget)
         self._center_layout.setContentsMargins(0, 0, 0, 0)
         self._center_layout.setSpacing(0)
 
-        # Vertical splitter for output, editor tabs, and bottom terminal.
+        # Vertical splitter for output and editor tabs.
         self._center_splitter = QSplitter(Qt.Orientation.Vertical)
 
         # Output window (top panel, like Charcoal Editor 2 layout).
@@ -452,59 +477,28 @@ class MCAEditorPanel(QWidget):
         self._group_container.new_tab_requested.connect(self._show_new_tab_dialog)
         self._center_splitter.addWidget(self._group_container)
 
-        # Bottom terminal tab panel (hidden by default).
-        # Uses TerminalTabPanel which manages multiple terminal tabs
-        # internally via the terminal factory.
-        terminal_shell = self._settings.get("terminal_shell", "")
-        terminal_font = self._settings.get("terminal_font_size", 12)
-        self._terminal_available = is_terminal_available()
-        self._bottom_terminal_panel = TerminalTabPanel(
-            shell=terminal_shell,
-            cwd=self._session_manager.scripts_dir,
-            font_size=terminal_font,
-            parent=self,
-        )
-        self._bottom_terminal_panel.setVisible(False)
-        self._bottom_terminal_panel.all_terminals_closed.connect(self._on_bottom_terminals_closed)
-        self._center_splitter.addWidget(self._bottom_terminal_panel)
-
-        if not self._terminal_available:
-            logger.info("Terminal unavailable — menu entries will be disabled")
-
         # Minimum heights so panels never collapse to invisible.
         # 20px is enough to show a title bar / resize handle so the user
         # can always tell the panel exists and drag it back open.
         self._output.setMinimumHeight(20)
         self._group_container.setMinimumHeight(20)
-        self._bottom_terminal_panel.setMinimumHeight(20)
 
         # Disable collapsing on all center splitter children so Qt
         # respects the minimum heights instead of snapping to zero.
         for i in range(self._center_splitter.count()):
             self._center_splitter.setCollapsible(i, False)
 
-        # Default split: 30% output (top), 70% editor (bottom), 0 terminal.
-        self._center_splitter.setSizes([250, 600, 0])
+        # Default split: 30% output (top), 70% editor (bottom).
+        self._center_splitter.setSizes([250, 600])
 
         self._center_layout.addWidget(self._center_splitter)
         self._main_splitter.addWidget(center_widget)
 
-        # --- Right panel stack (QStackedWidget holding terminal + plugin panels) ---
+        # --- Right panel stack (QStackedWidget holding plugin panels) ---
         # The right tool stripe buttons select which widget is visible.
-        # Index 0 is always the terminal panel; plugin panels are added
-        # dynamically via _register_plugin_panel().
+        # Plugin panels are added dynamically via _register_plugin_panel().
         self._right_panel_stack = QStackedWidget()
         self._right_panel_stack.setMinimumWidth(250)
-
-        # Terminal is the first (default) widget in the stack.
-        self._right_terminal_panel = TerminalTabPanel(
-            shell=terminal_shell,
-            cwd=self._session_manager.scripts_dir,
-            font_size=terminal_font,
-            parent=self,
-        )
-        self._right_terminal_panel.all_terminals_closed.connect(self._on_right_terminals_closed)
-        self._right_panel_stack.addWidget(self._right_terminal_panel)
 
         # Track registered plugin panels: panel_id -> {widget, index, title}.
         self._plugin_panels = {}
@@ -530,8 +524,8 @@ class MCAEditorPanel(QWidget):
         self._main_splitter.setSizes([240, 800, 0])
 
         # --- Right tool stripe (thin vertical button bar) ---
+        # Buttons are added dynamically by plugin panels.
         self._right_stripe = ToolStripe()
-        self._right_stripe.add_button("terminal", terminal_icon(), "Terminal (Right)")
         self._right_stripe.button_clicked.connect(self._on_right_stripe_clicked)
         main_layout.addWidget(self._right_stripe)
 
@@ -748,9 +742,14 @@ class MCAEditorPanel(QWidget):
         exists and plugins can register menu actions and panels.
         """
         if self._plugin_manager and self._plugin_api:
+            import time as _time
+            t0 = _time.perf_counter()
             self._plugin_manager.load_all(self._plugin_api)
-            logger.info("Plugin system initialized (%d plugins loaded)",
-                        len(self._plugin_manager._loaded_plugins))
+            logger.info(
+                "Plugin system initialized (%d plugins loaded) in %.3fs",
+                len(self._plugin_manager._loaded_plugins),
+                _time.perf_counter() - t0,
+            )
 
     def _restore_custom_shortcuts(self):
         """
@@ -986,10 +985,6 @@ class MCAEditorPanel(QWidget):
         self._toggle_output_action = self._create_action(
             view_menu, "Toggle Output", name="Toggle Output",
             shortcut="Ctrl+J", callback=self._toggle_output)
-        self._create_action(view_menu, "Open Terminal at Bottom", name="Open Terminal at Bottom",
-                            shortcut="Ctrl+`", callback=self._open_terminal_bottom)
-        self._create_action(view_menu, "Open Terminal at Right", name="Open Terminal at Right",
-                            callback=self._open_terminal_right)
         self._toggle_sidebar_action = self._create_action(
             view_menu, "Toggle Side Bar", name="Toggle Side Bar",
             shortcut="Ctrl+Shift+B", callback=self._toggle_sidebar)
@@ -1508,10 +1503,6 @@ class MCAEditorPanel(QWidget):
             self._reload_action.setVisible(False)
             self._shutdown_action.setVisible(False)
 
-            # Reset terminal cwd back to scripts directory.
-            self._bottom_terminal_panel._cwd = scripts_dir
-            self._right_terminal_panel._cwd = scripts_dir
-
             # Restore the default workspace tabs.
             default_manifest = self._session_manager.load_manifest()
             self._switch_to_manifest(default_manifest)
@@ -1577,10 +1568,6 @@ class MCAEditorPanel(QWidget):
 
         # Apply environment variables to os.environ.
         self._apply_env_vars()
-
-        # Set terminal cwd to project root.
-        self._bottom_terminal_panel._cwd = project.project_root
-        self._right_terminal_panel._cwd = project.project_root
 
         # Emit signal for host windows (project name for title bar).
         self.mode_changed.emit(project.name)
@@ -2144,40 +2131,8 @@ class MCAEditorPanel(QWidget):
         self._output.setVisible(output_vis)
         self._output_visible = output_vis
 
-        legacy_term = s.get("terminal_visible", None)
-        if legacy_term is not None:
-            if s.get("bottom_terminal_visible", None) is None:
-                s.set("bottom_terminal_visible", legacy_term)
-
-        bottom_vis = s.get("bottom_terminal_visible", False)
-        if bottom_vis and self._terminal_available:
-            self._bottom_terminal_panel.setVisible(True)
-            sizes = self._center_splitter.sizes()
-            if len(sizes) >= 3 and sizes[2] < 50:
-                total = sum(sizes)
-                terminal_height = min(200, total // 4)
-                sizes[2] = terminal_height
-                sizes[1] = max(100, sizes[1] - terminal_height)
-                self._center_splitter.setSizes(sizes)
-            QTimer.singleShot(500, self._bottom_terminal_panel.ensure_terminal)
-            self._left_stripe.set_button_active("terminal", True)
-
-        right_term_vis = s.get("right_terminal_visible", False)
-        if right_term_vis:
-            # Show the right panel stack and switch to the terminal widget.
-            self._right_panel_stack.setVisible(True)
-            self._right_panel_stack.setCurrentWidget(self._right_terminal_panel)
-            sizes = self._main_splitter.sizes()
-            last = len(sizes) - 1
-            if sizes[last] == 0:
-                total = sum(sizes)
-                sizes[last] = 300
-                sizes[1] = total - sizes[0] - sizes[last]
-                self._main_splitter.setSizes(sizes)
-            QTimer.singleShot(500, self._right_terminal_panel.ensure_terminal)
-            self._right_stripe.set_button_active("terminal", True)
-        else:
-            self._right_panel_stack.setVisible(False)
+        # Right panel starts hidden; plugins can re-show it via the stripe.
+        self._right_panel_stack.setVisible(False)
 
         show_ws = s.get("show_whitespace", False)
         if show_ws:
@@ -2223,47 +2178,6 @@ class MCAEditorPanel(QWidget):
         self._output_visible = visible
         self._settings.set("output_visible", visible)
 
-    def _open_terminal_bottom(self):
-        """Add a new terminal tab in the bottom panel (Ctrl+`)."""
-        if not self._terminal_available:
-            return
-
-        # Show the panel if hidden.
-        if not self._bottom_terminal_panel.isVisible():
-            self._bottom_terminal_panel.setVisible(True)
-            self._settings.set("bottom_terminal_visible", True)
-            self._left_stripe.set_button_active("terminal", True)
-
-            # Give the terminal panel space in the center splitter.
-            # Restore the last height the user set, or fall back to 1/4 of total.
-            sizes = self._center_splitter.sizes()
-            if len(sizes) >= 3 and sizes[2] < 50:
-                saved_height = self._settings.get("bottom_terminal_height", 0)
-                total = sum(sizes)
-                terminal_height = int(saved_height) if saved_height else min(200, total // 4)
-                terminal_height = min(terminal_height, total // 2)
-                sizes[2] = terminal_height
-                sizes[1] = max(100, sizes[1] - terminal_height)
-                self._center_splitter.setSizes(sizes)
-
-        # Always add a new terminal tab.
-        self._bottom_terminal_panel.add_terminal()
-        self._bottom_terminal_panel.focus_current()
-
-    def _open_terminal_right(self):
-        """Add a new terminal tab in the right panel."""
-        if not self._terminal_available:
-            return
-
-        # Show the right panel stack and switch to the terminal widget.
-        self._show_right_panel(self._right_terminal_panel)
-        self._right_stripe.set_button_active("terminal", True)
-        self._settings.set("right_terminal_visible", True)
-
-        # Always add a new terminal tab.
-        self._right_terminal_panel.add_terminal()
-        self._right_terminal_panel.focus_current()
-
     def _show_right_panel(self, widget):
         """
         Show the right panel stack and switch to a specific widget.
@@ -2304,8 +2218,6 @@ class MCAEditorPanel(QWidget):
             self._settings.set("right_panel_width", sizes[-1])
 
         self._right_panel_stack.setVisible(False)
-        self._right_stripe.set_button_active("terminal", False)
-        self._settings.set("right_terminal_visible", False)
         # Deactivate any plugin panel stripe buttons.
         for panel_id in self._plugin_panels:
             self._right_stripe.set_button_active(panel_id, False)
@@ -2320,31 +2232,18 @@ class MCAEditorPanel(QWidget):
         """
         if name == "sidebar":
             self._toggle_sidebar()
-        elif name == "terminal":
-            self._open_terminal_bottom()
         elif name == "settings":
             self._show_settings()
 
     def _on_right_stripe_clicked(self, name):
         """
-        Dispatch right tool stripe button clicks.
+        Dispatch right tool stripe button clicks to plugin panels.
 
-        Handles the built-in terminal button as well as dynamically
-        registered plugin panel buttons.  Clicking an active button
-        hides the right panel; clicking an inactive button shows the
-        corresponding panel.
+        Clicking an active button hides the right panel; clicking an
+        inactive button shows the corresponding plugin panel.
 
         :param str name: The button name that was clicked.
         """
-        if name == "terminal":
-            # Toggle: if terminal is already showing, hide the right panel.
-            if (self._right_panel_stack.isVisible()
-                    and self._right_panel_stack.currentWidget() is self._right_terminal_panel):
-                self._hide_right_panel()
-            else:
-                self._open_terminal_right()
-            return
-
         # Check if this is a plugin panel button.
         if name in self._plugin_panels:
             panel_info = self._plugin_panels[name]
@@ -2356,31 +2255,11 @@ class MCAEditorPanel(QWidget):
                 self._hide_right_panel()
             else:
                 # Deactivate all other right stripe buttons.
-                self._right_stripe.set_button_active("terminal", False)
                 for pid in self._plugin_panels:
                     self._right_stripe.set_button_active(pid, False)
                 # Show the plugin panel.
                 self._show_right_panel(widget)
                 self._right_stripe.set_button_active(name, True)
-
-    def _on_bottom_terminals_closed(self):
-        """Auto-hide the bottom terminal panel when all tabs are closed."""
-        # Remember the panel height before hiding (hiding sets it to 0).
-        sizes = self._center_splitter.sizes()
-        if len(sizes) >= 3 and sizes[2] > 0:
-            self._settings.set("bottom_terminal_height", sizes[2])
-
-        self._bottom_terminal_panel.setVisible(False)
-        self._settings.set("bottom_terminal_visible", False)
-        self._left_stripe.set_button_active("terminal", False)
-
-    def _on_right_terminals_closed(self):
-        """Hide the right panel when all terminal tabs are closed."""
-        self._right_stripe.set_button_active("terminal", False)
-        self._settings.set("right_terminal_visible", False)
-        # Only hide the whole stack if the terminal was the visible panel.
-        if self._right_panel_stack.currentWidget() is self._right_terminal_panel:
-            self._hide_right_panel()
 
     # =========================================================================
     # Plugin Panel Registration
@@ -2824,10 +2703,12 @@ class MCAEditorPanel(QWidget):
             if self._symbol_index is not None:
                 self._symbol_index.update_file(editor.file_path)
         else:
-            # Temp buffer — persist to the buffers directory.
-            self._save_buffer_content(editor)
-            editor.document().setModified(False)
-            self._show_status("Buffer saved")
+            # Temp buffer — persist to the buffers directory.  Only
+            # clear the modified indicator when the write succeeds so a
+            # failed buffer save still shows '*' on the tab.
+            if self._save_buffer_content(editor):
+                editor.document().setModified(False)
+                self._show_status("Buffer saved")
         # Always keep the manifest in sync after any save.
         self._save_session_manifest()
 
@@ -2870,8 +2751,15 @@ class MCAEditorPanel(QWidget):
         files as read-only), the read-only attribute is cleared before
         writing so the save succeeds without requiring a manual checkout.
 
+        On failure, logs the error, shows a warning dialog, and returns
+        False *without* clearing the editor's modified flag -- so the
+        tab keeps its '*' indicator and callers can decide whether to
+        proceed with downstream side effects (module reload, execute).
+
         :param MCACodeEditor editor: The editor to save.
         :param str filepath: The file path to write to.
+        :return: True if the file was written successfully.
+        :rtype: bool
         """
         try:
             # Clear the OS read-only flag if set (common with Perforce
@@ -2883,8 +2771,14 @@ class MCAEditorPanel(QWidget):
                 f.write(editor.toPlainText())
             editor.document().setModified(False)
             logger.debug("Saved file: %s", filepath)
+            return True
         except Exception as exc:
+            # Log + popup so a silent disk-write failure can't go
+            # unnoticed.  The modified flag is *not* cleared, so the
+            # tab title still shows '*' and the user knows to retry.
+            logger.warning("Failed to save %s: %s", filepath, exc)
             QMessageBox.warning(self, "Error", "Could not save file:\n{}".format(str(exc)))
+            return False
 
     def _close_tab_in_group(self, group, index):
         """
@@ -3201,18 +3095,28 @@ class MCAEditorPanel(QWidget):
         the content to disk.
 
         :param MCACodeEditor editor: The editor whose content to persist.
+        :return: True on success, False if the buffer write failed.
+        :rtype: bool
         """
         # Only persist temp buffers (no file_path).
         if editor.file_path:
-            return
+            return True
 
         # Fallback: allocate an ID if somehow missing (e.g. restored session).
         if editor._buffer_id is None:
             editor._buffer_id = self._session_manager.allocate_buffer_id()
 
-        editor._buffer_filename = self._session_manager.save_buffer(
+        result = self._session_manager.save_buffer(
             editor._buffer_id, editor.toPlainText(), editor.language
         )
+        if result is None:
+            # save_buffer logs the underlying error.  Surface the
+            # failure to the user so they don't think the buffer was
+            # persisted when it wasn't.
+            self._show_status("Failed to save buffer to disk", duration_ms=5000)
+            return False
+        editor._buffer_filename = result
+        return True
 
     def _save_session_manifest(self):
         """
@@ -3575,18 +3479,33 @@ class MCAEditorPanel(QWidget):
 
         File-backed tabs are written to disk; temp buffers are persisted
         to the session buffers directory. The modified flag is cleared
-        so the tab title drops the '*' indicator. For .py files, the
-        module is auto-reloaded locally and in the connected DCC.
+        only on a successful save so a failed disk write doesn't make
+        the tab look saved.  For .py files, the module is auto-reloaded
+        locally and in the connected DCC -- but only when the disk
+        write actually succeeded, so we never reload from stale
+        on-disk content while the editor still has fresh changes.
 
         :param MCACodeEditor editor: The editor to save.
+        :return: True if the save succeeded (or there was nothing to
+            do); False if the disk write failed.
+        :rtype: bool
         """
         if editor.file_path:
-            self._write_file(editor, editor.file_path)
-            # Auto-reload so the DCC and local env have the latest code.
-            self._auto_reload_module(editor.file_path)
-        else:
-            self._save_buffer_content(editor)
-        editor.document().setModified(False)
+            ok = self._write_file(editor, editor.file_path)
+            if ok:
+                # Auto-reload so the DCC and local env have the latest
+                # code.  Only run after a confirmed successful write so
+                # a failed save doesn't reload from a stale file.
+                self._auto_reload_module(editor.file_path)
+                # _write_file already cleared the modified flag on
+                # success.  No need to clear again here.
+            return ok
+        # Temp buffer path -- only clear modified flag if the buffer
+        # actually hit disk.
+        ok = self._save_buffer_content(editor)
+        if ok:
+            editor.document().setModified(False)
+        return ok
 
     def _resolve_module_name(self, filepath):
         """
@@ -5261,10 +5180,16 @@ class MCAEditorPanel(QWidget):
             self._reindex_debounce_timer.stop()
             self._reindex_debounce_timer = None
 
-        # Cancel the worker thread and wait briefly for it to finish.
+        # Cancel the worker thread.  The worker is a daemon thread that
+        # checks ``_cancelled`` cooperatively; we only need to flip the
+        # flag, not block the main thread waiting for it to notice.
+        # The previous 2-second join made editor close hang for up to
+        # 2 seconds whenever indexing was still in progress.  A 50ms
+        # poll lets very-fast workers finish cleanly without holding up
+        # the user-visible close.
         if self._index_worker is not None:
             self._index_worker.cancel()
-            self._index_worker.join(timeout=2.0)
+            self._index_worker.join(timeout=0.05)
             self._index_worker = None
 
         if clear_index:
@@ -5347,21 +5272,58 @@ class MCAEditorPanel(QWidget):
         Debounces for 3 seconds, then re-indexes the workspace.  This
         catches external changes like git pull, branch switch, etc.
 
-        :param str path: The directory that changed (unused — we re-index all folders).
+        Editor-initiated saves are *not* a reason to reindex -- those
+        are already covered by ``SymbolIndex.update_file`` called in
+        :meth:`_save_file`.  And we never trigger a full reindex while
+        the indexer is still building or while incremental updates are
+        keeping the index up to date -- that just throws away work in
+        progress and starves the main thread on large projects.
+
+        :param str path: The directory that changed (unused -- we
+            re-index all folders).
         """
         # Only re-index if we have an active index.
         if self._symbol_index is None:
             return
 
-        # Reset the debounce timer — 3 seconds after the last change.
+        # If the indexer is still running an initial build, leave it
+        # alone.  Restarting from scratch (because state != "ready"
+        # would fail the cache check in _start_symbol_indexing) was the
+        # bug that caused multi-second freezes when saving while the
+        # initial 25k-file index was still in progress.
+        if self._symbol_index.get_state() != "ready":
+            logger.debug(
+                "Workspace change while still indexing -- ignoring "
+                "(initial build will pick up the change)."
+            )
+            return
+
+        # Reset the debounce timer -- 3 seconds after the last change.
         if self._reindex_debounce_timer is None:
             self._reindex_debounce_timer = QTimer(self)
             self._reindex_debounce_timer.setSingleShot(True)
             self._reindex_debounce_timer.setInterval(3000)
-            self._reindex_debounce_timer.timeout.connect(self._start_symbol_indexing)
+            self._reindex_debounce_timer.timeout.connect(
+                self._maybe_reindex_after_external_change
+            )
 
         # Restart the debounce window.
         self._reindex_debounce_timer.start()
+
+    def _maybe_reindex_after_external_change(self):
+        """
+        Debounce-fired callback.
+
+        Only kicks off a full reindex if the index is still ready (i.e.
+        nothing else has invalidated it in the meantime).  Skipping when
+        the indexer is busy avoids the work-thrashing pattern where a
+        save during indexing cancels the in-progress build.
+        """
+        if self._symbol_index is None:
+            return
+        if self._symbol_index.get_state() != "ready":
+            return
+        self._start_symbol_indexing()
 
     # --- Go to Declaration / Find Usages (Ctrl+B) -----------------------------
 
@@ -5902,25 +5864,19 @@ class MCAEditorPanel(QWidget):
         settings.set("splitter_sizes", self._main_splitter.sizes())
         settings.set("center_splitter_sizes", self._center_splitter.sizes())
 
-        # Save individual panel sizes so they survive hide/show toggles.
+        # Save right panel width so it survives hide/show toggles.
         # If the panel is visible its current size is the right one to save;
         # if hidden, the size is 0 so we keep whatever was saved when it was
-        # last hidden (already written by _hide_right_panel / _on_bottom_terminals_closed).
+        # last hidden (already written by _hide_right_panel).
         main_sizes = self._main_splitter.sizes()
         if main_sizes[-1] > 0:
             settings.set("right_panel_width", main_sizes[-1])
-        center_sizes = self._center_splitter.sizes()
-        if len(center_sizes) >= 3 and center_sizes[2] > 0:
-            settings.set("bottom_terminal_height", center_sizes[2])
         settings.set("sidebar_splitter_sizes", self._sidebar.splitter_sizes())
 
         # Panel visibility — use tracked instance vars instead of isVisible()
         # because the parent window may already be hidden during close,
         # which causes isVisible() to return False for all children.
         settings.set("output_visible", self._output_visible)
-        settings.set("bottom_terminal_visible", self._bottom_terminal_panel.isVisible())
-        settings.set("right_terminal_visible",
-                      self._right_stripe.is_button_active("terminal"))
         settings.set("sidebar_visible", self._sidebar_visible)
 
         # Persist workspace folders (scripts/ or project root when active).
@@ -5938,18 +5894,33 @@ class MCAEditorPanel(QWidget):
 
     def cleanup(self):
         """
-        Clean up resources (called by host on close).
+        Fast cleanup -- the user-visible close should never wait.
 
-        Saves all temp buffer contents, the session manifest, and the
-        output panel content so the editor can restore them on next launch.
+        Strategy:
+            1. Synchronously save anything that protects user data
+               (modified tabs, session manifest).  These writes are
+               cheap and must finish before the host returns control,
+               otherwise data could be lost if Maya is exiting too.
+            2. Cancel background workers cooperatively (flip flags,
+               don't ``join()``).  They are daemons and clean
+               themselves up.
+            3. Defer everything else (plugin unload, completer cleanup,
+               API server stop, output/tree persistence) to
+               ``QTimer.singleShot(0, ...)`` so this method returns
+               immediately and the dock disappears with no perceived
+               hang.
+            4. The deferred phase further offloads pure-I/O work
+               (pickling the symbol index, joining the API server's
+               asyncio thread) to a daemon thread
+               so even the deferred Qt-thread step is short.
         """
-        # Save modified file-backed tabs to disk before shutting down.
-        # Only writes tabs whose document has been modified to avoid
-        # permission errors on read-only files that were just viewed.
+        # --- Phase 1: synchronous, data-critical ---------------------------
+        # Save modified file-backed tabs and the session manifest now.
+        # Buffer content for unsaved tabs is also written here -- losing
+        # those would be visible data loss.
         for editor, name, path in self._group_container.all_editors():
             if editor.file_path and editor.document().isModified():
                 try:
-                    # Clear OS read-only flag if set (Perforce, etc.)
                     if os.path.exists(editor.file_path) and not os.access(editor.file_path, os.W_OK):
                         os.chmod(editor.file_path, stat.S_IWRITE | stat.S_IREAD)
                     with open(editor.file_path, "w", encoding="utf-8") as f:
@@ -5960,52 +5931,144 @@ class MCAEditorPanel(QWidget):
                 self._save_buffer_content(editor)
         self._save_session_manifest()
 
-        # Persist the output panel content so it survives restarts.
-        output_text = self._output.get_plain_text()
-        if output_text.strip():
-            self._session_manager.save_output(output_text)
-
-        # Persist workspace tree state so expanded folders survive restarts.
-        project_root = (self._active_project.project_root
-                        if self._active_project else None)
-        self._sidebar.workspace_panel.save_tree_state_to_settings(
-            self._settings, project_root
-        )
-
-        # Clean up all CodeCompleter instances before the widget tree is
-        # destroyed.  Completers are created with parent=None (so they
-        # float as tooltips) and install an app-level event filter on
-        # QApplication.  If not removed here, the orphaned completers
-        # survive shiboken6.delete() and cause ACCESS_VIOLATION during
-        # Maya's atexit phase when Qt dispatches events through the
-        # dangling filter references.
-        for editor, _name, _path in self._group_container.all_editors():
-            if hasattr(editor, "_completer") and editor._completer is not None:
-                try:
-                    editor._completer.cleanup()
-                except Exception as exc:
-                    logger.warning("Completer cleanup failed: %s", exc)
-
-        # Unload all plugins before shutting down.
-        if hasattr(self, "_plugin_manager") and self._plugin_manager:
-            self._plugin_manager.unload_all()
-
-        # Stop background symbol indexing before shutdown.
-        self._stop_symbol_indexing()
-
-        # Terminate all terminal processes in both panels.
-        self._bottom_terminal_panel.cleanup()
-        self._right_terminal_panel.cleanup()
-
-        self._adapter_manager.disconnect_all()
-
-        # Stop the API dispatch timer and shut down the JSON-RPC server.
+        # --- Phase 2: cancel-only (non-blocking) ---------------------------
+        # Stop the API dispatch timer immediately so no further main-thread
+        # API calls are dispatched once we return.
         if hasattr(self, "_api_dispatch_timer"):
-            self._api_dispatch_timer.stop()
-        try:
-            from mca_core.editor_api_server import stop_server
-            stop_server()
-        except Exception as exc:
-            logger.warning("Failed to stop API server: %s", exc)
+            try:
+                self._api_dispatch_timer.stop()
+            except Exception:
+                pass
 
-        logger.info("MCA Editor panel cleaning up")
+        # Cancel the symbol index worker without joining it -- a daemon
+        # thread checks ``_cancelled`` and exits on its own.  Also stop
+        # the progress poll timer and stash the (possibly already-ready)
+        # index in the module-level cache so the next editor open can
+        # skip reindexing.  Disk persistence happens in the background
+        # thread later -- pickling a large index can take seconds.
+        if self._index_progress_timer is not None:
+            try:
+                self._index_progress_timer.stop()
+            except Exception:
+                pass
+            self._index_progress_timer = None
+        if self._reindex_debounce_timer is not None:
+            try:
+                self._reindex_debounce_timer.stop()
+            except Exception:
+                pass
+            self._reindex_debounce_timer = None
+        if self._index_worker is not None:
+            try:
+                self._index_worker.cancel()
+            except Exception:
+                pass
+        # Belt-and-braces module-cache stash (the poll-tick path also
+        # does this; this covers the sub-500ms-completion edge case).
+        global _cached_symbol_index, _cached_indexed_folders
+        if (self._symbol_index is not None
+                and self._symbol_index.get_state() == "ready"):
+            _cached_symbol_index = self._symbol_index
+            _cached_indexed_folders = getattr(self, "_indexed_folders", None)
+
+        # --- Phase 3: schedule deferred cleanup ----------------------------
+        # QTimer.singleShot(0) means "as soon as Qt finishes the current
+        # event".  dockCloseEventTriggered will return, the workspace
+        # control's disappearance becomes visible, and *then* the
+        # deferred cleanup runs -- so the user sees no hang.
+        QTimer.singleShot(0, self._cleanup_deferred)
+
+    def _cleanup_deferred(self):
+        """
+        Phase 2 of close-time cleanup -- runs on the Qt main thread one
+        event-loop tick after :meth:`cleanup` returned.
+
+        At this point the workspace control has already been hidden, so
+        any remaining work doesn't affect the user-visible close time.
+        I/O-bound shutdowns (PTY kills, API server thread join, symbol
+        index pickle) are pushed onto a daemon thread so even this
+        deferred step doesn't block Qt for long.
+        """
+        import threading
+
+        # Save output panel text -- must happen on the Qt thread because
+        # ``get_plain_text`` reads from a QPlainTextEdit.
+        try:
+            output_text = self._output.get_plain_text()
+            if output_text.strip():
+                self._session_manager.save_output(output_text)
+        except Exception as exc:
+            logger.warning("Output save (deferred) failed: %s", exc)
+
+        # Persist workspace tree state -- QSettings call is Qt-thread only.
+        try:
+            project_root = (self._active_project.project_root
+                            if self._active_project else None)
+            self._sidebar.workspace_panel.save_tree_state_to_settings(
+                self._settings, project_root
+            )
+        except Exception as exc:
+            logger.warning("Tree state save (deferred) failed: %s", exc)
+
+        # Clean up CodeCompleter event filters -- must run on Qt thread
+        # because they manipulate QApplication-level filters.  Without
+        # this, dangling filters cause ACCESS_VIOLATION during Maya
+        # shutdown (see notes in the original cleanup() docstring).
+        try:
+            for editor, _name, _path in self._group_container.all_editors():
+                if hasattr(editor, "_completer") and editor._completer is not None:
+                    try:
+                        editor._completer.cleanup()
+                    except Exception as exc:
+                        logger.warning("Completer cleanup failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Completer iteration failed: %s", exc)
+
+        # Plugin unload -- plugins may touch Qt menus, so on the main thread.
+        try:
+            if hasattr(self, "_plugin_manager") and self._plugin_manager:
+                self._plugin_manager.unload_all()
+        except Exception as exc:
+            logger.warning("Plugin unload failed: %s", exc)
+
+        # Disconnect adapters -- mostly socket close, fast and safe to
+        # run on Qt thread.
+        try:
+            self._adapter_manager.disconnect_all()
+        except Exception as exc:
+            logger.warning("Adapter disconnect failed: %s", exc)
+
+        # --- Background thread for pure-Python I/O -------------------------
+        # Symbol-index pickle and asyncio server join touch nothing Qt,
+        # so they're safe off-thread.  Capture refs so the thread doesn't
+        # depend on this panel still being alive.
+        sym_idx = self._symbol_index
+        idx_folders = getattr(self, "_indexed_folders", None)
+        get_path_fn = self._get_index_cache_path
+
+        def _io_cleanup():
+            """Daemon-thread tail end of cleanup -- pure I/O, no Qt."""
+            # Persist the symbol index to disk so it survives Maya
+            # restarts.  Pickling a large index can take seconds;
+            # doing it here keeps that off the close path.
+            try:
+                if (sym_idx is not None
+                        and sym_idx.get_state() == "ready"
+                        and idx_folders):
+                    path = get_path_fn(idx_folders)
+                    if path:
+                        sym_idx.save_to_disk(path)
+            except Exception as exc:
+                logger.warning("Index persist (bg) failed: %s", exc)
+            # Stop the JSON-RPC server -- joins its asyncio thread.
+            try:
+                from mca_core.editor_api_server import stop_server
+                stop_server()
+            except Exception as exc:
+                logger.warning("API server stop (bg) failed: %s", exc)
+
+        threading.Thread(
+            target=_io_cleanup,
+            name="mca-cleanup-io",
+            daemon=True,
+        ).start()

@@ -89,8 +89,6 @@ DIST_PYC_FILES = [
     os.path.join("mca_qt", "widgets", "quick_open.py"),
     os.path.join("mca_qt", "widgets", "settings_dialog.py"),
     os.path.join("mca_qt", "widgets", "sidebar.py"),
-    os.path.join("mca_qt", "widgets", "terminal_native.py"),
-    os.path.join("mca_qt", "widgets", "terminal_xterm.py"),
     os.path.join("mca_qt", "widgets", "tool_stripe.py"),
     # Plugin settings dialog has keyPressEvent override -> .pyc
     os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),
@@ -101,8 +99,6 @@ DIST_PYC_FILES = [
     # TypeError, RecursionError, or ACCESS_VIOLATION crashes even without
     # virtual method overrides.
     os.path.join("mca_qt", "widgets", "editor_group_container.py"),
-    os.path.join("mca_qt", "widgets", "terminal_tab_panel.py"),
-    os.path.join("mca_qt", "widgets", "terminal_backend.py"),
     os.path.join("mca_qt", "widgets", "ai_panel.py"),
     os.path.join("mca_qt", "widgets", "connection_dialog.py"),
     os.path.join("mca_qt", "widgets", "create_project_dialog.py"),

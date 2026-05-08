@@ -20,12 +20,73 @@ Dependencies:
 
 import sys
 import logging
+import reprlib
 import traceback
 
 from .base_adapter import DCCAdapter, DCCType, ConnectionState
 
 # Module-level logger for internal Maya operations.
 logger = logging.getLogger(__name__)
+
+
+# --- Bounded repr for eval-mode results -------------------------------------
+
+# Hard ceiling on the length of "# Result: ... #" repr text printed back into
+# Maya's output panel.  Without this, evaluating a large variable (a 500MB
+# dict, a 10M-element list, etc.) calls repr() on the whole object, allocates
+# a massive string, then pipes the bytes through MCommandMessage into a
+# QPlainTextEdit -- which freezes Maya for tens of seconds.
+_REPR_LIMIT = 4096
+
+# Pre-built reprlib.Repr instance.  reprlib bounds container traversal
+# (dicts/lists/sets/tuples) and string length, so the cost of reprring a
+# huge object is constant rather than proportional to its size.
+_BOUNDED_REPR = reprlib.Repr()
+_BOUNDED_REPR.maxstring = _REPR_LIMIT
+_BOUNDED_REPR.maxother = _REPR_LIMIT
+_BOUNDED_REPR.maxlist = 100
+_BOUNDED_REPR.maxdict = 100
+_BOUNDED_REPR.maxtuple = 100
+_BOUNDED_REPR.maxset = 100
+_BOUNDED_REPR.maxfrozenset = 100
+_BOUNDED_REPR.maxarray = 100
+_BOUNDED_REPR.maxdeque = 100
+_BOUNDED_REPR.maxlong = 200
+
+
+def _safe_repr(obj):
+    """
+    Return a length-bounded repr of *obj* safe to print to the Output panel.
+
+    Uses :class:`reprlib.Repr` so deeply nested or very large containers
+    (e.g. a dict with one million keys) are summarized rather than fully
+    serialized.  Also wraps the call in a try/except because user objects
+    can have buggy ``__repr__`` methods that raise.
+
+    :param object obj: Any Python object whose ``# Result: ... #``
+        representation needs to appear in the editor's output panel.
+    :return: A printable string no longer than roughly ``_REPR_LIMIT``
+        characters, with a "[truncated]" marker when clipping happened.
+    :rtype: str
+    """
+    # Try the bounded repr first -- handles 99% of cases cleanly.
+    try:
+        text = _BOUNDED_REPR.repr(obj)
+    except Exception as exc:
+        # User __repr__ raised; fall back to a type-only summary so we
+        # never crash the eval pipeline because of a buggy object.
+        return "<unreprable {} (repr raised {})>".format(
+            type(obj).__name__, type(exc).__name__,
+        )
+
+    # reprlib usually keeps the result well under the limit, but very long
+    # individual strings or deeply nested objects can push it over.  Hard
+    # clip as a final guard so the output panel never has to lay out
+    # multi-megabyte lines.
+    if len(text) > _REPR_LIMIT:
+        text = text[:_REPR_LIMIT] + "... [truncated]"
+
+    return text
 
 
 # --- Stdout Tee Writer (exec-time capture) ----------------------------------
@@ -250,7 +311,9 @@ class InternalMayaAdapter(DCCAdapter):
                 #   # Result: <value> #
                 # Goes through Maya's stdout → MCommandMessage → panel.
                 if result is not None:
-                    print("# Result: {} #".format(repr(result)))
+                    # Use bounded repr so a large variable (big dict/list)
+                    # doesn't freeze Maya by serializing megabytes of text.
+                    print("# Result: {} #".format(_safe_repr(result)))
 
             except SyntaxError:
                 # Not a single expression — execute as statements.
@@ -361,7 +424,9 @@ class InternalMayaAdapter(DCCAdapter):
             # MCommandMessage.  print() goes through Maya's stdout →
             # MCommandMessage kDisplay → _on_maya_output.
             if result is not None and result != "" and result != 0:
-                print("# Result: {} #".format(result))
+                # Bounded repr -- MEL can return large arrays from queries
+                # like ``ls -l``; same risk as the Python eval path.
+                print("# Result: {} #".format(_safe_repr(result)))
 
         except Exception as exc:
             # Maya already displayed the error through its output system

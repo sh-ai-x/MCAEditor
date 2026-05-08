@@ -539,8 +539,16 @@ class LineNumberArea(QWidget):
         """
         Delegate painting to the editor.
 
+        Maya 2024's PySide2/Shiboken2 occasionally dispatches a
+        ``QShowEvent`` into this slot during the workspace control's
+        first show.  ``QShowEvent`` has no ``rect()`` method, which
+        crashes the gutter painter.  Detect that case and ignore --
+        the next real paint event will draw the gutter correctly.
+
         :param QPaintEvent event: The paint event.
         """
+        if not hasattr(event, "rect"):
+            return
         self._editor.paint_line_numbers(event)
 
 

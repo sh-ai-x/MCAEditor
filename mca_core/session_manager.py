@@ -239,10 +239,15 @@ class SessionManager:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
             logger.debug("Saved buffer: %s", filepath)
+            return filename
         except Exception as exc:
+            # Log and return None so the caller can detect the failure
+            # and avoid clearing the editor's modified flag on a stale
+            # on-disk buffer.  Previous behaviour returned the filename
+            # regardless of write success, which made the editor think
+            # the save had worked.
             logger.error("Failed to save buffer %s: %s", filepath, exc)
-
-        return filename
+            return None
 
     def load_buffer(self, buffer_filename):
         """

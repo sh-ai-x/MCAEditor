@@ -22,12 +22,6 @@
 - Plugin settings dialog
 - Right sidebar panel hosting
 
-## v0.3.6 — 2026-03-08
-
-- Integrated terminal with ANSI color support
-- Smart Ctrl+C (copy or interrupt)
-- Terminal text selection improvements
-
 ## v0.3.0 — 2026-03-05
 
 - Project Mode with file tree sidebar

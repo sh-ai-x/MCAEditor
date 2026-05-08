@@ -108,14 +108,26 @@ _MAX_FILE_SIZE = 512 * 1024  # 512 KB
 # plug-in autoload) time to finish before we start hammering the disk.
 # Checked cooperatively against ``_cancelled`` in short slices so a
 # quick project close doesn't leave the thread sleeping.
-_STARTUP_DELAY_SECS = 3.0
+#
+# Tuned down from 3.0s -- the editor opens long after Maya's startup is
+# done in 99% of cases, so a 3 second pause was just dead air.  0.5s is
+# enough cushion for the rare cold-launch case.
+_STARTUP_DELAY_SECS = 0.5
 
 # Release the GIL every N files parsed in Phase 2.  A small ``sleep()``
 # (not ``sleep(0)``, which can be a near-no-op under heavy load) yields
 # to the main thread's Python callbacks.  Total indexer overhead is
 # ``(file_count / _YIELD_EVERY_N_FILES) * _YIELD_SLEEP_SECS``.
-_YIELD_EVERY_N_FILES = 20
-_YIELD_SLEEP_SECS = 0.005  # 5 ms
+#
+# Tuning history:
+#   * Original: 20 / 5ms -- responsive but slow on large projects.
+#   * v1.0.26:  200 / 1ms -- fast but Maya froze for ~2s when the
+#               user executed code or switched tabs while indexing.
+#   * Now:      40 / 2ms -- 5x more frequent yields than v1.0.26 caps
+#               max main-thread stall around 200ms while costing only
+#               ~1 second of total throughput on a 25k-file index.
+_YIELD_EVERY_N_FILES = 40
+_YIELD_SLEEP_SECS = 0.002  # 2 ms
 
 # --- Disk cache format -------------------------------------------------
 #
@@ -644,7 +656,19 @@ class SymbolIndex:
 
         # Atomic write: temp then rename.  ``os.replace`` is atomic on
         # both POSIX and Windows (unlike the older ``os.rename``).
-        tmp_path = path + ".tmp"
+        #
+        # Two writers can race here: the poll-tick path
+        # (``_save_index_to_disk_if_ready``) running on the Qt main
+        # thread and the close-time background thread.  If they both
+        # opened the same ``.tmp`` filename, Windows raised WinError 32
+        # ("file is being used by another process") on rename.  Make
+        # the temp suffix unique per call so concurrent writers don't
+        # collide on the temp filename -- both eventually call
+        # ``os.replace`` against the same final path, and whichever
+        # lands second simply overwrites the first (still atomic).
+        tmp_path = "{}.tmp.{}.{}".format(
+            path, os.getpid(), threading.get_ident()
+        )
         try:
             with open(tmp_path, "wb") as f:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)

@@ -445,9 +445,14 @@ def stop_server():
             except Exception as exc:
                 logger.warning("Error stopping server loop: %s", exc)
 
-        # Wait for the thread to finish.
+        # Wait briefly for the thread to finish.  The asyncio loop has
+        # been signalled to stop above, so it should exit within a few
+        # ms.  A long timeout here was making editor close hang for up
+        # to 5 seconds when the loop took a moment to acknowledge the
+        # ``stop`` call.  The thread is a daemon, so leaving it briefly
+        # mid-shutdown is safe -- it will be reaped on process exit.
         if _server_thread is not None:
-            _server_thread.join(timeout=5)
+            _server_thread.join(timeout=0.2)
             _server_thread = None
 
         _tcp_server = None

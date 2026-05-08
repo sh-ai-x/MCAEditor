@@ -96,13 +96,13 @@ best against the dark sidebar.
 **Use a built-in editor icon:**
 
 ```python
-from mca_qt.icons import terminal_icon, settings_icon, maya_logo
+from mca_qt.icons import settings_icon, maya_logo
 
 api.add_panel("my-plugin", "My Plugin", panel, icon=maya_logo())
 ```
 
 Available built-in icons: `folder_closed()`, `folder_open()`, `python_logo()`,
-`maya_logo()`, `text_icon()`, `terminal_icon()`, `settings_icon()`, `mca_logo()`,
+`maya_logo()`, `text_icon()`, `settings_icon()`, `mca_logo()`,
 `plugin_icon()`.
 
 **Paint one programmatically:**

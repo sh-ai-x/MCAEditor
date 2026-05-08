@@ -54,12 +54,6 @@ Complete list of MCA Editor keyboard shortcuts.
 | ++ctrl+h++ | Find and replace |
 | ++ctrl+shift+f++ | Find in files (project) |
 
-## Panels
-
-| Shortcut | Action |
-|---|---|
-| ++ctrl+grave++ | Toggle terminal |
-
 ## Code Completion
 
 | Shortcut | Action |

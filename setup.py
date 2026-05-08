@@ -134,13 +134,9 @@ def collect_extensions():
         os.path.join("mca_qt", "widgets", "quick_open.py"),       # eventFilter
         os.path.join("mca_qt", "widgets", "settings_dialog.py"),  # keyPressEvent
         os.path.join("mca_qt", "widgets", "sidebar.py"),          # dragEnterEvent, dragMoveEvent, dropEvent
-        os.path.join("mca_qt", "widgets", "terminal_native.py"),  # eventFilter, resizeEvent
-        os.path.join("mca_qt", "widgets", "terminal_xterm.py"),   # eventFilter
         os.path.join("mca_qt", "widgets", "tool_stripe.py"),      # sizeHint
         os.path.join("mca_qt", "widgets", "plugin_settings_dialog.py"),  # keyPressEvent
         os.path.join("mca_qt", "widgets", "editor_group_container.py"),   # QWidget + PySide2 Shiboken2
-        os.path.join("mca_qt", "widgets", "terminal_tab_panel.py"),       # QWidget + PySide2 Shiboken2
-        os.path.join("mca_qt", "widgets", "terminal_backend.py"),         # QThread + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "ai_panel.py"),                 # QFrame/QWidget + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "connection_dialog.py"),        # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "create_project_dialog.py"),    # QDialog + PySide2 Shiboken2

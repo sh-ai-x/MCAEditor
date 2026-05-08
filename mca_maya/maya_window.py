@@ -389,13 +389,6 @@ class _MayaHotkeyFilter(QObject):
         super().__init__(target)
         self._target = target
         self._panel = panel
-        # Most-recent widget the user clicked inside a terminal.  Kept
-        # separate from `_focus_forced_widget` (which tracks the last
-        # click anywhere in the editor) so that clicking a code editor
-        # does not erase the preferred paste target.  Used by the
-        # Ctrl+V override so paste continues to route to the terminal
-        # even after the user has interacted with the code side.
-        self._last_terminal_widget = None
 
     def _focus_in_editor(self):
         """
@@ -470,49 +463,6 @@ class _MayaHotkeyFilter(QObject):
 
         return None
 
-    def _find_parent_terminal(self, widget):
-        """
-        Walk up the widget parent chain looking for a TerminalWidget.
-
-        :param QWidget widget: The starting widget (usually the focused child).
-        :return: The TerminalWidget ancestor, or None.
-        :rtype: QWidget or None
-        """
-        try:
-            from mca_qt.widgets.terminal_native import TerminalWidget
-        except ImportError:
-            TerminalWidget = None
-        # Walk the parent chain with RuntimeError guards.  If ANY widget
-        # in the chain has had its C++ object deleted (common after tab
-        # close, panel rebuild, or editor shutdown), calling .parent() or
-        # isinstance() will raise and kill the whole Ctrl+V dispatch.
-        # Catch the stale-widget case and return None so Phase 2 can fall
-        # back to the direct-focus paste path instead of silently dropping
-        # the key event.
-        #
-        # Also compare class *name* as a fallback to isinstance().  If
-        # the module ever gets imported twice (dual-import scenario —
-        # see CLAUDE.md notes on stale .mod files and Python path
-        # duplication), the `TerminalWidget` symbol in this scope may
-        # differ from the one used to instantiate the widget, causing
-        # isinstance() to return False for an actual terminal.  The
-        # name check survives that.
-        parent = widget
-        depth = 0
-        while parent is not None and depth < 32:
-            try:
-                if TerminalWidget is not None and isinstance(parent, TerminalWidget):
-                    return parent
-                cls = type(parent)
-                if cls.__name__ == "TerminalWidget" and hasattr(parent, "paste_clipboard"):
-                    return parent
-                parent = parent.parent()
-            except RuntimeError:
-                # Widget was deleted mid-walk — abort the search.
-                return None
-            depth += 1
-        return None
-
     def eventFilter(self, watched, event):
         """
         Two-phase keyboard interception for Maya hotkey suppression.
@@ -580,21 +530,6 @@ class _MayaHotkeyFilter(QObject):
                     # use it as a fallback if focusWidget() hasn't
                     # caught up yet (activateWindow is async on Win11).
                     self._focus_forced_widget = focus_target
-                    # Track terminal-vs-non-terminal click separately.
-                    # If this click landed inside a terminal, store it so
-                    # the Ctrl+V override can still find the terminal
-                    # even after programmatic focus changes (MCP tools
-                    # calling setFocus on code editors, menu transients,
-                    # etc.) drift focus away.  If the click landed on
-                    # something that is NOT a terminal, clear the
-                    # tracker so paste follows the user's new intent —
-                    # we don't want to send paste to an old terminal
-                    # when the user has clearly moved on to a code
-                    # editor.
-                    if self._find_parent_terminal(focus_target):
-                        self._last_terminal_widget = focus_target
-                    else:
-                        self._last_terminal_widget = None
                 else:
                     # Click outside our editor — release keyboard ownership.
                     self._focus_forced = False
@@ -669,330 +604,78 @@ class _MayaHotkeyFilter(QObject):
                     # tree to Maya's main window (where Maya would process
                     # it as a hotkey like Ctrl+G = Group, etc.).
                     #
-                    # For terminal widgets, the key handling lives in the
-                    # TerminalWidget's eventFilter (not in the
-                    # QPlainTextEdit's keyPressEvent), so we need to find
-                    # the terminal parent and route through its eventFilter.
-                    # For regular text editors, invoke standard clipboard /
-                    # undo methods directly rather than routing through
-                    # keyPressEvent — this avoids issues where focusWidget()
-                    # hasn't caught up after activateWindow() on Win11.
+                    # Resolve the focus target.  Prefer Qt's focusWidget(),
+                    # then fall back to the widget we set focus on in
+                    # Phase 0 (activateWindow is async on Win11 so the
+                    # focus transfer may not have caught up yet), then
+                    # fall back to the panel's active code editor.
                     focus = QApplication.instance().focusWidget()
-
-                    # Terminal-intent override: if the user's last click
-                    # landed inside a terminal widget, prefer that target
-                    # over Qt's current focusWidget().  Focus can drift
-                    # away from the terminal due to non-click focus
-                    # transients (menu popups, dialog dismissals, internal
-                    # reparenting), and users expect Ctrl+V to paste into
-                    # the terminal they last clicked — not the editor they
-                    # were typing in before clicking the terminal.
-                    if key == Qt.Key.Key_V:
-                        # First preference: the widget we tracked from the
-                        # most-recent terminal click.  This survives clicks
-                        # into code editors so paste still targets the
-                        # terminal the user last interacted with.
-                        last_term = getattr(self, "_last_terminal_widget", None)
-                        terminal_override = None
-                        if last_term is not None:
-                            try:
-                                last_term.parent()  # Liveness probe.
-                                if self._widget_in_editor(last_term):
-                                    term = self._find_parent_terminal(last_term)
-                                    # Only use the tracked terminal if it's
-                                    # visible and alive — a closed or hidden
-                                    # terminal should NOT steal paste.
-                                    if (term
-                                            and getattr(term, "_alive", False)
-                                            and term.isVisible()):
-                                        terminal_override = last_term
-                            except RuntimeError:
-                                # Dead reference — drop it and fall through.
-                                self._last_terminal_widget = None
-
-                        # Second preference: the generic last-click widget,
-                        # as long as it belongs to a visible+alive terminal.
-                        # Mirrors the first-preference visibility guard so
-                        # a hidden/collapsed terminal never steals paste.
-                        if terminal_override is None:
-                            clicked = getattr(self, "_focus_forced_widget", None)
-                            if clicked is not None:
-                                try:
-                                    clicked.parent()  # Liveness probe.
-                                    if self._widget_in_editor(clicked):
-                                        t2 = self._find_parent_terminal(clicked)
-                                        if (t2
-                                                and getattr(t2, "_alive", False)
-                                                and t2.isVisible()):
-                                            terminal_override = clicked
-                                except RuntimeError:
-                                    pass
-
-                        if terminal_override is not None:
-                            logger.debug(
-                                "Ctrl+V: overriding focus to terminal widget"
-                            )
-                            focus = terminal_override
-
-                    # Fallback: if focusWidget() returns None or a widget
-                    # outside our editor (focus hasn't transferred yet),
-                    # use the widget we tried to focus in Phase 0.
                     if not focus or not self._widget_in_editor(focus):
-                        old_focus = focus
                         focus = getattr(self, "_focus_forced_widget", None)
-                        # Validate the stored widget — if the user closed
-                        # a terminal tab or the panel rebuilt, the stored
-                        # reference may point to a widget whose C++ object
-                        # was deleted.  Calling methods on it would raise
-                        # RuntimeError.  Drop the stale reference so we
-                        # fall back cleanly to the active code editor.
                         if focus is not None:
                             try:
-                                # Any method call on a dead PySide widget
-                                # raises; parent() is cheap and universal.
-                                focus.parent()
+                                focus.parent()  # Liveness probe.
                                 if not self._widget_in_editor(focus):
                                     focus = None
                             except RuntimeError:
-                                logger.debug(
-                                    "_focus_forced_widget was stale — "
-                                    "clearing"
-                                )
                                 self._focus_forced_widget = None
                                 focus = None
-                        if key == Qt.Key.Key_V:
-                            logger.debug(
-                                "Ctrl+V: focusWidget=%s not in editor, "
-                                "using _focus_forced_widget=%s",
-                                type(old_focus).__name__ if old_focus else None,
-                                type(focus).__name__ if focus else None
-                            )
-
-                    # Last-resort fallback: if we still don't have a focus,
-                    # route modifier shortcuts to the panel's active editor.
-                    # Without this, Ctrl+V silently drops when no widget
-                    # has keyboard focus inside our tree (common when the
-                    # user has been interacting with non-focusable chrome).
                     if not focus:
                         try:
                             focus = self._panel._current_editor()
                         except Exception:
                             focus = None
-                        if focus and key == Qt.Key.Key_V:
-                            logger.debug(
-                                "Ctrl+V: no focus — redirecting to active "
-                                "editor %s", type(focus).__name__
-                            )
 
                     if focus:
-                        # Walk up the parent chain looking for a terminal.
-                        terminal = self._find_parent_terminal(focus)
                         try:
-                            if terminal:
-                                # Route through the terminal's eventFilter
-                                # which handles Ctrl+V paste, Ctrl+C
-                                # interrupt, etc.  Check liveness first —
-                                # a dead terminal needs special handling:
-                                # for paste, auto-restart the shell so the
-                                # paste actually works; for other keys,
-                                # drop silently (consistent with previous
-                                # behavior of blocking Maya hotkeys).
-                                alive = getattr(terminal, "_alive", False)
-                                if alive:
-                                    # Pass terminal._display (not `focus`)
-                                    # because the eventFilter checks
-                                    # `if obj is self._display:` and rejects
-                                    # any other object.
-                                    handled = terminal.eventFilter(
-                                        terminal._display, event
-                                    )
-                                    if not handled and key == Qt.Key.Key_V:
-                                        # Terminal refused to handle the
-                                        # paste (e.g. _backend is None or
-                                        # backend._running is False even
-                                        # though _alive was True).  Restart
-                                        # the terminal so the next paste
-                                        # has a working shell.
-                                        logger.warning(
-                                            "Ctrl+V: terminal eventFilter "
-                                            "refused paste — restarting "
-                                            "terminal"
-                                        )
-                                        try:
-                                            terminal.restart()
-                                        except Exception as exc:
-                                            logger.error(
-                                                "Terminal restart failed: %s",
-                                                exc
-                                            )
-                                elif key == Qt.Key.Key_V:
-                                    # Dead terminal + user pressed Ctrl+V.
-                                    # Previous behavior silently ate the
-                                    # event — the user has no idea why
-                                    # their paste failed.  Restart the
-                                    # shell and queue the paste to run
-                                    # once the new session is ready.
-                                    # restart() calls terminate() then
-                                    # singleShot(100, start).  start()
-                                    # creates the backend thread which
-                                    # takes a moment to spawn the shell
-                                    # and print its prompt.  500ms is a
-                                    # conservative wait; if the shell
-                                    # hasn't printed its prompt yet the
-                                    # paste still works because the PTY
-                                    # buffers input.
-                                    logger.warning(
-                                        "Ctrl+V: terminal is dead — "
-                                        "restarting and queueing paste"
-                                    )
-                                    try:
-                                        terminal.restart()
-                                        QTimer.singleShot(
-                                            500,
-                                            terminal.paste_clipboard
-                                        )
-                                    except Exception as exc:
-                                        logger.error(
-                                            "Terminal restart failed: %s",
-                                            exc
-                                        )
-                                else:
-                                    logger.debug(
-                                        "Terminal is dead (alive=%s) — "
-                                        "key=%s consumed to block Maya",
-                                        alive, key
-                                    )
-                            else:
-                                # Standard text editing shortcuts — call the
-                                # method directly for maximum reliability.
-                                # Going through keyPressEvent can fail if
-                                # focus hasn't fully transferred on the first
-                                # click after activateWindow() on Win11.
-                                method_name = None
-                                ctrl_only = (modifiers == Qt.KeyboardModifier.ControlModifier)
-                                ctrl_shift = (modifiers == (
-                                    Qt.KeyboardModifier.ControlModifier
-                                    | Qt.KeyboardModifier.ShiftModifier
-                                ))
-                                if ctrl_only:
-                                    method_name = {
-                                        Qt.Key.Key_C: "copy",
-                                        Qt.Key.Key_V: "paste",
-                                        Qt.Key.Key_X: "cut",
-                                        Qt.Key.Key_A: "selectAll",
-                                        Qt.Key.Key_Z: "undo",
-                                        Qt.Key.Key_Y: "redo",
-                                    }.get(key)
-                                elif ctrl_shift and key == Qt.Key.Key_Z:
-                                    # Ctrl+Shift+Z = redo on most platforms.
-                                    method_name = "redo"
-                                # Check if the focused widget can actually
-                                # accept the text operation.  Read-only
-                                # widgets (output panel) have paste()/cut()
-                                # methods that silently do nothing.  When
-                                # the focus is on a read-only widget or one
-                                # that lacks the method entirely, redirect
-                                # the operation to the active code editor.
-                                focus_is_readonly = (
-                                    hasattr(focus, "isReadOnly")
-                                    and focus.isReadOnly()
-                                )
-                                # Paste and cut modify the document — redirect
-                                # if the target is read-only.  Copy and
-                                # selectAll are fine on read-only widgets.
-                                needs_writable = method_name in ("paste", "cut")
-                                can_use_focus = (
-                                    method_name
-                                    and hasattr(focus, method_name)
-                                    and not (needs_writable and focus_is_readonly)
-                                )
-
-                                # Last-chance backstop for paste: if our
-                                # tracker says the user last interacted with
-                                # a terminal AND focus is NOT on a writable
-                                # text widget, route paste to the tracked
-                                # terminal.  This catches the case where
-                                # focus drifted to a non-editor widget
-                                # (tab bar, sidebar, status strip, or a
-                                # read-only view) between the terminal
-                                # click and the Ctrl+V.  We deliberately
-                                # skip this when focus is on a writable
-                                # text editor so users editing code still
-                                # paste into the editor normally.
-                                if method_name == "paste":
-                                    focus_writable = (
-                                        hasattr(focus, "isReadOnly")
-                                        and not focus.isReadOnly()
-                                        and hasattr(focus, "textCursor")
-                                    )
-                                    term = None
-                                    if not focus_writable:
-                                        last_t = getattr(self, "_last_terminal_widget", None)
-                                        if last_t is not None:
-                                            try:
-                                                last_t.parent()
-                                                t = self._find_parent_terminal(last_t)
-                                                if (t
-                                                        and getattr(t, "_alive", False)
-                                                        and t.isVisible()):
-                                                    term = t
-                                            except RuntimeError:
-                                                self._last_terminal_widget = None
-                                    if term is not None:
-                                        logger.debug(
-                                            "Ctrl+V: backstop — routing to "
-                                            "tracked terminal (focus was %s)",
-                                            type(focus).__name__
-                                        )
-                                        try:
-                                            term.paste_clipboard()
-                                            return True
-                                        except Exception as exc:
-                                            logger.error(
-                                                "Backstop paste failed: %s",
-                                                exc
-                                            )
-
-                                if can_use_focus:
-                                    if key == Qt.Key.Key_V:
-                                        logger.debug(
-                                            "Ctrl+V: calling %s.%s()",
-                                            type(focus).__name__, method_name
-                                        )
-                                    getattr(focus, method_name)()
-                                elif method_name:
-                                    # The focused widget is read-only or
-                                    # doesn't support this text operation
-                                    # (e.g. file tree, output panel).  Try
-                                    # the panel's active code editor as a
-                                    # last resort — the user likely expects
-                                    # paste to go there.
-                                    editor = self._panel._current_editor()
-                                    if editor and hasattr(editor, method_name):
-                                        if key == Qt.Key.Key_V:
-                                            logger.debug(
-                                                "Ctrl+V: focus=%s can't %s "
-                                                "(readonly=%s), redirecting "
-                                                "to active editor %s",
-                                                type(focus).__name__,
-                                                method_name,
-                                                focus_is_readonly,
-                                                type(editor).__name__
-                                            )
-                                        getattr(editor, method_name)()
-                                    elif hasattr(focus, "keyPressEvent"):
-                                        focus.keyPressEvent(event)
+                            # Standard text editing shortcuts -- call the
+                            # method directly for maximum reliability.
+                            # Going through keyPressEvent can fail if focus
+                            # hasn't fully transferred on the first click
+                            # after activateWindow() on Win11.
+                            method_name = None
+                            ctrl_only = (modifiers == Qt.KeyboardModifier.ControlModifier)
+                            ctrl_shift = (modifiers == (
+                                Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.ShiftModifier
+                            ))
+                            if ctrl_only:
+                                method_name = {
+                                    Qt.Key.Key_C: "copy",
+                                    Qt.Key.Key_V: "paste",
+                                    Qt.Key.Key_X: "cut",
+                                    Qt.Key.Key_A: "selectAll",
+                                    Qt.Key.Key_Z: "undo",
+                                    Qt.Key.Key_Y: "redo",
+                                }.get(key)
+                            elif ctrl_shift and key == Qt.Key.Key_Z:
+                                method_name = "redo"
+                            focus_is_readonly = (
+                                hasattr(focus, "isReadOnly")
+                                and focus.isReadOnly()
+                            )
+                            needs_writable = method_name in ("paste", "cut")
+                            can_use_focus = (
+                                method_name
+                                and hasattr(focus, method_name)
+                                and not (needs_writable and focus_is_readonly)
+                            )
+                            if can_use_focus:
+                                getattr(focus, method_name)()
+                            elif method_name:
+                                # Focus is read-only or lacks the method --
+                                # redirect to the active code editor.
+                                editor = self._panel._current_editor()
+                                if editor and hasattr(editor, method_name):
+                                    getattr(editor, method_name)()
                                 elif hasattr(focus, "keyPressEvent"):
-                                    # Not a standard text op — fall back to
-                                    # keyPressEvent for everything else.
                                     focus.keyPressEvent(event)
+                            elif hasattr(focus, "keyPressEvent"):
+                                focus.keyPressEvent(event)
                         except RuntimeError:
-                            # The focused widget's C++ object was deleted
-                            # between the focusWidget() call and the dispatch.
-                            # This happens when tabs close or widgets rebuild
-                            # mid-event.
+                            # C++ widget was deleted mid-dispatch.
                             logger.debug("Widget deleted during key dispatch "
-                                         "(key=%s) — event dropped", key)
+                                         "(key=%s) -- event dropped", key)
                     return True
 
         return super().eventFilter(watched, event)
@@ -1203,30 +886,10 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         if new and self._hotkey_filter._widget_in_editor(new):
             self._hotkey_filter._focus_forced = True
 
-            # If focus entered a terminal, update our terminal tracker.
-            # This handles programmatic focus transfers (e.g. MCP tools
-            # calling setFocus on the terminal display) that never fire
-            # a MouseButtonPress event.  Without this, the tracker
-            # updates only on clicks — so if the user clicks a terminal
-            # once and then the terminal is programmatically refocused
-            # after a stale window cycle, subsequent Ctrl+V could still
-            # miss the terminal if the tracked widget had drifted.
-            try:
-                if self._hotkey_filter._find_parent_terminal(new):
-                    self._hotkey_filter._last_terminal_widget = new
-            except Exception:
-                pass
-
             # Refresh _focus_forced_widget ONLY when the stored reference
             # is dead / missing / outside our tree.  Overwriting on every
-            # transient focus change stomped on the click-tracked widget:
-            # if the user clicked the terminal (_focus_forced_widget =
-            # terminal display), a non-click focus transient (menu close,
-            # dialog dismiss, internal reparent) would flip the reference
-            # to some other widget in our tree.  The next Ctrl+V would
-            # then route through _find_parent_terminal() starting from the
-            # wrong widget — so paste went to the editor instead of the
-            # terminal the user just clicked.
+            # transient focus change would stomp on the click-tracked
+            # widget; we want clicks to remain the source of truth.
             current = getattr(self._hotkey_filter, "_focus_forced_widget", None)
             need_refresh = False
             if current is None:

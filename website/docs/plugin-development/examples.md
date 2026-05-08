@@ -217,7 +217,7 @@ def activate(self, api):
     except ImportError:
         api.write_output(
             "This plugin requires 'requests'. "
-            "Install it via the MCA terminal: pip install requests",
+            "Install it into MCA's venv with: pip install requests",
             level="error"
         )
         return

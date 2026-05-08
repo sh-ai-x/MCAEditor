@@ -18,7 +18,7 @@ MCA Editor opens in **Script Mode** by default — a clean, single-tab editor fo
 
 - **Editor Area** — The main code editing area with syntax highlighting
 - **Output Panel** — Below the editor, shows execution results and logs
-- **Tool Stripe** — Right edge, quick access to terminal and plugins
+- **Tool Stripe** — Right edge, quick access to plugins
 - **Status Bar** — Bottom, shows cursor position, language, and connection status
 
 ---

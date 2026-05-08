@@ -95,9 +95,8 @@ When you open a project, MCA Editor performs these steps in order:
 
 1. **Python paths are injected** — Every directory listed in **Python Paths** is added to `sys.path` both locally and in the connected DCC (Maya, Unreal, etc.). This means you can `import` your project's modules immediately.
 2. **Environment variables are set** — Every key-value pair in **Environment Variables** is written to `os.environ`. If a variable already existed, its original value is saved so it can be restored on close.
-3. **Terminal working directory changes** — The integrated terminal's working directory is set to the project root.
-4. **Startup script runs** — If a **Startup Script** is configured, MCA Editor reads the file and executes it in the connected DCC (or locally if no DCC is connected).
-5. **Startup code runs** — If **Startup Code** is configured, it runs after the script file. This can be Python or MEL.
+3. **Startup script runs** — If a **Startup Script** is configured, MCA Editor reads the file and executes it in the connected DCC (or locally if no DCC is connected).
+4. **Startup code runs** — If **Startup Code** is configured, it runs after the script file. This can be Python or MEL.
 
 If **Load Immediately** is enabled, steps 4 and 5 are skipped. The environment is fully set up (paths, env vars, UI), but startup scripts are deferred until you click the **Load** button in the toolbar.
 
@@ -113,7 +112,6 @@ When you close a project (or open a different one), the teardown runs in this or
 3. **Environment variables are restored** — Variables that existed before the project opened are restored to their original values. Variables that were created by the project are removed entirely.
 4. **Python paths are removed** — All project paths are removed from `sys.path` and cleared from the DCC adapter.
 5. **Sidebar resets** — The file tree returns to the default scripts workspace.
-6. **Terminal resets** — The working directory returns to the default scripts directory.
 
 ### Refresh
 

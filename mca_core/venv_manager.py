@@ -64,9 +64,8 @@ _VENV_VERSION_FILE = ".mca_venv_version"
 
 # Packages required for v1 of MCA Editor.
 # Maps pip package name (for install) → importable module name (for checking).
-# These don't always match (e.g. pywinpty installs as "winpty").
+# These don't always match.
 REQUIRED_PACKAGES = {
-    "pywinpty>=2.0.0": "winpty",     # Terminal backend (Windows only)
     "pyflakes": "pyflakes",          # Tier 2 code analysis
     "openai>=1.30.0": "openai",     # AI chat (Anthropic/OpenAI/Gemini via OAI compat)
 }
@@ -361,14 +360,9 @@ def ensure_packages(package_map=None):
         logger.warning("Cannot install packages — venv does not exist.")
         return False
 
-    # Filter to platform-relevant packages and find what's missing.
+    # Find what's missing from the local install.
     missing = []
     for pip_spec, import_name in package_map.items():
-        # pywinpty is Windows-only — skip on other platforms.
-        pip_name = _pip_name(pip_spec)
-        if pip_name == "pywinpty" and platform.system() != "Windows":
-            continue
-
         if not _is_installed_locally(import_name):
             missing.append(pip_spec)
 

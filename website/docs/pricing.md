@@ -100,7 +100,6 @@ No account or credit card needed — just install and run.
 - Script Mode and Project Mode
 - Syntax highlighting for Python and MEL (Maya) / Python (Unreal)
 - Code completion, Find & Replace, Find in Files
-- Integrated terminal
 - Drag-and-drop tab management
 - Output panel with full stack traces
 

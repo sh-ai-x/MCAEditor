@@ -265,42 +265,6 @@ def text_icon():
     return _cached("text_icon", _paint_text_icon)
 
 
-# --- Terminal Icon ------------------------------------------------------------
-
-def terminal_icon():
-    """
-    Terminal/console icon ('>_' prompt in a rounded box).
-
-    :return: Terminal icon.
-    :rtype: QIcon
-    """
-    return _cached("terminal_icon", _paint_terminal_icon)
-
-
-def _paint_terminal_icon():
-    """Paint a terminal prompt icon."""
-    pix = QPixmap(ICON_SIZE, ICON_SIZE)
-    pix.fill(Qt.GlobalColor.transparent)
-
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    # Draw the prompt chevron ">".
-    accent = QColor("#569cd6")
-    pen = QPen(accent, 1.8)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    p.drawLine(3, 4, 8, 8)
-    p.drawLine(8, 8, 3, 12)
-
-    # Draw the underscore "_".
-    p.drawLine(9, 12, 14, 12)
-
-    p.end()
-    return QIcon(pix)
-
-
 # --- Sidebar Icon ------------------------------------------------------------
 
 def sidebar_icon():
