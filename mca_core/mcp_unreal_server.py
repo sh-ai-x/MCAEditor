@@ -53,7 +53,7 @@ from mcp.types import EmbeddedResource, ImageContent, TextContent, Tool
 
 # --- Constants ----------------------------------------------------------------
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # UE Remote Execution multicast group and port for node discovery.
 MULTICAST_GROUP = "239.0.0.1"
@@ -73,6 +73,20 @@ LOCAL_HOST = "127.0.0.1"
 
 # Tool filenames to skip during discovery.
 SKIP_TOOLS = {"__init__"}
+
+# --- Multi-project targeting --------------------------------------------------
+#
+# Multiple Unreal editors can answer multicast discovery at once (one per open
+# project). To avoid racing to whichever responds first, the server tracks a
+# target project by name; discovery then selects the editor whose pong reports
+# a matching ``project_name``. Set a default via the MCAUNREAL_TARGET_PROJECT
+# env var; switch at runtime with the ``use_project`` tool.
+
+# Sticky target project_name (case-insensitive). None = no explicit target.
+_target_project = os.environ.get("MCAUNREAL_TARGET_PROJECT") or None
+
+# Tokens passed to use_project that CLEAR the target (back to auto-select).
+_CLEAR_TARGET_TOKENS = {"", "auto", "any", "none", "clear"}
 
 # Module-level logger — configured in __main__.
 logger = logging.getLogger("MCAUnrealMCP")
@@ -158,16 +172,23 @@ class UnrealConnection:
     the client listens and UE connects to us.
     """
 
-    def __init__(self, multicast_group=MULTICAST_GROUP, multicast_port=MULTICAST_PORT):
+    def __init__(self, multicast_group=MULTICAST_GROUP, multicast_port=MULTICAST_PORT,
+                 target_project=None):
         """
         Initialize an Unreal connection.
 
         :param str multicast_group: UDP multicast group address.
         :param int multicast_port: UDP multicast port.
+        :param str target_project: project_name to select when several editors
+            answer discovery (None = auto-select if exactly one is open).
         """
         self._multicast_group = multicast_group
         self._multicast_port = multicast_port
         self._our_node_id = str(uuid.uuid4())
+        # Which open project to route to, and the last selection error (so the
+        # caller can surface a specific reason instead of a generic message).
+        self._target_project = target_project
+        self._last_error = None
 
     def run_tool_script(self, script):
         """
@@ -238,22 +259,25 @@ class UnrealConnection:
         sock.settimeout(0.5)
         return sock
 
-    def _discover_ue_node(self, sock):
+    def _discover_all_nodes(self, sock):
         """
-        Discover a running UE instance via UDP multicast ping/pong.
+        Discover ALL running UE instances via UDP multicast ping/pong.
 
-        Sends ping messages and waits for a pong response from UE.
+        Unlike a first-responder grab, this collects every editor that answers
+        within the discovery window, keyed by node ID, along with the node data
+        dict from its pong (which includes ``project_name`` / ``project_root``).
 
         :param socket.socket sock: The multicast socket.
-        :return: The UE node ID, or None if not found.
-        :rtype: str or None
+        :return: Mapping of node_id -> node data dict.
+        :rtype: dict
         """
         import time
 
-        # Send pings for up to DISCOVERY_TIMEOUT seconds.
+        nodes = {}
+
+        # Send pings for up to DISCOVERY_TIMEOUT seconds, accumulating responders.
         deadline = time.time() + DISCOVERY_TIMEOUT
         while time.time() < deadline:
-            # Send a ping.
             ping = _ue_msg(_TYPE_PING, self._our_node_id)
             sock.sendto(ping, (self._multicast_group, self._multicast_port))
 
@@ -268,18 +292,107 @@ class UnrealConnection:
                     # Skip our own messages.
                     if msg.get("source") == self._our_node_id:
                         continue
-                    # Look for pong responses.
                     if msg.get("type") == _TYPE_PONG:
                         node_id = msg.get("source", "")
-                        logger.info(
-                            "Discovered UE node: %s at %s", node_id[:12], addr
-                        )
-                        return node_id
+                        if node_id:
+                            # Last pong wins; node data is stable across pongs.
+                            nodes[node_id] = msg.get("data") or {}
                 except socket.timeout:
                     break
 
-        logger.warning("No UE nodes found via multicast discovery.")
+        return nodes
+
+    def _select_node(self, nodes):
+        """
+        Choose a single UE node from the discovered set, honoring the target.
+
+        Rules:
+          * No nodes              -> None (sets a "not connected" error).
+          * Target set            -> node whose project_name matches (exact,
+                                     case-insensitive; else unique substring).
+                                     No/ambiguous match -> None + descriptive error.
+          * No target, one node   -> that node (back-compatible behavior).
+          * No target, many nodes -> None + "ambiguous, pick a project" error.
+
+        Setting an error instead of guessing is deliberate: silent mis-routing
+        to the wrong open project is the failure mode we must never have.
+
+        :param dict nodes: Mapping of node_id -> node data dict.
+        :return: The chosen node_id, or None (with self._last_error set).
+        :rtype: str or None
+        """
+        if not nodes:
+            self._last_error = (
+                "Not connected. No Unreal editor answered discovery — is the "
+                "editor running with Python Remote Execution enabled "
+                "(UDP multicast {}:{})?".format(
+                    self._multicast_group, self._multicast_port)
+            )
+            return None
+
+        def proj(nid):
+            return (nodes.get(nid) or {}).get("project_name") or "?"
+
+        open_projects = sorted({proj(nid) for nid in nodes})
+
+        target = self._target_project
+        if target:
+            tnorm = target.strip().lower()
+            # Exact case-insensitive project_name match first.
+            for nid, data in nodes.items():
+                if (data.get("project_name") or "").lower() == tnorm:
+                    return nid
+            # Unique substring fallback (so "bot" resolves "BotTown").
+            matches = [nid for nid, data in nodes.items()
+                       if tnorm in (data.get("project_name") or "").lower()]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                self._last_error = (
+                    "Target project '{}' is ambiguous across open editors: {}. "
+                    "Use a more specific name via use_project.".format(
+                        target, ", ".join(sorted(proj(n) for n in matches)))
+                )
+                return None
+            self._last_error = (
+                "Target project '{}' is not among the open editors: {}. "
+                "Open it, or call use_project with one of those names.".format(
+                    target, ", ".join(open_projects))
+            )
+            return None
+
+        # No explicit target.
+        if len(nodes) == 1:
+            return next(iter(nodes))
+
+        # Multiple editors and no target — refuse to guess.
+        self._last_error = (
+            "Multiple Unreal editors are open ({}) and no target project is set. "
+            "Call use_project to pick one, then retry.".format(
+                ", ".join(open_projects))
+        )
         return None
+
+    def _discover_ue_node(self, sock):
+        """
+        Discover all UE nodes and select one, honoring the target project.
+
+        :param socket.socket sock: The multicast socket.
+        :return: The chosen UE node ID, or None (with self._last_error set).
+        :rtype: str or None
+        """
+        nodes = self._discover_all_nodes(sock)
+        node_id = self._select_node(nodes)
+        if node_id:
+            logger.info(
+                "Selected UE node %s (project=%s, target=%s)",
+                node_id[:12],
+                (nodes.get(node_id) or {}).get("project_name"),
+                self._target_project or "<auto>",
+            )
+        else:
+            logger.warning("Node selection failed: %s", self._last_error)
+        return node_id
 
     def _execute(self, command):
         """
@@ -704,6 +817,144 @@ def convert_to_content(result):
 
 
 # =============================================================================
+# Multi-project Native Tools (run on the server, not inside Unreal)
+# =============================================================================
+#
+# These manage WHICH open editor subsequent tool calls route to. They do not
+# ship Python into UE — they only probe discovery and set the sticky target.
+
+def _node_matches_target(project_name):
+    """
+    Whether a project_name satisfies the current sticky target.
+
+    :param str project_name: A node's reported project_name.
+    :return: True if it matches the target (exact or substring), else False.
+    :rtype: bool
+    """
+    if not _target_project or not project_name:
+        return False
+    t = _target_project.strip().lower()
+    return t == project_name.lower() or t in project_name.lower()
+
+
+def _probe_open_nodes():
+    """
+    Discover all currently-open UE editors and their project metadata.
+
+    :return: List of {node_id, project_name, project_root, machine, user}.
+    :rtype: list
+    """
+    conn = UnrealConnection(target_project=_target_project)
+    sock = conn._create_broadcast_socket()
+    try:
+        nodes = conn._discover_all_nodes(sock)
+    finally:
+        sock.close()
+
+    out = []
+    for nid, data in nodes.items():
+        out.append({
+            "node_id": nid,
+            "project_name": data.get("project_name"),
+            "project_root": data.get("project_root"),
+            "machine": data.get("machine"),
+            "user": data.get("user"),
+        })
+    # Stable ordering for readability.
+    out.sort(key=lambda n: (n.get("project_name") or "").lower())
+    return out
+
+
+def _tool_list_ue_nodes():
+    """
+    List every open Unreal editor answering discovery, marking the target.
+
+    :return: Result payload dict.
+    :rtype: dict
+    """
+    nodes = _probe_open_nodes()
+    for node in nodes:
+        node["is_target"] = _node_matches_target(node.get("project_name"))
+    return {
+        "success": True,
+        "target_project": _target_project,
+        "count": len(nodes),
+        "nodes": nodes,
+    }
+
+
+def _tool_use_project(project):
+    """
+    Set (or clear) the sticky target project for subsequent tool calls.
+
+    :param str project: project_name (substring allowed), or an auto/clear token.
+    :return: Result payload dict.
+    :rtype: dict
+    """
+    global _target_project
+
+    token = (project or "").strip().lower()
+    if token in _CLEAR_TARGET_TOKENS:
+        _target_project = None
+        return {
+            "success": True,
+            "target_project": None,
+            "message": "Target cleared — auto-select when exactly one editor is open.",
+        }
+
+    _target_project = project.strip()
+
+    # Best-effort confirmation that the chosen project is actually open.
+    nodes = _probe_open_nodes()
+    open_names = [node.get("project_name") for node in nodes]
+    matched = [name for name in open_names if name and _node_matches_target(name)]
+    return {
+        "success": True,
+        "target_project": _target_project,
+        "open_editors": open_names,
+        "currently_open": bool(matched),
+        "message": ("Now targeting '{}'.".format(_target_project)
+                    + ("" if matched
+                       else " Note: no open editor currently reports that project.")),
+    }
+
+
+# Server-native tools, surfaced alongside the discovered Unreal tools.
+NATIVE_TOOLS = [
+    Tool(
+        name="list_ue_nodes",
+        description=(
+            "List all Unreal editors currently answering discovery — each with its "
+            "project_name, project_root, and node_id — and flag which one is the "
+            "active target. Use this when more than one project may be open."
+        ),
+        inputSchema={"type": "object", "properties": {}, "required": []},
+    ),
+    Tool(
+        name="use_project",
+        description=(
+            "Set the target Unreal project (by project_name) for all subsequent tool "
+            "calls, so commands route to the right editor when several are open. Pass "
+            "a name like 'BotTown' (substring allowed). Pass 'auto' to clear the target "
+            "and auto-select when exactly one editor is open."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Target project_name (substring allowed), or 'auto' to clear.",
+                },
+            },
+            "required": ["project"],
+        },
+    ),
+]
+
+_NATIVE_TOOL_NAMES = {tool.name for tool in NATIVE_TOOLS}
+
+
+# =============================================================================
 # MCP Server
 # =============================================================================
 
@@ -721,9 +972,11 @@ async def handle_list_tools():
     :return: List of Tool objects.
     :rtype: list
     """
-    logger.info("Client requested tool list (%d tools available).",
-                len(_operation_manager.get_tools()))
-    return _operation_manager.get_tools()
+    discovered = _operation_manager.get_tools()
+    logger.info("Client requested tool list (%d discovered + %d native).",
+                len(discovered), len(NATIVE_TOOLS))
+    # Native multi-project tools are surfaced alongside the Unreal tools.
+    return discovered + NATIVE_TOOLS
 
 
 @server.call_tool()
@@ -743,6 +996,21 @@ async def handle_call_tool(name, arguments):
     logger.info("Calling tool '%s' with arguments: %s",
                 name, pprint_mod.pformat(arguments))
 
+    # Server-native multi-project tools are handled here, not shipped to UE.
+    if name in _NATIVE_TOOL_NAMES:
+        try:
+            if name == "list_ue_nodes":
+                payload = _tool_list_ue_nodes()
+            elif name == "use_project":
+                payload = _tool_use_project((arguments or {}).get("project", ""))
+            else:
+                payload = {"success": False, "message": "Unknown native tool."}
+            return [TextContent(type="text", text=json.dumps(payload))]
+        except Exception as exc:
+            logger.critical("Native tool '%s' failed: %s", name, exc, exc_info=True)
+            return [TextContent(type="text", text=json.dumps(
+                {"success": False, "message": "Error: {}".format(exc)}))]
+
     # Look up the tool's source file.
     path = _operation_manager.get_file_path(name)
     if not path:
@@ -756,13 +1024,14 @@ async def handle_call_tool(name, arguments):
         args = arguments if arguments else {}
         script = load_unreal_tool_source(name, path, args)
 
-        # Send to Unreal and get results.
-        ue_conn = UnrealConnection()
+        # Send to Unreal and get results — routed to the targeted project.
+        ue_conn = UnrealConnection(target_project=_target_project)
         result = ue_conn.run_tool_script(script)
 
-        # None means the connection failed.
+        # None means discovery/selection or the connection failed. Prefer the
+        # specific selection error (ambiguous / wrong project) when present.
         if result is None:
-            error_msg = (
+            error_msg = ue_conn._last_error or (
                 "Not connected. Unreal Engine either isn't running or "
                 "doesn't have Remote Execution enabled. Check that the "
                 "Python plugin's Remote Execution setting is on (UDP "

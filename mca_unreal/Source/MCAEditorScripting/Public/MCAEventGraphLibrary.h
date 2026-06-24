@@ -120,6 +120,51 @@ public:
 		const FString& VarName
 	);
 
+	// --- Variable Management --------------------------------------------------
+
+	/**
+	 * Add a member variable to a Blueprint.
+	 *
+	 * Creates a new Blueprint member variable of the given primitive type and,
+	 * optionally, marks it Instance Editable (the per-instance "eye" toggle).
+	 *
+	 * This exists because constructing an FEdGraphPinType from UE's Python
+	 * bindings is broken in 5.8 — the pin-type build must happen in C++.
+	 *
+	 * @param Blueprint         The Blueprint to modify (e.g. a pawn like BP_Notera).
+	 * @param VariableName      Name for the new variable (e.g. "IsSitting").
+	 * @param PinCategory       Primitive type: "bool", "int", "float", "string", or "name".
+	 * @param bInstanceEditable If true, the variable is editable per-instance in the details panel.
+	 * @return True if the variable was created.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Event Graph",
+		meta = (DisplayName = "Add Member Variable"))
+	static bool AddMemberVariable(
+		UBlueprint* Blueprint,
+		const FString& VariableName,
+		const FString& PinCategory,
+		bool bInstanceEditable = true
+	);
+
+	/**
+	 * List a Blueprint's member variables (the read-back for AddMemberVariable).
+	 *
+	 * Each entry is formatted "Name|Type|InstanceEditable" — e.g.
+	 * "IsSitting|bool|true". This works around the 5.8 issue where the stock
+	 * list_blueprint_variables path returns nothing for graph Blueprints; it
+	 * reads the Blueprint's NewVariables descriptions directly in C++.
+	 *
+	 * @param Blueprint  The Blueprint to inspect.
+	 * @param OutVars    Output array of "Name|Type|InstanceEditable" strings.
+	 * @return True if the Blueprint was valid and inspected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Event Graph",
+		meta = (DisplayName = "List Member Variables"))
+	static bool ListMemberVariables(
+		UBlueprint* Blueprint,
+		TArray<FString>& OutVars
+	);
+
 	// --- Pin Wiring -----------------------------------------------------------
 
 	/**

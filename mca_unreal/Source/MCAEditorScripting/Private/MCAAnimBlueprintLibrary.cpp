@@ -35,6 +35,12 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 
+#include "AnimGraphNode_TransitionResult.h"
+#include "K2Node_VariableGet.h"
+#include "K2Node_CallFunction.h"
+#include "Kismet/KismetMathLibrary.h"
+#include "EdGraphSchema_K2.h"
+
 #include "AssetToolsModule.h"
 #include "Factories/AnimBlueprintFactory.h"
 #include "ScopedTransaction.h"
@@ -838,4 +844,267 @@ UAnimStateTransitionNode* UMCAAnimBlueprintLibrary::FindTransition(
 	}
 
 	return nullptr;
+}
+
+
+// =============================================================================
+// Anim Notify Operations
+// =============================================================================
+
+bool UMCAAnimBlueprintLibrary::AddAnimNotify(
+	UAnimSequenceBase* AnimSequence,
+	const FString& NotifyName,
+	float TriggerTime)
+{
+	if (!AnimSequence)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("AddAnimNotify: AnimSequence is null"));
+		return false;
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("MCA: Add Anim Notify '%s'"), *NotifyName)));
+
+	AnimSequence->Modify();
+
+	// Append a simple named notify (no notify-state, no custom UAnimNotify class).
+	const int32 NewIndex = AnimSequence->Notifies.Add(FAnimNotifyEvent());
+	FAnimNotifyEvent& Event = AnimSequence->Notifies[NewIndex];
+	Event.NotifyName = FName(*NotifyName);
+	Event.Guid = FGuid::NewGuid();
+	Event.NotifyStateClass = nullptr;
+	Event.Notify = nullptr;
+	Event.TrackIndex = 0;
+
+	// Anchor the notify on the sequence timeline at TriggerTime seconds.
+	Event.Link(AnimSequence, TriggerTime);
+	Event.TriggerTimeOffset = GetTriggerTimeOffsetForType(
+		AnimSequence->CalculateOffsetForNotify(TriggerTime));
+
+	// Persist + refresh cached notify data so editor and runtime pick it up.
+	AnimSequence->PostEditChange();
+	AnimSequence->MarkPackageDirty();
+
+	UE_LOG(LogMCAScripting, Log, TEXT("AddAnimNotify: Added '%s' to '%s' at %.3fs"),
+		*NotifyName, *AnimSequence->GetName(), TriggerTime);
+
+	return true;
+}
+
+
+// =============================================================================
+// Transition Bool Condition
+// =============================================================================
+
+bool UMCAAnimBlueprintLibrary::SetTransitionBoolCondition(
+	UAnimBlueprint* AnimBlueprint,
+	const FString& StateMachineName,
+	const FString& FromStateName,
+	const FString& ToStateName,
+	const FString& BoolVariableName,
+	bool bEqualsValue)
+{
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("SetTransitionBoolCondition: AnimBlueprint is null"));
+		return false;
+	}
+
+	UAnimationStateMachineGraph* SMGraph = FindStateMachineGraph(AnimBlueprint, StateMachineName);
+	if (!SMGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("SetTransitionBoolCondition: State machine '%s' not found"),
+			*StateMachineName);
+		return false;
+	}
+
+	UAnimStateTransitionNode* TransNode = FindTransition(SMGraph, FromStateName, ToStateName);
+	if (!TransNode)
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("SetTransitionBoolCondition: Transition '%s' -> '%s' not found"),
+			*FromStateName, *ToStateName);
+		return false;
+	}
+
+	// A transition's rule lives in its bound graph — a small AnimGraph whose
+	// TransitionResult node carries a bool input pin ("bCanEnterTransition").
+	UEdGraph* RuleGraph = TransNode->GetBoundGraph();
+	if (!RuleGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("SetTransitionBoolCondition: Transition has no bound graph"));
+		return false;
+	}
+
+	// Find the result node.
+	UAnimGraphNode_TransitionResult* ResultNode = nullptr;
+	for (UEdGraphNode* Node : RuleGraph->Nodes)
+	{
+		ResultNode = Cast<UAnimGraphNode_TransitionResult>(Node);
+		if (ResultNode)
+		{
+			break;
+		}
+	}
+	if (!ResultNode)
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("SetTransitionBoolCondition: No TransitionResult node in rule graph"));
+		return false;
+	}
+
+	// The result node's bool input pin is the "can enter" gate.
+	UEdGraphPin* CanEnterPin = nullptr;
+	for (UEdGraphPin* Pin : ResultNode->Pins)
+	{
+		if (Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		{
+			CanEnterPin = Pin;
+			break;
+		}
+	}
+	if (!CanEnterPin)
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("SetTransitionBoolCondition: No bool input pin on result node"));
+		return false;
+	}
+
+	FScopedTransaction Transaction(FText::FromString(TEXT("MCA: Set Transition Bool Condition")));
+	RuleGraph->Modify();
+
+	// Clean re-author: drop whatever currently drives the rule.
+	CanEnterPin->BreakAllPinLinks();
+
+	// Add a variable-get node for the bool. Resolved on self (the AnimInstance) —
+	// the variable must already exist on the AnimBP.
+	FGraphNodeCreator<UK2Node_VariableGet> VarCreator(*RuleGraph);
+	UK2Node_VariableGet* VarNode = VarCreator.CreateNode();
+	VarNode->VariableReference.SetSelfMember(FName(*BoolVariableName));
+	VarNode->NodePosX = ResultNode->NodePosX - 400;
+	VarNode->NodePosY = ResultNode->NodePosY;
+	VarCreator.Finalize();
+
+	// The get node's output bool pin.
+	UEdGraphPin* VarOutPin = nullptr;
+	for (UEdGraphPin* Pin : VarNode->Pins)
+	{
+		if (Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		{
+			VarOutPin = Pin;
+			break;
+		}
+	}
+	if (!VarOutPin)
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("SetTransitionBoolCondition: Variable '%s' produced no bool pin (does it exist on the AnimBP?)"),
+			*BoolVariableName);
+		return false;
+	}
+
+	if (bEqualsValue)
+	{
+		// "Var == true": wire the bool straight into the can-enter gate.
+		VarOutPin->MakeLinkTo(CanEnterPin);
+	}
+	else
+	{
+		// "Var == false": insert a boolean NOT between the variable and the gate.
+		FGraphNodeCreator<UK2Node_CallFunction> NotCreator(*RuleGraph);
+		UK2Node_CallFunction* NotNode = NotCreator.CreateNode();
+		UFunction* NotFunc = UKismetMathLibrary::StaticClass()->FindFunctionByName(TEXT("Not_PreBool"));
+		NotNode->SetFromFunction(NotFunc);
+		NotNode->NodePosX = ResultNode->NodePosX - 200;
+		NotNode->NodePosY = ResultNode->NodePosY;
+		NotCreator.Finalize();
+
+		UEdGraphPin* NotInputPin = NotNode->FindPin(FName(TEXT("A")), EGPD_Input);
+		UEdGraphPin* NotReturnPin = NotNode->GetReturnValuePin();
+		if (!NotInputPin || !NotReturnPin)
+		{
+			UE_LOG(LogMCAScripting, Error,
+				TEXT("SetTransitionBoolCondition: NOT node pins not found"));
+			return false;
+		}
+		VarOutPin->MakeLinkTo(NotInputPin);
+		NotReturnPin->MakeLinkTo(CanEnterPin);
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBlueprint);
+
+	UE_LOG(LogMCAScripting, Log,
+		TEXT("SetTransitionBoolCondition: '%s' -> '%s' now requires %s == %s"),
+		*FromStateName, *ToStateName, *BoolVariableName,
+		bEqualsValue ? TEXT("true") : TEXT("false"));
+
+	return true;
+}
+
+
+// =============================================================================
+// Read-back: Transitions + Notifies
+// =============================================================================
+
+bool UMCAAnimBlueprintLibrary::ListTransitions(
+	UAnimBlueprint* AnimBlueprint,
+	const FString& StateMachineName,
+	TArray<FString>& OutTransitions)
+{
+	OutTransitions.Empty();
+
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ListTransitions: AnimBlueprint is null"));
+		return false;
+	}
+
+	UAnimationStateMachineGraph* SMGraph = FindStateMachineGraph(AnimBlueprint, StateMachineName);
+	if (!SMGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ListTransitions: State machine '%s' not found"),
+			*StateMachineName);
+		return false;
+	}
+
+	// Walk the state machine graph collecting every transition's endpoints.
+	for (UEdGraphNode* Node : SMGraph->Nodes)
+	{
+		UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node);
+		if (!TransNode)
+		{
+			continue;
+		}
+
+		UAnimStateNodeBase* PrevState = TransNode->GetPreviousState();
+		UAnimStateNodeBase* NextState = TransNode->GetNextState();
+		const FString From = PrevState ? PrevState->GetStateName() : TEXT("?");
+		const FString To = NextState ? NextState->GetStateName() : TEXT("?");
+		OutTransitions.Add(FString::Printf(TEXT("%s -> %s"), *From, *To));
+	}
+
+	return true;
+}
+
+
+bool UMCAAnimBlueprintLibrary::ListAnimNotifies(
+	UAnimSequenceBase* AnimSequence,
+	TArray<FString>& OutNotifies)
+{
+	OutNotifies.Empty();
+
+	if (!AnimSequence)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ListAnimNotifies: AnimSequence is null"));
+		return false;
+	}
+
+	// Notifies is editor-protected (unreadable from Python) — read it here in C++.
+	for (const FAnimNotifyEvent& Event : AnimSequence->Notifies)
+	{
+		OutNotifies.Add(FString::Printf(TEXT("%s@%.3f"),
+			*Event.NotifyName.ToString(), Event.GetTime()));
+	}
+
+	return true;
 }

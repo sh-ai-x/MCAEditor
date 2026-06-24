@@ -662,3 +662,154 @@ bool UMCAEventGraphLibrary::SetNodePosition(
 		*NodeId, Node->NodePosX, Node->NodePosY);
 	return true;
 }
+
+
+// =============================================================================
+// Variable Management
+// =============================================================================
+
+bool UMCAEventGraphLibrary::AddMemberVariable(
+	UBlueprint* Blueprint,
+	const FString& VariableName,
+	const FString& PinCategory,
+	bool bInstanceEditable)
+{
+	if (!Blueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("AddMemberVariable: Blueprint is null"));
+		return false;
+	}
+
+	const FName VarFName(*VariableName);
+
+	// Reject duplicates up front — AddMemberVariable would otherwise no-op.
+	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
+	{
+		if (ExistingVar.VarName == VarFName)
+		{
+			UE_LOG(LogMCAScripting, Warning,
+				TEXT("AddMemberVariable: Variable '%s' already exists on '%s'"),
+				*VariableName, *Blueprint->GetName());
+			return false;
+		}
+	}
+
+	// Build the pin type from the category string. This is the operation that
+	// is broken from UE's Python bindings in 5.8 (FEdGraphPinType ctor), so it
+	// has to be done here in C++.
+	FEdGraphPinType PinType;
+	PinType.PinSubCategory = NAME_None;
+	PinType.PinSubCategoryObject = nullptr;
+	PinType.ContainerType = EPinContainerType::None;
+
+	const FString Cat = PinCategory.ToLower();
+	if (Cat == TEXT("bool") || Cat == TEXT("boolean"))
+	{
+		PinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+	}
+	else if (Cat == TEXT("int") || Cat == TEXT("integer"))
+	{
+		PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
+	}
+	else if (Cat == TEXT("float") || Cat == TEXT("double") || Cat == TEXT("real"))
+	{
+		// UE5 stores floats as PC_Real with a Double sub-category.
+		PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
+		PinType.PinSubCategory = UEdGraphSchema_K2::PC_Double;
+	}
+	else if (Cat == TEXT("string"))
+	{
+		PinType.PinCategory = UEdGraphSchema_K2::PC_String;
+	}
+	else if (Cat == TEXT("name"))
+	{
+		PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
+	}
+	else
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("AddMemberVariable: Unsupported pin category '%s' (use bool/int/float/string/name)"),
+			*PinCategory);
+		return false;
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("MCA: Add Variable '%s'"), *VariableName)));
+
+	// Default flags applied by AddMemberVariable are CPF_Edit | CPF_BlueprintVisible.
+	const bool bAdded = FBlueprintEditorUtils::AddMemberVariable(Blueprint, VarFName, PinType);
+	if (!bAdded)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("AddMemberVariable: Failed to add '%s' to '%s'"),
+			*VariableName, *Blueprint->GetName());
+		return false;
+	}
+
+	// "Instance Editable" in the details panel == the CPF_DisableEditOnInstance
+	// flag being CLEARED. Set or clear it to match the request.
+	for (FBPVariableDescription& Var : Blueprint->NewVariables)
+	{
+		if (Var.VarName == VarFName)
+		{
+			if (bInstanceEditable)
+			{
+				Var.PropertyFlags &= ~CPF_DisableEditOnInstance;
+			}
+			else
+			{
+				Var.PropertyFlags |= CPF_DisableEditOnInstance;
+			}
+			break;
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	UE_LOG(LogMCAScripting, Log,
+		TEXT("AddMemberVariable: Added '%s' (%s, instance_editable=%s) to '%s'"),
+		*VariableName, *PinCategory,
+		bInstanceEditable ? TEXT("true") : TEXT("false"),
+		*Blueprint->GetName());
+
+	return true;
+}
+
+
+// =============================================================================
+// Read-back: Member Variables
+// =============================================================================
+
+bool UMCAEventGraphLibrary::ListMemberVariables(
+	UBlueprint* Blueprint,
+	TArray<FString>& OutVars)
+{
+	OutVars.Empty();
+
+	if (!Blueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ListMemberVariables: Blueprint is null"));
+		return false;
+	}
+
+	// Read the Blueprint's variable descriptions directly — the stock
+	// list_blueprint_variables path returns nothing for graph BPs in 5.8.
+	for (const FBPVariableDescription& Var : Blueprint->NewVariables)
+	{
+		// Type = pin category, plus sub-category for reals (e.g. real/double).
+		FString TypeStr = Var.VarType.PinCategory.ToString();
+		if (!Var.VarType.PinSubCategory.IsNone())
+		{
+			TypeStr += TEXT("/") + Var.VarType.PinSubCategory.ToString();
+		}
+
+		// Instance Editable == CPF_DisableEditOnInstance NOT set.
+		const bool bInstanceEditable = (Var.PropertyFlags & CPF_DisableEditOnInstance) == 0;
+
+		OutVars.Add(FString::Printf(TEXT("%s|%s|%s"),
+			*Var.VarName.ToString(),
+			*TypeStr,
+			bInstanceEditable ? TEXT("true") : TEXT("false")));
+	}
+
+	return true;
+}

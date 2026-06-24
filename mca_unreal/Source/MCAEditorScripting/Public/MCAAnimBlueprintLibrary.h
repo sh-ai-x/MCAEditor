@@ -141,6 +141,25 @@ public:
 		TArray<FString>& OutNames
 	);
 
+	/**
+	 * List all transitions in a state machine.
+	 *
+	 * Each entry is formatted "FromState -> ToState" so a caller can see the
+	 * graph topology and then inspect/author individual transition rules.
+	 *
+	 * @param AnimBlueprint     The Animation Blueprint.
+	 * @param StateMachineName  Name of the state machine to inspect.
+	 * @param OutTransitions    Output array of "From -> To" strings.
+	 * @return True if the state machine was found and inspected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "List Transitions"))
+	static bool ListTransitions(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& StateMachineName,
+		TArray<FString>& OutTransitions
+	);
+
 	// --- Animation Assignment ----------------------------------------------
 
 	/**
@@ -162,6 +181,48 @@ public:
 		const FString& StateMachineName,
 		const FString& StateName,
 		UAnimSequenceBase* AnimAsset
+	);
+
+	// --- Anim Notify Operations --------------------------------------------
+
+	/**
+	 * Add a simple named AnimNotify to an animation sequence at a given time.
+	 *
+	 * Creates a plain (non-state) notify with the given name on the sequence's
+	 * timeline. Use this to mark animation events the gameplay/driver layer
+	 * listens for — e.g. an "End_Sit" notify at the end of a stand-up clip so
+	 * the driver can release its movement lock at animation-precise timing.
+	 *
+	 * @param AnimSequence  The animation sequence to modify.
+	 * @param NotifyName    Name of the notify event (e.g. "End_Sit").
+	 * @param TriggerTime   Time in seconds along the sequence to place the notify.
+	 * @return True if the notify was added.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Add Anim Notify"))
+	static bool AddAnimNotify(
+		UAnimSequenceBase* AnimSequence,
+		const FString& NotifyName,
+		float TriggerTime
+	);
+
+	/**
+	 * List the named notifies on an animation sequence.
+	 *
+	 * Each entry is formatted "NotifyName@Time" (time in seconds, 3 decimals).
+	 * This is the read-back counterpart to AddAnimNotify — the sequence's
+	 * Notifies array is protected and not readable from Python, so this C++
+	 * accessor is the only way to verify notify state programmatically.
+	 *
+	 * @param AnimSequence  The animation sequence to inspect.
+	 * @param OutNotifies   Output array of "Name@Time" strings.
+	 * @return True if the sequence was valid and inspected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "List Anim Notifies"))
+	static bool ListAnimNotifies(
+		UAnimSequenceBase* AnimSequence,
+		TArray<FString>& OutNotifies
 	);
 
 	// --- Transition Operations ---------------------------------------------
@@ -211,6 +272,37 @@ public:
 		const FString& FromStateName,
 		const FString& ToStateName,
 		float TriggerTime = 0.0f
+	);
+
+	/**
+	 * Set a bool-variable condition on an existing transition.
+	 *
+	 * Authors the transition's rule graph so the transition fires based on a
+	 * boolean AnimBP variable — "Var == true" wires the variable straight into
+	 * the result; "Var == false" inserts a boolean NOT. This is the real
+	 * data-driven rule (e.g. IsSitting == false to leave a sit state), as
+	 * opposed to the time-remaining SetAutoTransitionRule.
+	 *
+	 * The variable must already exist on the Animation Blueprint (self member).
+	 * Any existing rule wiring on the transition is replaced.
+	 *
+	 * @param AnimBlueprint     The Animation Blueprint.
+	 * @param StateMachineName  Name of the state machine.
+	 * @param FromStateName     Source state (identifies the transition).
+	 * @param ToStateName       Destination state (identifies the transition).
+	 * @param BoolVariableName  Name of the bool variable on the AnimBP.
+	 * @param bEqualsValue      The value the variable must equal for the transition to fire.
+	 * @return True if the condition was authored.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Set Transition Bool Condition"))
+	static bool SetTransitionBoolCondition(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& StateMachineName,
+		const FString& FromStateName,
+		const FString& ToStateName,
+		const FString& BoolVariableName,
+		bool bEqualsValue
 	);
 
 	// --- Compilation -------------------------------------------------------
