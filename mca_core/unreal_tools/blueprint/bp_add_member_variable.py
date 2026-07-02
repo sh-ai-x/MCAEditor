@@ -5,7 +5,7 @@ def bp_add_member_variable(asset_path: str, variable_name: str, pin_category: st
 
     :param asset_path: Content path to the Blueprint.
     :param variable_name: Name of the new variable.
-    :param pin_category: One of bool/int/float/string/name.
+    :param pin_category: One of bool/int/float/string/name, or "object:<Class>" for object refs (e.g. "object:AnimMontage").
     :param instance_editable: Whether it is editable per-instance.
     """
     import unreal
