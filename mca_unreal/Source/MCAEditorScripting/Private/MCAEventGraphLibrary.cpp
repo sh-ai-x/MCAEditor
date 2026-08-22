@@ -28,6 +28,9 @@
 
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Logging/TokenizedMessage.h"
 #include "ScopedTransaction.h"
 
 #include "UObject/UObjectIterator.h"
@@ -812,4 +815,208 @@ bool UMCAEventGraphLibrary::ListMemberVariables(
 	}
 
 	return true;
+}
+
+
+// =============================================================================
+// ImplementInterface
+// =============================================================================
+
+bool UMCAEventGraphLibrary::ImplementInterface(
+	UBlueprint* Blueprint,
+	const FString& InterfaceClass)
+{
+	if (!Blueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ImplementInterface: Blueprint is null"));
+		return false;
+	}
+
+	// Resolve the interface UClass. Try a full object path first (e.g.
+	// "/Script/BotTown.BPI_Interactable"), then a bare name, then the U-prefixed
+	// name — native interface classes carry the leading 'U'.
+	UClass* IfaceClass = LoadObject<UClass>(nullptr, *InterfaceClass);
+	if (!IfaceClass)
+	{
+		IfaceClass = FindFirstObject<UClass>(*InterfaceClass);
+	}
+	if (!IfaceClass)
+	{
+		IfaceClass = FindFirstObject<UClass>(*(FString("U") + InterfaceClass));
+	}
+
+	if (!IfaceClass || !IfaceClass->HasAnyClassFlags(CLASS_Interface))
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("ImplementInterface: '%s' did not resolve to an interface class"),
+			*InterfaceClass);
+		return false;
+	}
+
+	// Idempotent: if the Blueprint already implements it, report success.
+	for (const FBPInterfaceDescription& Desc : Blueprint->ImplementedInterfaces)
+	{
+		if (Desc.Interface == IfaceClass)
+		{
+			UE_LOG(LogMCAScripting, Log,
+				TEXT("ImplementInterface: '%s' already implements '%s'"),
+				*Blueprint->GetName(), *IfaceClass->GetName());
+			return true;
+		}
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("MCA: Implement Interface '%s'"), *IfaceClass->GetName())));
+
+	// ImplementNewInterface takes the class PATH name in UE5; it adds the
+	// interface and generates override stubs for its functions.
+	const bool bAdded = FBlueprintEditorUtils::ImplementNewInterface(
+		Blueprint, IfaceClass->GetClassPathName());
+
+	if (bAdded)
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		UE_LOG(LogMCAScripting, Log, TEXT("ImplementInterface: '%s' now implements '%s'"),
+			*Blueprint->GetName(), *IfaceClass->GetName());
+	}
+	else
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("ImplementInterface: Failed to add '%s' to '%s'"),
+			*IfaceClass->GetName(), *Blueprint->GetName());
+	}
+
+	return bAdded;
+}
+
+bool UMCAEventGraphLibrary::RemoveInterface(
+	UBlueprint* Blueprint,
+	const FString& InterfaceClass)
+{
+	if (!Blueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("RemoveInterface: Blueprint is null"));
+		return false;
+	}
+
+	// Resolve the interface UClass with the same three-step fallback as
+	// ImplementInterface: full object path, then bare name, then U-prefixed name
+	// (native interface classes carry the leading 'U').
+	UClass* IfaceClass = LoadObject<UClass>(nullptr, *InterfaceClass);
+	if (!IfaceClass)
+	{
+		IfaceClass = FindFirstObject<UClass>(*InterfaceClass);
+	}
+	if (!IfaceClass)
+	{
+		IfaceClass = FindFirstObject<UClass>(*(FString("U") + InterfaceClass));
+	}
+
+	if (!IfaceClass || !IfaceClass->HasAnyClassFlags(CLASS_Interface))
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("RemoveInterface: '%s' did not resolve to an interface class"),
+			*InterfaceClass);
+		return false;
+	}
+
+	// Idempotent: if the Blueprint does not implement it, there is nothing to do.
+	bool bImplemented = false;
+	for (const FBPInterfaceDescription& Desc : Blueprint->ImplementedInterfaces)
+	{
+		if (Desc.Interface == IfaceClass)
+		{
+			bImplemented = true;
+			break;
+		}
+	}
+
+	if (!bImplemented)
+	{
+		UE_LOG(LogMCAScripting, Log,
+			TEXT("RemoveInterface: '%s' does not implement '%s' (nothing to remove)"),
+			*Blueprint->GetName(), *IfaceClass->GetName());
+		return true;
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("MCA: Remove Interface '%s'"), *IfaceClass->GetName())));
+
+	// RemoveInterface returns void in UE5; use the FTopLevelAssetPath overload to
+	// mirror ImplementNewInterface. bPreserveFunctions = false drops the
+	// interface's implementing function graphs along with the interface itself
+	// (e.g. the auto-generated GetCurrentTarget stub on a waypoint).
+	FBlueprintEditorUtils::RemoveInterface(
+		Blueprint, IfaceClass->GetClassPathName(), /*bPreserveFunctions=*/false);
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	// Confirm the descriptor is actually gone — RemoveInterface gives no return
+	// value, so we re-scan to report a trustworthy result.
+	bool bStillImplemented = false;
+	for (const FBPInterfaceDescription& Desc : Blueprint->ImplementedInterfaces)
+	{
+		if (Desc.Interface == IfaceClass)
+		{
+			bStillImplemented = true;
+			break;
+		}
+	}
+
+	if (bStillImplemented)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("RemoveInterface: Failed to remove '%s' from '%s'"),
+			*IfaceClass->GetName(), *Blueprint->GetName());
+		return false;
+	}
+
+	UE_LOG(LogMCAScripting, Log, TEXT("RemoveInterface: '%s' no longer implements '%s'"),
+		*Blueprint->GetName(), *IfaceClass->GetName());
+	return true;
+}
+
+TArray<FString> UMCAEventGraphLibrary::CompileBlueprintWithMessages(UBlueprint* Blueprint)
+{
+	TArray<FString> Out;
+
+	if (!Blueprint)
+	{
+		Out.Add(TEXT("SUMMARY: errors=1 warnings=0"));
+		Out.Add(TEXT("ERROR: Blueprint is null"));
+		return Out;
+	}
+
+	// Compile through an FCompilerResultsLog so we capture the compiler's own
+	// tokenized messages — this is the whole point of the helper. The stock
+	// BlueprintEditorLibrary.compile_blueprint discards them.
+	FCompilerResultsLog Results;
+	Results.SetSourcePath(Blueprint->GetPathName());
+	FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &Results);
+
+	// Summary line first so a caller can branch on pass/fail without parsing
+	// every row (the Python tool keys off errors=N here).
+	Out.Add(FString::Printf(TEXT("SUMMARY: errors=%d warnings=%d"),
+		Results.NumErrors, Results.NumWarnings));
+
+	// One tagged line per compiler message. Severity → human prefix; the two
+	// warning severities collapse to a single "WARNING" tag.
+	for (const TSharedRef<FTokenizedMessage>& Message : Results.Messages)
+	{
+		FString Prefix;
+		switch (Message->GetSeverity())
+		{
+			case EMessageSeverity::Error:
+				Prefix = TEXT("ERROR");
+				break;
+			case EMessageSeverity::Warning:
+			case EMessageSeverity::PerformanceWarning:
+				Prefix = TEXT("WARNING");
+				break;
+			default:
+				Prefix = TEXT("NOTE");
+				break;
+		}
+		Out.Add(FString::Printf(TEXT("%s: %s"), *Prefix, *Message->ToText().ToString()));
+	}
+
+	return Out;
 }

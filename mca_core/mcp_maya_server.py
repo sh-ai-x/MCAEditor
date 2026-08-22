@@ -245,7 +245,11 @@ def _call_editor_api(method, params=None):
     sock.settimeout(EDITOR_API_CONNECT_TIMEOUT)
 
     try:
-        sock.connect((LOCAL_HOST, port))
+        # Honor the configured Maya host (not the hardcoded LOCAL_HOST) so the
+        # Editor-API path targets the same box as the command-port paths.  This
+        # is the easy-to-miss connect: leaving it as LOCAL_HOST gives a
+        # half-working remote setup where this path silently hits localhost.
+        sock.connect((_maya_host, port))
         sock.sendall(request_line.encode("utf-8"))
 
         # Read the newline-delimited JSON-RPC response.
@@ -1092,6 +1096,11 @@ server = Server("MCAMayaMCP")
 _operation_manager = None
 _mel_port = DEFAULT_MEL_PORT
 
+# The Maya host the connection targets.  Defaults to localhost so local dev is
+# unchanged; set via MAYA_MCP_HOST to a remote/tailnet address (the relay's IP)
+# so an AI1-hosted server can drive a Maya on another box over the tailnet.
+_maya_host = LOCAL_HOST
+
 
 @server.list_tools()
 async def handle_list_tools():
@@ -1140,8 +1149,9 @@ async def handle_call_tool(name, arguments):
         args = arguments if arguments else {}
         script = load_maya_tool_source(name, path, args)
 
-        # Send to Maya and get results.
-        maya_conn = MayaConnection(mel_port=_mel_port)
+        # Send to Maya and get results.  Host comes from config (_maya_host) so
+        # the same server can drive a local or a remote (tailnet) Maya.
+        maya_conn = MayaConnection(mel_port=_mel_port, host=_maya_host)
         result = maya_conn.run_tool_script(script)
 
         # None means the connection failed (Maya not running, port closed).
@@ -1221,13 +1231,23 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Resolve port: CLI arg > env var > default.
+    # Resolve the MEL port: CLI --port > MAYA_MEL_PORT > (MAYA_MCP_PORT - 1) > default.
+    # MAYA_MCP_PORT is the PYTHON command port the MCP actually connects to
+    # (mel + 1) and the port the relay forwards; the server tracks the MEL port
+    # internally, so derive it.
     if args.port is not None:
         _mel_port = args.port
     elif os.environ.get("MAYA_MEL_PORT"):
         _mel_port = int(os.environ["MAYA_MEL_PORT"])
+    elif os.environ.get("MAYA_MCP_PORT"):
+        _mel_port = int(os.environ["MAYA_MCP_PORT"]) - 1
     else:
         _mel_port = DEFAULT_MEL_PORT
+
+    # Resolve the Maya host: MAYA_MCP_HOST > localhost default.  AI1-Frank sets
+    # this to the Maya box's tailnet IP (the relay's address); unset keeps local
+    # dev on 127.0.0.1, unchanged.
+    _maya_host = os.environ.get("MAYA_MCP_HOST", LOCAL_HOST)
 
     # --- Logging Setup --------------------------------------------------------
 
@@ -1244,7 +1264,8 @@ if __name__ == "__main__":
     )
 
     logger.info("MCA Maya MCP Server v%s starting up", __version__)
-    logger.info("Maya MEL port: %d, Python port: %d", _mel_port, _mel_port + 1)
+    logger.info("Maya host: %s, MEL port: %d, Python port: %d",
+                _maya_host, _mel_port, _mel_port + 1)
 
     # --- Tool Discovery -------------------------------------------------------
 

@@ -165,6 +165,80 @@ public:
 		TArray<FString>& OutVars
 	);
 
+	/**
+	 * Make a Blueprint implement an interface.
+	 *
+	 * This is the one Blueprint-authoring operation with no stock Python path —
+	 * a Blueprint's ImplementedInterfaces array is protected and the descriptor
+	 * struct is not exposed to Python. Resolves the interface class by full path
+	 * ("/Script/Module.UMyInterface"), by name ("MyInterface"), or by U-prefixed
+	 * name ("UMyInterface"), then adds it via
+	 * FBlueprintEditorUtils::ImplementNewInterface and marks the Blueprint
+	 * structurally modified. Idempotent — already-implemented returns true.
+	 *
+	 * After this call, the interface's BlueprintImplementableEvent functions are
+	 * overridable on the Blueprint (add_event_override / add_function_override).
+	 *
+	 * @param Blueprint       The Blueprint to modify (e.g. a pawn like BP_Notera).
+	 * @param InterfaceClass  Path or name of the interface class to implement.
+	 * @return True if the interface was added or was already implemented.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Event Graph",
+		meta = (DisplayName = "Implement Interface"))
+	static bool ImplementInterface(
+		UBlueprint* Blueprint,
+		const FString& InterfaceClass
+	);
+
+	/**
+	 * Remove an interface a Blueprint implements — the counterpart to
+	 * ImplementInterface.
+	 *
+	 * Like ImplementInterface, this has no stock Python path: the Blueprint's
+	 * ImplementedInterfaces array is protected and FBlueprintEditorUtils is C++
+	 * only. Resolves the interface class by full path
+	 * ("/Script/Module.UMyInterface"), by name ("MyInterface"), or by U-prefixed
+	 * name ("UMyInterface"), then removes it via
+	 * FBlueprintEditorUtils::RemoveInterface and marks the Blueprint structurally
+	 * modified. The interface's implementing function graphs are dropped along
+	 * with it (bPreserveFunctions = false). Idempotent — if the Blueprint does
+	 * not implement the interface, returns true.
+	 *
+	 * @param Blueprint       The Blueprint to modify (e.g. a waypoint like CBP_Sitting).
+	 * @param InterfaceClass  Path or name of the interface class to remove.
+	 * @return True if the interface was removed or was already absent.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Event Graph",
+		meta = (DisplayName = "Remove Interface"))
+	static bool RemoveInterface(
+		UBlueprint* Blueprint,
+		const FString& InterfaceClass
+	);
+
+	/**
+	 * Compile a Blueprint and return the compiler's ACTUAL messages.
+	 *
+	 * The stock Python path (BlueprintEditorLibrary.compile_blueprint) returns
+	 * nothing, so callers can only read a coarse pass/fail status enum and never
+	 * see WHY a Blueprint failed. This routes the compile through an
+	 * FCompilerResultsLog and returns every tokenized message as text, so an
+	 * agent can read the real error (e.g. "A node named 'Box' already exists")
+	 * instead of guessing.
+	 *
+	 * The returned array's first entry is always a summary line of the form
+	 * "SUMMARY: errors=N warnings=M". Each remaining entry is one compiler
+	 * message tagged by severity: "ERROR: ...", "WARNING: ...", or "NOTE: ...".
+	 * A clean compile returns just the summary with errors=0.
+	 *
+	 * @param Blueprint  The Blueprint to compile.
+	 * @return Summary line followed by one tagged line per compiler message.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Event Graph",
+		meta = (DisplayName = "Compile Blueprint With Messages"))
+	static TArray<FString> CompileBlueprintWithMessages(
+		UBlueprint* Blueprint
+	);
+
 	// --- Pin Wiring -----------------------------------------------------------
 
 	/**

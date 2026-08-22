@@ -17,6 +17,20 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/Skeleton.h"
 
+// Runtime / baked-data introspection: the live state-machine node, the running
+// AnimInstance, and the compiled generated class that carries the baked topology.
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimNode_StateMachine.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimStateMachineTypes.h"
+
+// AnimGraph pose-flow introspection: slot, cached-pose save/use, and output-root nodes.
+#include "AnimGraphNode_Slot.h"
+#include "AnimGraphNode_SaveCachedPose.h"
+#include "AnimGraphNode_UseCachedPose.h"
+#include "AnimGraphNode_Root.h"
+#include "AnimNodes/AnimNode_Slot.h"
+
 #include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_StateMachine.h"
 #include "AnimStateNode.h"
@@ -436,6 +450,85 @@ bool UMCAAnimBlueprintLibrary::ListStates(
 			OutNames.Add(StateNode->GetStateName());
 		}
 	}
+
+	return true;
+}
+
+
+bool UMCAAnimBlueprintLibrary::RemoveState(
+	UAnimBlueprint* AnimBlueprint,
+	const FString& StateMachineName,
+	const FString& StateName)
+{
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("RemoveState: AnimBlueprint is null"));
+		return false;
+	}
+
+	UAnimationStateMachineGraph* SMGraph = FindStateMachineGraph(AnimBlueprint, StateMachineName);
+	if (!SMGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("RemoveState: State machine '%s' not found in '%s'"),
+			*StateMachineName, *AnimBlueprint->GetName());
+		return false;
+	}
+
+	UAnimStateNode* StateNode = FindStateNode(SMGraph, StateName);
+	if (!StateNode)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("RemoveState: State '%s' not found in '%s'"),
+			*StateName, *StateMachineName);
+		return false;
+	}
+
+	FScopedTransaction Transaction(FText::FromString(
+		FString::Printf(TEXT("MCA: Remove State '%s'"), *StateName)));
+
+	SMGraph->Modify();
+
+	// Collect every transition touching this state. Deleting a state in the visual
+	// editor also deletes its connected transitions; if we left them, they would
+	// dangle with a null endpoint (GetPreviousState/GetNextState returning null) and
+	// corrupt the machine on the next compile. Gather first, then remove — never
+	// mutate SMGraph->Nodes while iterating it.
+	TArray<UAnimStateTransitionNode*> ConnectedTransitions;
+	for (UEdGraphNode* Node : SMGraph->Nodes)
+	{
+		UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node);
+		if (!TransNode)
+		{
+			continue;
+		}
+
+		// A transition references the state either as its source or its destination.
+		// Compare against the base-class pointer — GetPreviousState/GetNextState return
+		// UAnimStateNodeBase*, and our target is the same UObject.
+		UAnimStateNodeBase* PrevState = TransNode->GetPreviousState();
+		UAnimStateNodeBase* NextState = TransNode->GetNextState();
+		if (PrevState == StateNode || NextState == StateNode)
+		{
+			ConnectedTransitions.Add(TransNode);
+		}
+	}
+
+	// Remove the connected transitions first (bDontRecompile = true to batch the work;
+	// we mark the blueprint modified once at the end). RemoveNode runs the engine's
+	// DestroyNode path, which also tears down each transition's bound rule graph.
+	for (UAnimStateTransitionNode* TransNode : ConnectedTransitions)
+	{
+		FBlueprintEditorUtils::RemoveNode(AnimBlueprint, TransNode, /*bDontRecompile=*/ true);
+	}
+
+	// Now remove the state node itself. Its DestroyNode override removes the bound
+	// state graph (the sub-graph that holds the state's animation player).
+	FBlueprintEditorUtils::RemoveNode(AnimBlueprint, StateNode, /*bDontRecompile=*/ true);
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBlueprint);
+
+	UE_LOG(LogMCAScripting, Log,
+		TEXT("RemoveState: Removed '%s' from '%s' (and %d connected transition(s))"),
+		*StateName, *StateMachineName, ConnectedTransitions.Num());
 
 	return true;
 }
@@ -1043,6 +1136,133 @@ bool UMCAAnimBlueprintLibrary::SetTransitionBoolCondition(
 
 
 // =============================================================================
+// Read-back: Transition Rule
+// =============================================================================
+
+bool UMCAAnimBlueprintLibrary::GetTransitionRule(
+	UAnimBlueprint* AnimBlueprint,
+	const FString& StateMachineName,
+	const FString& FromStateName,
+	const FString& ToStateName,
+	FString& OutSummary)
+{
+	OutSummary.Empty();
+
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("GetTransitionRule: AnimBlueprint is null"));
+		return false;
+	}
+
+	UAnimationStateMachineGraph* SMGraph = FindStateMachineGraph(AnimBlueprint, StateMachineName);
+	if (!SMGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("GetTransitionRule: State machine '%s' not found"),
+			*StateMachineName);
+		return false;
+	}
+
+	UAnimStateTransitionNode* TransNode = FindTransition(SMGraph, FromStateName, ToStateName);
+	if (!TransNode)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("GetTransitionRule: Transition '%s' -> '%s' not found"),
+			*FromStateName, *ToStateName);
+		return false;
+	}
+
+	// The automatic (sequence-player remaining-time) rule short-circuits the rest.
+	if (TransNode->bAutomaticRuleBasedOnSequencePlayerInState)
+	{
+		OutSummary = FString::Printf(TEXT("AUTO (remaining <= %.3fs); crossfade=%.2fs"),
+			TransNode->AutomaticRuleTriggerTime, TransNode->CrossfadeDuration);
+		return true;
+	}
+
+	UEdGraph* RuleGraph = TransNode->GetBoundGraph();
+	if (!RuleGraph)
+	{
+		OutSummary = TEXT("(no bound graph)");
+		return true;
+	}
+
+	// Find the TransitionResult node + its bool "can enter" pin.
+	UAnimGraphNode_TransitionResult* ResultNode = nullptr;
+	for (UEdGraphNode* Node : RuleGraph->Nodes)
+	{
+		ResultNode = Cast<UAnimGraphNode_TransitionResult>(Node);
+		if (ResultNode)
+		{
+			break;
+		}
+	}
+	if (!ResultNode)
+	{
+		OutSummary = TEXT("(no result node)");
+		return true;
+	}
+
+	UEdGraphPin* CanEnterPin = nullptr;
+	for (UEdGraphPin* Pin : ResultNode->Pins)
+	{
+		if (Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		{
+			CanEnterPin = Pin;
+			break;
+		}
+	}
+	if (!CanEnterPin)
+	{
+		OutSummary = TEXT("(no can-enter pin)");
+		return true;
+	}
+
+	// Nothing wired -> the pin's literal default is the rule.
+	if (CanEnterPin->LinkedTo.Num() == 0)
+	{
+		OutSummary = FString::Printf(TEXT("CONST %s"),
+			CanEnterPin->DefaultValue.IsEmpty() ? TEXT("false") : *CanEnterPin->DefaultValue);
+		return true;
+	}
+
+	// Decode the node driving the gate. Handle the two shapes this library authors
+	// (a bool variable, optionally through a NOT), and describe anything else.
+	UEdGraphPin* SrcPin = CanEnterPin->LinkedTo[0];
+	UEdGraphNode* SrcNode = SrcPin ? SrcPin->GetOwningNode() : nullptr;
+
+	if (UK2Node_VariableGet* VarGet = Cast<UK2Node_VariableGet>(SrcNode))
+	{
+		OutSummary = FString::Printf(TEXT("%s == true"), *VarGet->GetVarName().ToString());
+	}
+	else if (UK2Node_CallFunction* CallFn = Cast<UK2Node_CallFunction>(SrcNode))
+	{
+		const FString FuncName = CallFn->GetFunctionName().ToString();
+		if (FuncName == TEXT("Not_PreBool"))
+		{
+			// Trace the NOT's "A" input back to a variable (the "Var == false" shape).
+			UEdGraphPin* AIn = CallFn->FindPin(FName(TEXT("A")), EGPD_Input);
+			UK2Node_VariableGet* InnerVar = (AIn && AIn->LinkedTo.Num() > 0)
+				? Cast<UK2Node_VariableGet>(AIn->LinkedTo[0]->GetOwningNode())
+				: nullptr;
+			OutSummary = InnerVar
+				? FString::Printf(TEXT("%s == false"), *InnerVar->GetVarName().ToString())
+				: TEXT("NOT(<complex>)");
+		}
+		else
+		{
+			OutSummary = FString::Printf(TEXT("%s()"), *FuncName);
+		}
+	}
+	else
+	{
+		OutSummary = FString::Printf(TEXT("<%s>"),
+			SrcNode ? *SrcNode->GetClass()->GetName() : TEXT("null"));
+	}
+
+	return true;
+}
+
+
+// =============================================================================
 // Read-back: Transitions + Notifies
 // =============================================================================
 
@@ -1105,6 +1325,244 @@ bool UMCAAnimBlueprintLibrary::ListAnimNotifies(
 		OutNotifies.Add(FString::Printf(TEXT("%s@%.3f"),
 			*Event.NotifyName.ToString(), Event.GetTime()));
 	}
+
+	return true;
+}
+
+
+// =============================================================================
+// Runtime / Baked Introspection
+// =============================================================================
+
+FString UMCAAnimBlueprintLibrary::GetActiveStateName(
+	UAnimInstance* AnimInstance,
+	const FString& StateMachineName)
+{
+	if (!AnimInstance)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("GetActiveStateName: AnimInstance is null"));
+		return TEXT("(no anim instance)");
+	}
+
+	// Resolve the LIVE state-machine node by name. This is the runtime instance the
+	// AnimInstance actually evaluates — the ground truth, not an author-set proxy var.
+	const FAnimNode_StateMachine* StateMachine =
+		AnimInstance->GetStateMachineInstanceFromName(FName(*StateMachineName));
+	if (!StateMachine)
+	{
+		UE_LOG(LogMCAScripting, Warning,
+			TEXT("GetActiveStateName: State machine '%s' not found on '%s'"),
+			*StateMachineName, *AnimInstance->GetName());
+		return TEXT("(machine not found)");
+	}
+
+	// GetCurrentStateName() reads the node's active state index — the authoritative answer.
+	const FName ActiveState = StateMachine->GetCurrentStateName();
+
+	UE_LOG(LogMCAScripting, Log, TEXT("GetActiveStateName: '%s' active state = '%s'"),
+		*StateMachineName, *ActiveState.ToString());
+
+	return ActiveState.ToString();
+}
+
+
+bool UMCAAnimBlueprintLibrary::DumpBakedTransitions(
+	UAnimBlueprint* AnimBlueprint,
+	const FString& StateMachineName,
+	TArray<FString>& OutTransitions)
+{
+	OutTransitions.Empty();
+
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("DumpBakedTransitions: AnimBlueprint is null"));
+		return false;
+	}
+
+	// The baked state machines live on the COMPILED generated class, not the editor
+	// graph. If the AnimBP was never compiled there is nothing baked to read.
+	UAnimBlueprintGeneratedClass* AnimClass =
+		Cast<UAnimBlueprintGeneratedClass>(AnimBlueprint->GeneratedClass);
+	if (!AnimClass)
+	{
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("DumpBakedTransitions: '%s' has no generated class — compile it first"),
+			*AnimBlueprint->GetName());
+		return false;
+	}
+
+	const TArray<FBakedAnimationStateMachine>& Machines = AnimClass->GetBakedStateMachines();
+
+	// Locate the requested baked machine by name.
+	const FBakedAnimationStateMachine* Machine = nullptr;
+	for (const FBakedAnimationStateMachine& Candidate : Machines)
+	{
+		if (Candidate.MachineName == FName(*StateMachineName))
+		{
+			Machine = &Candidate;
+			break;
+		}
+	}
+	if (!Machine)
+	{
+		// Help the caller by naming the baked machines that DO exist.
+		FString Available;
+		for (const FBakedAnimationStateMachine& Candidate : Machines)
+		{
+			Available += (Available.IsEmpty() ? TEXT("") : TEXT(", "));
+			Available += Candidate.MachineName.ToString();
+		}
+		UE_LOG(LogMCAScripting, Error,
+			TEXT("DumpBakedTransitions: Baked machine '%s' not found. Available: [%s]"),
+			*StateMachineName, *Available);
+		return false;
+	}
+
+	// Walk EVERY state's baked exit transitions. Listing exits per-source-state is what
+	// exposes an edge the authoring-graph reader misses — a state's true runtime out-edges
+	// are recorded right here in the compiled data, keyed off the state itself.
+	for (const FBakedAnimationState& State : Machine->States)
+	{
+		for (const FBakedStateExitTransition& Exit : State.Transitions)
+		{
+			// The exit references a transition slot; resolve its destination state.
+			FString ToName = TEXT("?");
+			if (Machine->Transitions.IsValidIndex(Exit.TransitionIndex))
+			{
+				const FAnimationTransitionBetweenStates& Trans =
+					Machine->Transitions[Exit.TransitionIndex];
+				if (Machine->States.IsValidIndex(Trans.NextState))
+				{
+					ToName = Machine->States[Trans.NextState].StateName.ToString();
+				}
+			}
+
+			OutTransitions.Add(FString::Printf(
+				TEXT("%s -> %s [auto=%s desired=%s canTakeIdx=%d transIdx=%d]"),
+				*State.StateName.ToString(),
+				*ToName,
+				Exit.bAutomaticRemainingTimeRule ? TEXT("true") : TEXT("false"),
+				Exit.bDesiredTransitionReturnValue ? TEXT("true") : TEXT("false"),
+				Exit.CanTakeDelegateIndex,
+				Exit.TransitionIndex));
+		}
+	}
+
+	UE_LOG(LogMCAScripting, Log,
+		TEXT("DumpBakedTransitions: '%s' — %d baked exit transition(s) across %d state(s)"),
+		*StateMachineName, OutTransitions.Num(), Machine->States.Num());
+
+	return true;
+}
+
+
+// =============================================================================
+// AnimGraph Pose-Flow Introspection
+// =============================================================================
+
+// File-local: build a meaningful one-line descriptor for an AnimGraph node. Names the
+// load-bearing node types by their identity so the dump reads like the visual graph.
+static FString MCA_DescribeAnimNode(UEdGraphNode* Node)
+{
+	if (!Node)
+	{
+		return TEXT("null");
+	}
+	if (UAnimGraphNode_StateMachine* SM = Cast<UAnimGraphNode_StateMachine>(Node))
+	{
+		return FString::Printf(TEXT("StateMachine('%s')"), *SM->GetStateMachineName());
+	}
+	if (UAnimGraphNode_Slot* Slot = Cast<UAnimGraphNode_Slot>(Node))
+	{
+		return FString::Printf(TEXT("Slot('%s')"), *Slot->Node.SlotName.ToString());
+	}
+	if (UAnimGraphNode_SaveCachedPose* Save = Cast<UAnimGraphNode_SaveCachedPose>(Node))
+	{
+		return FString::Printf(TEXT("SaveCachedPose('%s')"), *Save->CacheName);
+	}
+	if (UAnimGraphNode_UseCachedPose* Use = Cast<UAnimGraphNode_UseCachedPose>(Node))
+	{
+		// NameOfCache is private; read the public weak-ptr to the linked save node instead.
+		const FString CacheNm = Use->SaveCachedPoseNode.IsValid()
+			? Use->SaveCachedPoseNode->CacheName
+			: TEXT("?");
+		return FString::Printf(TEXT("UseCachedPose('%s')"), *CacheNm);
+	}
+	if (Cast<UAnimGraphNode_Root>(Node))
+	{
+		return TEXT("OutputPose");
+	}
+
+	// Fall back to the stripped class name (e.g. "BlendListByBool", "LayeredBoneBlend").
+	FString Cls = Node->GetClass()->GetName();
+	Cls.RemoveFromStart(TEXT("AnimGraphNode_"));
+	return Cls;
+}
+
+
+bool UMCAAnimBlueprintLibrary::DumpAnimGraph(
+	UAnimBlueprint* AnimBlueprint,
+	TArray<FString>& OutNodes)
+{
+	OutNodes.Empty();
+
+	if (!AnimBlueprint)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("DumpAnimGraph: AnimBlueprint is null"));
+		return false;
+	}
+
+	UEdGraph* AnimGraph = GetAnimGraph(AnimBlueprint);
+	if (!AnimGraph)
+	{
+		UE_LOG(LogMCAScripting, Error, TEXT("DumpAnimGraph: No AnimGraph found in '%s'"),
+			*AnimBlueprint->GetName());
+		return false;
+	}
+
+	// One line per node: its descriptor plus every LINKED input pin and the node feeding
+	// it. Pose links reveal the relevancy chain; data-driver links (alpha/weight/bool)
+	// reveal what could zero a branch and de-relevant a state machine downstream.
+	for (UEdGraphNode* Node : AnimGraph->Nodes)
+	{
+		if (!Node)
+		{
+			continue;
+		}
+
+		const FString Desc = MCA_DescribeAnimNode(Node);
+
+		TArray<FString> Links;
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Input)
+			{
+				continue;
+			}
+			for (UEdGraphPin* Linked : Pin->LinkedTo)
+			{
+				if (!Linked)
+				{
+					continue;
+				}
+				Links.Add(FString::Printf(TEXT("%s:%s"),
+					*Pin->PinName.ToString(),
+					*MCA_DescribeAnimNode(Linked->GetOwningNode())));
+			}
+		}
+
+		if (Links.Num() > 0)
+		{
+			OutNodes.Add(FString::Printf(TEXT("%s <- [%s]"), *Desc, *FString::Join(Links, TEXT(", "))));
+		}
+		else
+		{
+			OutNodes.Add(Desc);
+		}
+	}
+
+	UE_LOG(LogMCAScripting, Log, TEXT("DumpAnimGraph: '%s' — %d AnimGraph node(s)"),
+		*AnimBlueprint->GetName(), OutNodes.Num());
 
 	return true;
 }

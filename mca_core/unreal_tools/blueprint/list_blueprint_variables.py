@@ -6,9 +6,13 @@ def list_blueprint_variables(asset_path: str):
 
     :param asset_path: Full content path to the Blueprint (e.g. "/Game/BP_MyActor").
     """
+    import re
     import unreal
 
-    # Load the Blueprint asset.
+    # In UE 5.6 ``BlueprintGeneratedClass.get_super_class()`` was removed
+    # from the Python API. The parent class is still exposed via the
+    # AssetRegistry ``ParentClass`` tag, which we parse and load.
+
     bp = unreal.EditorAssetLibrary.load_asset(asset_path)
     if bp is None:
         return {
@@ -23,7 +27,20 @@ def list_blueprint_variables(asset_path: str):
             "message": "Blueprint '{}' has no generated class.".format(asset_path),
         }
 
-    parent_class = gen_class.get_super_class()
+    # Resolve the parent class via AssetRegistry tag.
+    parent_class = None
+    try:
+        ar = unreal.AssetRegistryHelpers.get_asset_registry()
+        ads = ar.get_assets_by_package_name(bp.get_outermost().get_name())
+        if ads:
+            raw = ads[0].get_tag_value("ParentClass")
+            if raw:
+                m = re.search(r"'([^']+)'", str(raw))
+                if m:
+                    parent_class = unreal.load_class(None, m.group(1))
+    except Exception:
+        parent_class = None
+
     cdo = unreal.get_default_object(gen_class)
     if cdo is None:
         return {
@@ -31,18 +48,20 @@ def list_blueprint_variables(asset_path: str):
             "message": "Could not get CDO for '{}'.".format(asset_path),
         }
 
-    # Properties on the parent class (to exclude inherited ones).
+    # Build the set of inherited property names so we can exclude them.
     parent_props = set()
-    if parent_class:
-        parent_cdo = unreal.get_default_object(parent_class)
-        if parent_cdo:
-            parent_props = set(dir(parent_cdo))
+    if parent_class is not None:
+        try:
+            parent_cdo = unreal.get_default_object(parent_class)
+            if parent_cdo is not None:
+                parent_props = set(dir(parent_cdo))
+        except Exception:
+            pass
 
     variables = []
     for prop_name in sorted(dir(cdo)):
         if prop_name.startswith("_"):
             continue
-        # Only user-added variables.
         if prop_name in parent_props:
             continue
         try:
@@ -60,4 +79,5 @@ def list_blueprint_variables(asset_path: str):
         "asset_path": asset_path,
         "total_count": len(variables),
         "variables": variables[:100],
+        "parent_class_resolved": parent_class.get_name() if parent_class else None,
     }

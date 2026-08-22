@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "MCAUnrealMCP": {
+      "command": "C:/Users/ncomes/Documents/mca_preferences/MCAEditor/mcp_servers/MayaMCP/.venv/Scripts/python.exe",
+      "args": [
+        "C:/Users/ncomes/Documents/mca_preferences/MCAEditor/mcp_servers/mca_unreal_server.py"
+      ]
+    }
+  }
+}

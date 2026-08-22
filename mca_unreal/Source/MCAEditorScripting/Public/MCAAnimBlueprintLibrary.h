@@ -18,6 +18,7 @@
 class UAnimBlueprint;
 class USkeleton;
 class UAnimSequenceBase;
+class UAnimInstance;
 
 /**
  * Static library of Animation Blueprint graph editing functions.
@@ -139,6 +140,34 @@ public:
 		UAnimBlueprint* AnimBlueprint,
 		const FString& StateMachineName,
 		TArray<FString>& OutNames
+	);
+
+	/**
+	 * Remove a state from a state machine, along with every transition touching it.
+	 *
+	 * The write counterpart to AddState. There is no Python-side way to delete a
+	 * state-machine node (the graph's Nodes array is engine-protected), so this C++
+	 * accessor is the only programmatic path. Deleting a state in the visual editor
+	 * also deletes its connected transitions, so this mirrors that: it first removes
+	 * every transition whose source OR destination is the target state (otherwise
+	 * those transitions would dangle with a null endpoint), then removes the state
+	 * node itself. Each removal tears down the node's bound sub-graph via the engine's
+	 * UAnimStateNodeBase::DestroyNode path.
+	 *
+	 * Does NOT recompile — call CompileAnimBlueprint afterwards (the AnimBP is marked
+	 * structurally modified). Pass an ordinary state name (not the entry node).
+	 *
+	 * @param AnimBlueprint     The Animation Blueprint containing the state machine.
+	 * @param StateMachineName  Name of the target state machine.
+	 * @param StateName         Name of the state to remove.
+	 * @return True if the state was found and removed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Remove State"))
+	static bool RemoveState(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& StateMachineName,
+		const FString& StateName
 	);
 
 	/**
@@ -305,6 +334,37 @@ public:
 		bool bEqualsValue
 	);
 
+	/**
+	 * Read back a transition's rule as a human-readable summary.
+	 *
+	 * The READ counterpart to SetAutoTransitionRule / SetTransitionBoolCondition.
+	 * A transition's rule lives in a bound graph that is not introspectable from
+	 * Python, so this C++ accessor is the only way to verify what actually gates a
+	 * transition (and to avoid editing it blind). Reports the automatic-rule case
+	 * (time remaining) and decodes the common bound-graph shapes:
+	 *   - "Var == true"   (a bool variable wired straight to the gate)
+	 *   - "Var == false"  (a bool variable through a NOT node)
+	 *   - "AUTO (remaining <= t)"  (sequence-player auto rule)
+	 *   - "CONST true/false"       (an unwired literal gate)
+	 *   - "<NodeClass>" / "Func()" for anything more complex.
+	 *
+	 * @param AnimBlueprint     The Animation Blueprint.
+	 * @param StateMachineName  Name of the state machine.
+	 * @param FromStateName     Source state (identifies the transition).
+	 * @param ToStateName       Destination state (identifies the transition).
+	 * @param OutSummary        Human-readable rule summary.
+	 * @return True if the transition was found and inspected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Get Transition Rule"))
+	static bool GetTransitionRule(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& StateMachineName,
+		const FString& FromStateName,
+		const FString& ToStateName,
+		FString& OutSummary
+	);
+
 	// --- Compilation -------------------------------------------------------
 
 	/**
@@ -316,6 +376,91 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
 		meta = (DisplayName = "Compile Animation Blueprint"))
 	static bool CompileAnimBlueprint(UAnimBlueprint* AnimBlueprint);
+
+	// --- Runtime / Baked Introspection -------------------------------------
+
+	/**
+	 * Read the TRUE active state of a running state machine at runtime.
+	 *
+	 * Reads the live FAnimNode_StateMachine on the AnimInstance during PIE / Simulate
+	 * — the ground-truth currently-active state, NOT a member-variable proxy the AnimBP
+	 * author may set inconsistently. This resolves the "which state is she really in?"
+	 * ambiguity that member-var introspection (e.g. an author-maintained "Animation State"
+	 * enum) cannot answer reliably, because it reads the state machine node itself.
+	 *
+	 * Call on a live AnimInstance obtained from a PIE skeletal mesh component.
+	 *
+	 * @param AnimInstance      The running Animation Instance (from a PIE component).
+	 * @param StateMachineName  Name of the state machine to read.
+	 * @return The active state name, or a parenthesised diagnostic ("(no anim instance)",
+	 *         "(machine not found)") on failure. Never asserts.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Get Active State Name"))
+	static FString GetActiveStateName(
+		UAnimInstance* AnimInstance,
+		const FString& StateMachineName
+	);
+
+	/**
+	 * Dump the BAKED (compiled) transition topology of a state machine.
+	 *
+	 * The editor-graph readers (ListTransitions / GetTransitionRule) walk the AUTHORING
+	 * graph, which can miss what the COMPILER actually baked into the runtime state
+	 * machine (collapsed conduits, auto-rule edges, edges whose authoring nodes are
+	 * malformed). This reads UAnimBlueprintGeneratedClass's baked state machines directly
+	 * — the exact topology the runtime evaluates.
+	 *
+	 * Each entry is formatted:
+	 *   "From -> To [auto=<bool> desired=<bool> canTakeIdx=<n> transIdx=<n>]"
+	 * walking every state's baked exit transitions, so a state's real out-edges are listed
+	 * under that state — exposing any edge the authoring graph hides. "auto" is the baked
+	 * automatic-remaining-time flag; "desired" is the rule's required return value; the
+	 * indices are the compiled delegate / transition slots.
+	 *
+	 * The AnimBP must have been compiled (a generated class must exist), or this returns false.
+	 *
+	 * @param AnimBlueprint     The Animation Blueprint to inspect.
+	 * @param StateMachineName  Name of the state machine to dump.
+	 * @param OutTransitions    Output array of baked transition descriptions.
+	 * @return True if the baked machine was found and dumped.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Dump Baked Transitions"))
+	static bool DumpBakedTransitions(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& StateMachineName,
+		TArray<FString>& OutTransitions
+	);
+
+	/**
+	 * Dump the root AnimGraph's pose-flow topology (nodes + their input links).
+	 *
+	 * The transition readers cover STATE MACHINES; this covers the AnimGraph that
+	 * FEEDS the output pose — state machines, slots, cached-pose save/use, blends, and
+	 * the output root. AnimGraph nodes are not K2Nodes, so they are invisible to Python
+	 * graph introspection; this C++ accessor is the only way to read the pose-flow that
+	 * determines node RELEVANCY (a state machine that goes non-relevant for a frame
+	 * re-initialises to its entry state — a common stand-up / transition-skip bug).
+	 *
+	 * Each entry is one node, formatted:
+	 *   "<NodeDesc> <- [<pin>:<SourceNodeDesc>, ...]"
+	 * where NodeDesc names the node meaningfully — StateMachine('X'), Slot('Y'),
+	 * SaveCachedPose('Z'), UseCachedPose('Z'), OutputPose, or the stripped class name —
+	 * and the bracket lists every LINKED input pin and the node feeding it. Pose links
+	 * and data-driver links (alpha / weight / bool) both appear, so a blend that can zero
+	 * a branch (de-relevanting it) is visible.
+	 *
+	 * @param AnimBlueprint  The Animation Blueprint to inspect.
+	 * @param OutNodes       Output array, one line per AnimGraph node.
+	 * @return True if the root AnimGraph was found and dumped.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCA|Animation Blueprint",
+		meta = (DisplayName = "Dump Anim Graph"))
+	static bool DumpAnimGraph(
+		UAnimBlueprint* AnimBlueprint,
+		TArray<FString>& OutNodes
+	);
 
 private:
 
