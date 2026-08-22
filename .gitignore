@@ -63,3 +63,6 @@ website/site/
 
 # --- Claude Code ---
 .claude/
+
+# --- MkDocs social-plugin build cache (regenerated on every build) ---
+.cache/

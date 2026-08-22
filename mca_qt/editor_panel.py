@@ -24,10 +24,10 @@ import hashlib
 import importlib
 import io
 import os
-import stat
 import re
 import sys
 import logging
+import time
 import traceback
 import webbrowser
 
@@ -47,7 +47,7 @@ from mca_core.config.color_scheme import build_scheme_dict
 from mca_core.project import (
     MCAProject, has_project_file, detect_python_paths, create_default_project,
 )
-from mca_core.session_manager import SessionManager
+from mca_core.session_manager import SessionManager, atomic_write
 from mca_qt.widgets.code_editor import MCACodeEditor
 from mca_qt.widgets.output_window import OutputWindow
 from mca_qt.widgets.tool_stripe import ToolStripe
@@ -70,6 +70,12 @@ logger = logging.getLogger(__name__)
 # Sentinel object used by _auto_reload_module to distinguish "attribute
 # not present in __main__" from "attribute is None".
 _SENTINEL = object()
+
+# How long a tab whose file has gone missing is kept in the session
+# manifest before it is finally dropped.  Long enough to survive an
+# offline network share or a branch switch, short enough that files the
+# user genuinely deleted don't haunt the tab list forever.
+ORPHAN_TAB_MAX_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days.
 
 # --- Module-level symbol index cache ----------------------------------------
 # In Maya, closing the dockable panel destroys the MCAEditorPanel instance
@@ -213,6 +219,40 @@ class MCAEditorPanel(QWidget):
         self._outline_timer.setInterval(500)
         self._outline_timer.timeout.connect(self._refresh_outline)
 
+        # --- Session persistence timers ------------------------------------
+        # Debounce timer for the session manifest.  Structural changes (open
+        # a file, new tab, drag a tab, split a group) arrive in bursts, so
+        # coalesce them into one write shortly after the burst settles rather
+        # than hitting the disk on every individual signal.
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setSingleShot(True)
+        self._session_save_timer.setInterval(400)
+        self._session_save_timer.timeout.connect(self._save_session_manifest)
+
+        # Set when a manifest exists on disk but could not be parsed.  While
+        # this is True the panel refuses to write the manifest, so a corrupt
+        # (but potentially hand-recoverable) session file is never replaced
+        # with the blank session we had to fall back to.
+        self._session_manifest_locked = False
+
+        # Tab entries from the manifest whose backing file could not be
+        # opened this launch (deleted, renamed, or on an offline share),
+        # keyed by group index in DFS order.  They are written back out on
+        # every manifest save so a temporarily-missing file does not cost
+        # the user their tab, and expire after ORPHAN_TAB_MAX_AGE_SECONDS.
+        self._orphaned_tabs = {}
+
+        # False until this panel has actually held at least one tab.  Until
+        # then an empty manifest is never written -- see the guard in
+        # _save_session_manifest for why that matters.
+        self._session_has_had_tabs = False
+
+        # Periodic autosave.  Writes crash-recovery snapshots for every
+        # modified tab, and -- when the user opts in via "autosave_to_file" --
+        # also writes those tabs straight to their real file on disk.
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._on_autosave_tick)
+
         # Shared completion provider — one instance used by all editor tabs.
         self._completion_provider = CompletionProvider(
             self._settings, self._adapter_manager
@@ -242,6 +282,15 @@ class MCAEditorPanel(QWidget):
         restored = False
         if settings.get("restore_session") and not will_auto_open_project:
             restored = self._restore_session()
+
+            # If a manifest was sitting on disk but neither it nor its
+            # backup could be read, lock the manifest so the blank session
+            # we're about to build doesn't overwrite it.  The user's tab
+            # list may still be recoverable by hand from session.json.
+            self._note_manifest_load_result(
+                self._session_manager.default_manifest_path
+            )
+
         if not restored and not will_auto_open_project:
             # First launch (or no session to restore) — start with a
             # Python and a MEL buffer so both languages are ready to go.
@@ -293,6 +342,23 @@ class MCAEditorPanel(QWidget):
         # tab size land on the project's tabs.
         if will_auto_open_project:
             self._apply_settings_to_editors()
+
+        # --- Persist the freshly-built session immediately -------------------
+        # Whatever tabs we ended up with -- restored, recovered, or the
+        # default starter buffers -- are written to disk right now.  If the
+        # DCC dies seconds after launch, the manifest already matches what
+        # the user sees on screen instead of lagging a session behind.
+        self._save_session_manifest()
+
+        # Drop recovery snapshots for files nobody has touched in a month so
+        # the recovery folder doesn't grow forever.
+        try:
+            self._session_manager.purge_stale_recoveries()
+        except Exception as exc:
+            logger.debug("Recovery purge skipped: %s", exc)
+
+        # Start the periodic autosave now that tabs exist.
+        self._restart_autosave_timer()
 
         # --- EditorAPI & JSON-RPC Server ------------------------------------
         # Register this panel with the public API singleton so external
@@ -472,6 +538,14 @@ class MCAEditorPanel(QWidget):
         self._group_container = EditorGroupContainer()
         self._group_container.active_editor_changed.connect(self._on_active_editor_changed)
         self._group_container.editors_changed.connect(self._update_open_editors)
+        # Catch-all for structural changes: tabs added, removed, reordered,
+        # dragged between groups, or a group split.  Individual handlers also
+        # save explicitly, but this guarantees no path can change the tab
+        # layout without the manifest following it to disk.
+        self._group_container.editors_changed.connect(self._schedule_session_save)
+        self._group_container.active_editor_changed.connect(
+            lambda _editor: self._schedule_session_save()
+        )
         self._group_container.tab_close_requested.connect(self._close_tab_in_group)
         self._group_container.rename_requested.connect(self._rename_tab_in_group)
         self._group_container.new_tab_requested.connect(self._show_new_tab_dialog)
@@ -1437,6 +1511,7 @@ class MCAEditorPanel(QWidget):
         manifest = self._session_manager.load_manifest_from(
             project.session_file_path
         )
+        self._note_manifest_load_result(project.session_file_path)
         self._switch_to_manifest(manifest)
 
         # Persist to settings.
@@ -1505,6 +1580,9 @@ class MCAEditorPanel(QWidget):
 
             # Restore the default workspace tabs.
             default_manifest = self._session_manager.load_manifest()
+            self._note_manifest_load_result(
+                self._session_manager.default_manifest_path
+            )
             self._switch_to_manifest(default_manifest)
 
             # Clear last project path so it doesn't auto-reopen.
@@ -2549,6 +2627,11 @@ class MCAEditorPanel(QWidget):
         self._group_container.add_editor(editor, tab_name, filepath, icon)
 
         self._update_open_editors()
+
+        # Persist the new tab right away.  A new tab is exactly the moment
+        # a user starts work they'd hate to lose, so the manifest must not
+        # wait for a later save to catch up.
+        self._save_session_manifest()
         return editor
 
     def _open_file(self):
@@ -2624,6 +2707,10 @@ class MCAEditorPanel(QWidget):
         self._build_recent_files_menu()
         self._update_open_editors()
         self._update_language_combo(editor)
+
+        # Record the newly opened tab in the manifest immediately so a
+        # crash right after opening files doesn't lose the tab list.
+        self._save_session_manifest()
 
     def _on_file_renamed(self, old_path, new_path):
         """
@@ -2743,7 +2830,7 @@ class MCAEditorPanel(QWidget):
             self._update_open_editors()
             self._save_session_manifest()
 
-    def _write_file(self, editor, filepath):
+    def _write_file(self, editor, filepath, notify_on_error=True):
         """
         Write editor content to a file.
 
@@ -2751,34 +2838,56 @@ class MCAEditorPanel(QWidget):
         files as read-only), the read-only attribute is cleared before
         writing so the save succeeds without requiring a manual checkout.
 
-        On failure, logs the error, shows a warning dialog, and returns
+        On failure, logs the error, keeps a recovery snapshot, and returns
         False *without* clearing the editor's modified flag -- so the
         tab keeps its '*' indicator and callers can decide whether to
         proceed with downstream side effects (module reload, execute).
 
         :param MCACodeEditor editor: The editor to save.
         :param str filepath: The file path to write to.
+        :param bool notify_on_error: Show a modal warning dialog when the
+            write fails.  Autosave passes False -- a locked file would
+            otherwise pop a dialog on every single autosave tick.
         :return: True if the file was written successfully.
         :rtype: bool
         """
-        try:
-            # Clear the OS read-only flag if set (common with Perforce
-            # and other VCS that mark files read-only on disk).
-            if os.path.exists(filepath) and not os.access(filepath, os.W_OK):
-                os.chmod(filepath, stat.S_IWRITE | stat.S_IREAD)
-                logger.debug("Cleared read-only attribute: %s", filepath)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(editor.toPlainText())
+        # atomic_write handles the Perforce read-only case and writes via
+        # a temp file + os.replace, so an interrupted save can never leave
+        # the user's script truncated to zero bytes.
+        if atomic_write(filepath, editor.toPlainText()):
             editor.document().setModified(False)
+            # The content is genuinely on disk now, so drop any recovery
+            # snapshot -- keeping it would offer stale text back to the
+            # user on the next launch as if it were unsaved work.
+            self._session_manager.clear_recovery(filepath)
             logger.debug("Saved file: %s", filepath)
             return True
-        except Exception as exc:
-            # Log + popup so a silent disk-write failure can't go
-            # unnoticed.  The modified flag is *not* cleared, so the
-            # tab title still shows '*' and the user knows to retry.
-            logger.warning("Failed to save %s: %s", filepath, exc)
-            QMessageBox.warning(self, "Error", "Could not save file:\n{}".format(str(exc)))
-            return False
+
+        # The modified flag is *not* cleared, so the tab title still shows
+        # '*' and the user knows to retry.  atomic_write already logged why.
+        logger.warning("Failed to save %s", filepath)
+
+        # Best-effort shadow copy so the content survives even though the
+        # real file could not be written (locked, permissions, full disk).
+        self._save_recovery_snapshot(editor)
+
+        if notify_on_error:
+            # Popup so a silent disk-write failure can't go unnoticed on an
+            # explicit save.  Suppressed for autosave, which would otherwise
+            # nag on every tick for as long as the file stays locked.
+            QMessageBox.warning(
+                self, "Error",
+                "Could not save file:\n{}\n\n"
+                "Your changes are still in the tab and a recovery snapshot "
+                "has been kept.".format(filepath)
+            )
+        else:
+            self._show_status(
+                "Autosave could not write {} -- changes kept in a recovery "
+                "snapshot".format(os.path.basename(filepath)),
+                duration_ms=6000,
+            )
+        return False
 
     def _close_tab_in_group(self, group, index):
         """
@@ -2807,6 +2916,12 @@ class MCAEditorPanel(QWidget):
                 self._save_file()
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
+            else:
+                # Discard: the user explicitly gave up these edits, so drop
+                # the recovery snapshot too.  Leaving it would resurrect the
+                # discarded text the next time this file is opened.
+                if editor.file_path:
+                    self._session_manager.clear_recovery(editor.file_path)
 
         # Clean up the completer's app-level event filter before
         # removing the editor.  Without this, orphaned completers
@@ -3116,7 +3231,59 @@ class MCAEditorPanel(QWidget):
             self._show_status("Failed to save buffer to disk", duration_ms=5000)
             return False
         editor._buffer_filename = result
+
+        # Content is on disk, so any recovery snapshot for this buffer is
+        # now stale and must not be offered back on the next launch.
+        buffer_path = os.path.join(self._session_manager.scripts_dir, result)
+        self._session_manager.clear_recovery(buffer_path)
         return True
+
+    def _note_manifest_load_result(self, manifest_path):
+        """
+        Latch the manifest write-lock when a load found a corrupt file.
+
+        Called after every manifest load (startup, project open, project
+        close).  A manifest that exists but won't parse -- and has no
+        usable backup -- must not be replaced by the blank session the
+        editor falls back to, because the file on disk may still be
+        recoverable by hand.
+
+        The lock is one-way for the life of the panel: once we know a
+        manifest is unreadable, nothing this session should overwrite it.
+
+        :param str manifest_path: Path that was loaded (for the log only).
+        """
+        if self._session_manager.last_load_was_corrupt:
+            self._session_manifest_locked = True
+            logger.error(
+                "Session manifest unreadable -- tab persistence is paused "
+                "so the file on disk is preserved: %s", manifest_path
+            )
+            self._show_status(
+                "Session file is unreadable; tab saving is paused to "
+                "protect it. See the log for the path.",
+                duration_ms=10000,
+            )
+
+    def _schedule_session_save(self):
+        """
+        Request a session manifest write shortly after the current burst
+        of structural changes settles.
+
+        Opening a project, restoring a layout, or dragging a tab emits
+        several ``editors_changed`` signals back to back.  Writing on each
+        one would mean a dozen disk writes for a single user action, so the
+        single-shot timer collapses them into one.  Anything that must hit
+        disk *now* (Ctrl+S, new tab, close tab, shutdown) calls
+        ``_save_session_manifest`` directly instead.
+        """
+        # The timer may not exist yet if a signal fires very early during
+        # __init__; falling back to a direct save keeps that case correct.
+        timer = getattr(self, "_session_save_timer", None)
+        if timer is None:
+            self._save_session_manifest()
+            return
+        timer.start()
 
     def _save_session_manifest(self):
         """
@@ -3125,7 +3292,26 @@ class MCAEditorPanel(QWidget):
         Called after every tab open/close/save so the manifest stays
         in sync with the editor state. Uses v3 recursive layout format
         that supports nested horizontal/vertical splits.
+
+        :return: True if the manifest was written to disk.
+        :rtype: bool
         """
+        # A pending debounced save is now redundant -- stop it so we don't
+        # write the same state twice a moment later.
+        timer = getattr(self, "_session_save_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        # Refuse to write over a manifest we could not read.  Overwriting it
+        # with the blank session we fell back to is how a user's whole tab
+        # list used to disappear permanently.
+        if self._session_manifest_locked:
+            logger.warning(
+                "Session manifest write skipped -- the manifest on disk is "
+                "unreadable and is being preserved for manual recovery."
+            )
+            return False
+
         # Get the recursive layout tree from the container.
         layout_state = self._group_container.get_layout_state()
         layout_tree = layout_state.get("layout", {})
@@ -3135,27 +3321,61 @@ class MCAEditorPanel(QWidget):
         # Groups appear in DFS order matching self._group_container.groups().
         groups = self._group_container.groups()
         group_iter = iter(groups)
-        self._fill_layout_tabs(layout_tree, group_iter)
+        self._fill_layout_tabs(layout_tree, group_iter, group_index=[0])
+
+        # --- Empty-session guard --------------------------------------------
+        # Never write a zero-tab manifest from a panel that has not yet held
+        # a single tab.  That combination only happens when the editor is in
+        # a transient startup state, and writing it destroys a perfectly good
+        # session on disk.
+        #
+        # The concrete case this fixes: when a project is set to auto-open,
+        # __init__ deliberately skips restoring the default session (the
+        # project is about to replace the layout anyway).  _open_project then
+        # calls _save_context_session() to "preserve the outgoing context"
+        # BEFORE _active_project is set -- so it saved the still-empty
+        # container straight over the user's default session.json.  Their
+        # non-project tabs were then gone the next time they closed the
+        # project.
+        #
+        # Once any tab has existed, an empty save is legitimate (the user
+        # closed everything) and is allowed through.
+        tab_total = self._session_manager._count_tabs_in_tree(layout_tree)
+        if tab_total > 0:
+            self._session_has_had_tabs = True
+        elif not self._session_has_had_tabs:
+            logger.debug(
+                "Skipping empty session manifest write -- no tab has been "
+                "open yet this session, so the manifest on disk is kept."
+            )
+            return False
 
         # Route the save to the correct file: project session file if a
         # project is active, otherwise the default session.json.
         if self._active_project:
-            self._session_manager.save_manifest_to(
+            return self._session_manager.save_manifest_to(
                 self._active_project.session_file_path,
                 layout_tree, active_group_idx,
             )
-        else:
-            self._session_manager.save_manifest_v3(layout_tree, active_group_idx)
+        return self._session_manager.save_manifest_v3(layout_tree, active_group_idx)
 
-    def _fill_layout_tabs(self, node, group_iter):
+    def _fill_layout_tabs(self, node, group_iter, group_index):
         """
         Recursively fill in tab data for group nodes in the layout tree.
 
         Each "group" node gets its tabs and active_tab populated from
         the corresponding EditorGroup (consumed from the iterator).
 
+        Tabs whose backing file was unavailable at restore time are
+        re-appended here from ``self._orphaned_tabs``.  Without this they
+        would be silently pruned from the manifest on the first save after
+        launch -- so a file sitting on a network share that happened to be
+        offline for one launch would lose its tab for good.
+
         :param dict node: Layout tree node.
         :param iterator group_iter: Iterator over EditorGroup instances.
+        :param list group_index: Single-element list used as a mutable
+            counter tracking the group's DFS position across recursion.
         """
         if not node:
             return
@@ -3166,6 +3386,9 @@ class MCAEditorPanel(QWidget):
                 group = next(group_iter)
             except StopIteration:
                 return
+
+            current_index = group_index[0]
+            group_index[0] += 1
 
             group_tabs = []
             for editor, name, path in group.editors():
@@ -3183,12 +3406,141 @@ class MCAEditorPanel(QWidget):
                         "language": editor.language,
                         "title": name,
                     })
+
+            # Carry forward tabs whose file could not be opened this launch.
+            group_tabs.extend(self._orphaned_tabs.get(current_index, []))
+
             node["tabs"] = group_tabs
             node["active_tab"] = group.current_index()
 
         elif node.get("type") == "splitter":
             for child in node.get("children", []):
-                self._fill_layout_tabs(child, group_iter)
+                self._fill_layout_tabs(child, group_iter, group_index)
+
+    # --- Autosave & Crash Recovery -------------------------------------------
+
+    def _restart_autosave_timer(self):
+        """
+        Start or restart the periodic autosave timer from current settings.
+
+        Called at startup and whenever settings are applied, so changing
+        the interval (or turning autosave off) takes effect immediately
+        without an editor restart.
+        """
+        timer = getattr(self, "_autosave_timer", None)
+        if timer is None:
+            return
+
+        timer.stop()
+
+        enabled = self._settings.get("autosave_enabled")
+        to_file = self._settings.get("autosave_to_file")
+
+        # With both switches off there is nothing for the timer to do.
+        if not enabled and not to_file:
+            logger.debug("Autosave disabled")
+            return
+
+        # Clamp the interval: a 1-second autosave would thrash the disk,
+        # and an absurdly long one defeats the purpose.
+        try:
+            interval = int(self._settings.get("autosave_interval_secs"))
+        except (TypeError, ValueError):
+            interval = 15
+        interval = max(5, min(interval, 600))
+
+        timer.setInterval(interval * 1000)
+        timer.start()
+        logger.debug("Autosave every %ds (to_file=%s)", interval, bool(to_file))
+
+    def _save_recovery_snapshot(self, editor):
+        """
+        Write a crash-recovery snapshot for one modified editor.
+
+        Snapshots are shadow copies -- the user's real file is never
+        touched -- so this is safe to run on a timer regardless of VCS
+        state or module auto-reload.
+
+        :param MCACodeEditor editor: The editor to snapshot.
+        :return: True if a snapshot was written.
+        :rtype: bool
+        """
+        if not editor.file_path:
+            return False
+        try:
+            return self._session_manager.save_recovery(
+                editor.file_path, editor.toPlainText()
+            )
+        except Exception as exc:
+            # Autosave must never raise into the Qt timer callback.
+            logger.warning("Recovery snapshot failed for %s: %s",
+                           editor.file_path, exc)
+            return False
+
+    def _on_autosave_tick(self):
+        """
+        Periodic autosave pass over every open tab.
+
+        For each modified tab:
+
+        - Always write a crash-recovery snapshot when ``autosave_enabled``
+          is on, so a DCC crash can't take unsaved edits with it.
+        - Additionally write straight to the tab's real file when the user
+          opted into ``autosave_to_file``.
+
+        Unmodified tabs are skipped entirely, so an idle editor does no
+        disk I/O at all.
+        """
+        snapshot_enabled = self._settings.get("autosave_enabled")
+        write_to_file = self._settings.get("autosave_to_file")
+
+        snapshots = 0
+        written = 0
+
+        try:
+            editors = self._group_container.all_editors()
+        except Exception as exc:
+            logger.debug("Autosave skipped -- editors unavailable: %s", exc)
+            return
+
+        for editor, name, path in editors:
+            try:
+                if not editor.document().isModified():
+                    continue
+
+                if not editor.file_path:
+                    # Scratch buffer with no backing file -- persist it to
+                    # the buffers directory, which is its only home.
+                    if self._save_buffer_content(editor):
+                        written += 1
+                    continue
+
+                # Read-only tabs are never written back to disk.
+                # notify_on_error=False: a locked file must not raise a
+                # modal dialog on every autosave tick.  Deliberately does
+                # not run _auto_reload_module -- reloading modules into a
+                # live DCC every few seconds behind the user's back is a
+                # much worse surprise than stale imports.
+                if write_to_file and not editor.isReadOnly():
+                    if self._write_file(editor, editor.file_path,
+                                        notify_on_error=False):
+                        written += 1
+                        # _write_file clears the snapshot on success.
+                        continue
+
+                if snapshot_enabled and self._save_recovery_snapshot(editor):
+                    snapshots += 1
+
+            except Exception as exc:
+                # One bad tab must not stop the rest from being saved.
+                logger.warning("Autosave failed for tab '%s': %s", name, exc)
+
+        if written or snapshots:
+            logger.debug("Autosave: %d file(s) written, %d snapshot(s)",
+                         written, snapshots)
+            # Tab structure can't change here, but the manifest write is
+            # cheap and keeps "last saved" honest.
+            self._schedule_session_save()
 
     def _save_context_session(self):
         """
@@ -3197,12 +3549,21 @@ class MCAEditorPanel(QWidget):
         Called during context switches (open/close project) to ensure
         the outgoing context's tabs are fully persisted before the
         incoming context replaces them.
+
+        A context switch destroys the outgoing tab widgets outright, so
+        anything not on disk at this point is gone.  Modified file-backed
+        tabs therefore get a recovery snapshot here -- the real file is
+        left alone (the user never asked to save it), but the edits come
+        back the next time that tab is opened.
         """
-        # Flush every temp buffer to disk so nothing is lost.
         all_editors = self._group_container.all_editors()
         for editor, name, path in all_editors:
             if not path:
+                # Scratch buffer with no backing file -- the buffers
+                # directory is its only home.
                 self._save_buffer_content(editor)
+            elif editor.document().isModified():
+                self._save_recovery_snapshot(editor)
 
         # Write the manifest to the correct file (project or default).
         self._save_session_manifest()
@@ -3318,7 +3679,12 @@ class MCAEditorPanel(QWidget):
 
         # Now populate tabs into each group from the matching node data.
         restored_count = 0
+        recovered_count = 0
         lang_map = {"python": "Python", "mel": "MEL", "text": "Text"}
+
+        # Fresh restore -- discard orphan bookkeeping from any previous
+        # context (e.g. the session we had open before a project switch).
+        self._orphaned_tabs = {}
 
         for gi, group_node in enumerate(group_nodes):
             if gi >= len(restored_groups):
@@ -3335,25 +3701,45 @@ class MCAEditorPanel(QWidget):
 
                 if tab_type == "file":
                     file_path = tab_info.get("file_path", "")
+                    disk_content = None
+
                     if file_path and os.path.isfile(file_path):
-                        # Create editor directly to avoid signal cascade.
-                        editor = self._create_editor_for_restore(language)
                         try:
                             with open(file_path, "r", encoding="utf-8") as f:
-                                content = f.read()
-                            editor.file_path = file_path
-                            editor.setPlainText(content)
-                            editor.document().setModified(False)
+                                disk_content = f.read()
                         except Exception as exc:
-                            logger.warning("Session restore: %s", exc)
-                            continue
-                        icon = self._icon_for_language(language)
-                        group.add_editor(editor, title, file_path, icon)
-                        self._settings.add_recent_file(file_path)
-                        restored_count += 1
+                            logger.warning("Session restore, cannot read %s: %s",
+                                           file_path, exc)
+
+                    if disk_content is None:
+                        # The file is missing or unreadable right now.  Keep
+                        # the tab entry alive in the manifest instead of
+                        # dropping it, so a deleted-then-restored file or an
+                        # offline share doesn't silently cost the user a tab.
+                        self._remember_orphaned_tab(gi, tab_info)
+                        continue
+
+                    # Create editor directly to avoid signal cascade.
+                    editor = self._create_editor_for_restore(language)
+                    editor.file_path = file_path
+
+                    # A recovery snapshot that differs from what's on disk
+                    # means the previous session ended with unsaved edits
+                    # (crash, hard DCC exit).  Restore those edits and mark
+                    # the tab modified so the user sees the '*' and decides.
+                    recovered = self._recovered_content_for(file_path, disk_content)
+                    if recovered is not None:
+                        editor.setPlainText(recovered)
+                        editor.document().setModified(True)
+                        recovered_count += 1
                     else:
-                        logger.warning("Session restore: file not found: %s",
-                                       tab_info.get("file_path", ""))
+                        editor.setPlainText(disk_content)
+                        editor.document().setModified(False)
+
+                    icon = self._icon_for_language(language)
+                    group.add_editor(editor, title, file_path, icon)
+                    self._settings.add_recent_file(file_path)
+                    restored_count += 1
 
                 elif tab_type == "buffer":
                     buffer_file = tab_info.get("buffer_file")
@@ -3386,6 +3772,17 @@ class MCAEditorPanel(QWidget):
                         )
                         editor.file_path = buf_filepath
 
+                        # Same crash-recovery check as file tabs: a snapshot
+                        # that differs from the buffer file on disk is
+                        # unsaved work from a session that ended badly.
+                        recovered = self._recovered_content_for(
+                            buf_filepath, content
+                        )
+                        if recovered is not None:
+                            editor.setPlainText(recovered)
+                            editor.document().setModified(True)
+                            recovered_count += 1
+
                     icon = self._icon_for_language(language)
                     group.add_editor(editor, title, buf_filepath, icon)
                     restored_count += 1
@@ -3405,7 +3802,90 @@ class MCAEditorPanel(QWidget):
         total_groups = len(group_nodes)
         logger.info("Session restored: %d tab(s) in %d group(s)",
                      restored_count, total_groups)
+
+        # Tell the user plainly when unsaved work came back from a crash --
+        # the tabs carry a '*' but the reason for it is not obvious.
+        if recovered_count:
+            logger.info("Recovered unsaved changes in %d tab(s)", recovered_count)
+            self._show_status(
+                "Recovered unsaved changes in {} tab(s) from the previous "
+                "session".format(recovered_count),
+                duration_ms=8000,
+            )
+
+        orphan_total = sum(len(v) for v in self._orphaned_tabs.values())
+        if orphan_total:
+            logger.warning(
+                "%d tab(s) could not be opened (missing files) and will be "
+                "kept in the session for %d more day(s)",
+                orphan_total, ORPHAN_TAB_MAX_AGE_SECONDS // 86400,
+            )
+
         return restored_count > 0
+
+    def _remember_orphaned_tab(self, group_index, tab_info):
+        """
+        Keep a manifest tab entry alive when its file can't be opened.
+
+        Entries are stamped with the time they first went missing.  Once
+        that stamp is older than ``ORPHAN_TAB_MAX_AGE_SECONDS`` the entry
+        is dropped, so files the user genuinely deleted eventually stop
+        being carried forward.
+
+        :param int group_index: DFS index of the group the tab belonged to.
+        :param dict tab_info: The manifest tab entry that could not open.
+        """
+        file_path = tab_info.get("file_path", "")
+
+        # First time we noticed it missing wins, so the expiry clock starts
+        # at the original disappearance rather than resetting each launch.
+        unavailable_since = tab_info.get("unavailable_since")
+        if not isinstance(unavailable_since, (int, float)):
+            unavailable_since = time.time()
+
+        if time.time() - unavailable_since > ORPHAN_TAB_MAX_AGE_SECONDS:
+            logger.info("Dropping long-missing session tab: %s", file_path)
+            return
+
+        entry = dict(tab_info)
+        entry["unavailable_since"] = unavailable_since
+        self._orphaned_tabs.setdefault(group_index, []).append(entry)
+        logger.warning("Session restore: file not found, tab preserved: %s",
+                       file_path)
+
+    def _recovered_content_for(self, file_path, disk_content):
+        """
+        Return crash-recovery content for *file_path*, if it is newer.
+
+        A snapshot is only offered back when it actually differs from what
+        is on disk.  When it matches, the work was saved normally before
+        the editor closed and the snapshot is just stale -- it gets
+        cleaned up so it can't resurface later.
+
+        :param str file_path: Absolute path of the tab's backing file.
+        :param str disk_content: Content currently on disk for that file.
+        :return: Recovered text, or None when there is nothing to recover.
+        :rtype: str or None
+        """
+        try:
+            recovery = self._session_manager.load_recovery(file_path)
+        except Exception as exc:
+            logger.warning("Could not read recovery snapshot for %s: %s",
+                           file_path, exc)
+            return None
+
+        if not recovery:
+            return None
+
+        content, _meta = recovery
+
+        # Identical to disk -- nothing was lost, drop the stale snapshot.
+        if content == disk_content:
+            self._session_manager.clear_recovery(file_path)
+            return None
+
+        logger.info("Recovered unsaved changes for %s", file_path)
+        return content
 
     def _collect_group_nodes(self, node, result):
         """
@@ -4777,6 +5257,11 @@ class MCAEditorPanel(QWidget):
                 else QPlainTextEdit.LineWrapMode.NoWrap
             )
             self._output.set_line_wrap_mode(wrap_mode)
+
+        # Autosave interval / mode may have changed -- rebuild the timer so
+        # the new cadence takes effect without restarting the editor.
+        self._restart_autosave_timer()
+
         logger.info("Settings applied to running editors")
 
     # --- View handlers ---
@@ -5028,35 +5513,19 @@ class MCAEditorPanel(QWidget):
             )
             return
 
-        # Third check: on-disk cache from a previous Maya session.
-        # The module cache vanishes on Maya restart or plugin reload; the
-        # on-disk pickle survives both.  This is the layer that makes the
-        # user-visible rule "don't reindex on every open" hold even across
-        # Maya restarts, not just within one session.
+        # Third check: the on-disk cache from a previous DCC session.
+        #
+        # This used to happen right here on the main thread -- unpickle
+        # the cache, then walk the whole workspace to verify every mtime,
+        # and only then show the editor.  On a 26k-file project that was
+        # roughly five seconds of dead air before the window appeared,
+        # and it was paid on *every* open.
+        #
+        # The worker now does all of it (load, validate, refresh, save)
+        # on its own thread, so we hand it the cache path and return
+        # immediately.  The editor is interactive while the index
+        # catches up in the background.
         cache_path = self._get_index_cache_path(normalized)
-        if cache_path is not None:
-            disk_index = SymbolIndex.load_from_disk(cache_path)
-            if disk_index is not None:
-                # Validate on-disk mtimes against what's currently on the
-                # filesystem before trusting the cache.  If anything has
-                # changed (file edited, added, deleted), fall through and
-                # reindex instead of serving stale data.
-                if self._disk_cache_still_valid(disk_index, folders, excluded):
-                    logger.info("Restoring symbol index from disk cache — skipping re-index")
-                    self._symbol_index = disk_index
-                    self._indexed_folders = normalized
-                    self._completion_provider.set_symbol_index(self._symbol_index)
-                    # Seed the module cache so future opens in this session
-                    # hit the cheap module-level branch above.
-                    _cached_symbol_index = disk_index
-                    _cached_indexed_folders = normalized
-                    file_count = self._symbol_index.get_file_count()
-                    self.index_status_changed.emit(
-                        "Indexed {} files".format(file_count)
-                    )
-                    return
-                else:
-                    logger.info("Disk symbol index is stale — will reindex")
 
         # Cancel any previous indexing run first.
         self._stop_symbol_indexing()
@@ -5066,7 +5535,9 @@ class MCAEditorPanel(QWidget):
 
         self._symbol_index = SymbolIndex()
         self._completion_provider.set_symbol_index(self._symbol_index)
-        self._index_worker = IndexWorker(self._symbol_index, folders, excluded)
+        self._index_worker = IndexWorker(
+            self._symbol_index, folders, excluded, cache_path=cache_path,
+        )
         self._index_worker.start()
 
         # Poll progress every 500 ms from the main thread (no cross-thread signals).
@@ -5109,40 +5580,21 @@ class MCAEditorPanel(QWidget):
         digest = hashlib.sha1(key).hexdigest()[:16]
         return os.path.join(prefs_dir, "index_cache", "idx_{}.pkl".format(digest))
 
-    def _disk_cache_still_valid(self, disk_index, folders, excluded):
-        """
-        Return True if *disk_index* (freshly loaded from disk) still
-        matches what's on disk for the given workspace folders.
-
-        Wraps ``SymbolIndex.is_fresh_for`` in a try/except so a hiccup
-        during validation causes a clean reindex rather than raising
-        into the panel's init path.
-
-        :param SymbolIndex disk_index: Index instance loaded via
-            ``SymbolIndex.load_from_disk``.
-        :param list folders: Workspace folder paths to validate against.
-        :param set excluded: Folder names to skip (from project config).
-        :return: True if the cache can be reused as-is, False otherwise.
-        :rtype: bool
-        """
-        try:
-            return disk_index.is_fresh_for(folders, excluded)
-        except Exception as exc:
-            logger.warning("Symbol-index freshness check failed: %s", exc)
-            return False
-
     def _save_index_to_disk_if_ready(self):
         """
         Persist the current ``_symbol_index`` to the per-project cache
         file if it is in the ``ready`` state.
 
-        Called when indexing completes and on panel cleanup so the
-        index survives Maya restarts and plugin reloads -- not just
-        close/reopen within a single session.
+        Called from the cleanup path so edits made after the worker
+        finished still reach disk.  Skips the write entirely when the
+        index has not diverged from the pickle, which is the common case.
         """
         if self._symbol_index is None:
             return
         if self._symbol_index.get_state() != "ready":
+            return
+        # Nothing changed since the worker wrote it -- don't re-serialize.
+        if not self._symbol_index.is_dirty():
             return
         folders = getattr(self, "_indexed_folders", None)
         if not folders:
@@ -5203,10 +5655,11 @@ class MCAEditorPanel(QWidget):
                     and self._symbol_index.get_state() == "ready"):
                 _cached_symbol_index = self._symbol_index
                 _cached_indexed_folders = getattr(self, "_indexed_folders", None)
-                # Belt-and-braces: also persist to disk on shutdown in
-                # case _poll_index_progress never got a tick where it
-                # saw state=="ready" (e.g. a sub-500ms run to completion).
-                self._save_index_to_disk_if_ready()
+                # No disk write here.  The worker persists the cache when
+                # it finishes, and anything the user changed afterwards is
+                # a handful of files that the next launch reparses in
+                # milliseconds via the incremental refresh path.  Pickling
+                # the whole index on the close path just made closing slow.
 
             # Detach from this instance but don't destroy the data (it
             # lives on in the module-level cache now).
@@ -5236,6 +5689,13 @@ class MCAEditorPanel(QWidget):
             pct = int(done * 100 / total)
             self.index_status_changed.emit("Indexing {}%".format(pct))
 
+        elif state == "indexing":
+            # Total is still zero: the worker is reading the cache off
+            # disk or walking folders and has nothing to count yet.  Say
+            # so rather than leaving the indicator blank, which reads as
+            # "nothing is happening".
+            self.index_status_changed.emit("Indexing…")
+
         elif state == "ready":
             # Indexing is done — show final stats and stop the timer.
             file_count = self._symbol_index.get_file_count()
@@ -5261,9 +5721,11 @@ class MCAEditorPanel(QWidget):
             logger.info("Stashed symbol index in module cache (%d files)",
                         file_count)
 
-            # Persist to disk so it survives Maya restart / plugin
-            # reload, not just close-and-reopen within one session.
-            self._save_index_to_disk_if_ready()
+            # NOTE: the pickle is written by IndexWorker on its own
+            # thread once it finishes, and only when something actually
+            # changed.  Doing it here meant serializing tens of megabytes
+            # on the Qt main thread, which froze the editor for seconds
+            # the moment indexing completed.
 
     def _on_workspace_directory_changed(self, path):
         """
@@ -5918,15 +6380,28 @@ class MCAEditorPanel(QWidget):
         # Save modified file-backed tabs and the session manifest now.
         # Buffer content for unsaved tabs is also written here -- losing
         # those would be visible data loss.
+        # Stop the periodic timers first so nothing writes underneath the
+        # final flush below.
+        for timer_name in ("_autosave_timer", "_session_save_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
         for editor, name, path in self._group_container.all_editors():
             if editor.file_path and editor.document().isModified():
-                try:
-                    if os.path.exists(editor.file_path) and not os.access(editor.file_path, os.W_OK):
-                        os.chmod(editor.file_path, stat.S_IWRITE | stat.S_IREAD)
-                    with open(editor.file_path, "w", encoding="utf-8") as f:
-                        f.write(editor.toPlainText())
-                except Exception as exc:
-                    logger.warning("Failed to save tab on close: %s", exc)
+                # atomic_write clears the read-only attribute itself and
+                # can't leave a truncated file if the host dies mid-write.
+                if atomic_write(editor.file_path, editor.toPlainText()):
+                    self._session_manager.clear_recovery(editor.file_path)
+                else:
+                    # Couldn't reach the real file -- fall back to a
+                    # recovery snapshot so the edits survive to next launch.
+                    logger.warning("Failed to save tab on close: %s",
+                                   editor.file_path)
+                    self._save_recovery_snapshot(editor)
             elif not path:
                 self._save_buffer_content(editor)
         self._save_session_manifest()
@@ -6054,7 +6529,11 @@ class MCAEditorPanel(QWidget):
             try:
                 if (sym_idx is not None
                         and sym_idx.get_state() == "ready"
-                        and idx_folders):
+                        and idx_folders
+                        and sym_idx.is_dirty()):
+                    # Only when the user actually changed indexed files
+                    # this session -- otherwise the worker's copy on disk
+                    # is already current and rewriting it is wasted I/O.
                     path = get_path_fn(idx_folders)
                     if path:
                         sym_idx.save_to_disk(path)

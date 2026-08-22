@@ -27,6 +27,7 @@ import logging
 import os
 import platform
 import socket
+import threading
 import time
 import uuid
 
@@ -56,6 +57,16 @@ _TOKEN_FILENAME = "activation_token.json"
 
 # HTTP request timeout in seconds.
 _HTTP_TIMEOUT = 10
+
+# Timeout for the one server call that can happen on the launch path
+# (re-validating an activation token whose grace period has lapsed).
+# That call blocks the editor from opening, so it gets a much tighter
+# budget than the interactive activation flows -- an unreachable or slow
+# license server must not cost the user ten seconds of staring at Maya
+# before the editor appears.  On timeout the existing "network error ->
+# allow continued use" branch takes over, so behaviour is unchanged
+# apart from how long we are willing to wait.
+_LAUNCH_HTTP_TIMEOUT = 3
 
 
 # ============================================================================
@@ -262,7 +273,7 @@ _SSL_CONTEXT = None
 _SSL_CONTEXT_INITIALIZED = False
 
 
-def _post_json(url, payload):
+def _post_json(url, payload, timeout=None):
     """
     Send a JSON POST request to the license server.
 
@@ -276,9 +287,15 @@ def _post_json(url, payload):
 
     :param str url: Full URL to POST to
     :param dict payload: JSON-serializable payload
+    :param float timeout: Socket timeout in seconds.  Defaults to
+        ``_HTTP_TIMEOUT``; callers on a latency-sensitive path (startup)
+        pass ``_LAUNCH_HTTP_TIMEOUT`` instead.
     :return: Tuple of (status_code, response_dict) or (None, None) on failure
     :rtype: tuple
     """
+    if timeout is None:
+        timeout = _HTTP_TIMEOUT
+
     global _SSL_CONTEXT, _SSL_CONTEXT_INITIALIZED
 
     import urllib.request
@@ -301,9 +318,9 @@ def _post_json(url, payload):
         # Pass the SSL context if we built one, otherwise let urllib
         # use its default (works fine on Windows).
         if _SSL_CONTEXT is not None:
-            resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT, context=_SSL_CONTEXT)
+            resp = urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT)
         else:
-            resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT)
+            resp = urllib.request.urlopen(req, timeout=timeout)
         status = resp.status
         resp_data = json.loads(resp.read().decode("utf-8"))
         return status, resp_data
@@ -366,7 +383,7 @@ def validate_on_launch(version, product="maya"):
             srv_status, srv_data = _post_json(_VALIDATE_URL, {
                 "key": stored_key,
                 "activation_token": cached["activation_token"],
-            })
+            }, timeout=_LAUNCH_HTTP_TIMEOUT)
 
             if srv_status == 200 and srv_data and srv_data.get("valid"):
                 # Server confirmed — update last_validated.
@@ -406,7 +423,16 @@ def validate_on_launch(version, product="maya"):
         # silently in the background.
         stored_key = settings.get("license_key", "")
         if stored_key:
-            _try_auto_activate(stored_key)
+            # Genuinely fire-and-forget.  Nothing below reads the result,
+            # but the call was running inline on Maya's main thread, so a
+            # slow or unreachable license server delayed the editor from
+            # opening by up to the full HTTP timeout for no benefit.
+            threading.Thread(
+                target=_try_auto_activate,
+                args=(stored_key,),
+                name="mca-auto-activate",
+                daemon=True,
+            ).start()
 
         logger.debug("validate_on_launch: licensed, no cached token (legacy key)")
         return ActivationResult(

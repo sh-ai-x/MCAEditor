@@ -345,6 +345,49 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(mw_group)
 
+        # -- Autosave & Crash Recovery group --
+        # Recovery snapshots are shadow copies kept outside the user's
+        # files, so they are safe to leave on.  Writing straight to the
+        # real file is a separate, opt-in switch because it silently
+        # overwrites source and re-triggers module auto-reload.
+        as_group = QGroupBox("Autosave and Crash Recovery")
+        as_layout = QVBoxLayout(as_group)
+        as_layout.setSpacing(6)
+
+        self._chk_autosave_enabled = QCheckBox(
+            "Keep crash-recovery snapshots of unsaved changes"
+        )
+        self._chk_autosave_enabled.setToolTip(
+            "Periodically saves a shadow copy of every modified tab.\n"
+            "Your files are never modified. If the editor or the DCC\n"
+            "crashes, the unsaved changes are restored on next launch."
+        )
+        as_layout.addWidget(self._chk_autosave_enabled)
+
+        self._chk_autosave_to_file = QCheckBox(
+            "Also write modified tabs directly to disk"
+        )
+        self._chk_autosave_to_file.setToolTip(
+            "Writes modified tabs to their real file on the autosave\n"
+            "interval, without waiting for Ctrl+S. Overwrites source\n"
+            "files in place. Modules are not auto-reloaded by autosave --\n"
+            "only by an explicit save or execute."
+        )
+        as_layout.addWidget(self._chk_autosave_to_file)
+
+        # Interval row.
+        as_row = QHBoxLayout()
+        as_row.addWidget(QLabel("Autosave interval:"))
+        self._spin_autosave_interval = QSpinBox()
+        self._spin_autosave_interval.setRange(5, 600)
+        self._spin_autosave_interval.setSingleStep(5)
+        self._spin_autosave_interval.setSuffix(" seconds")
+        as_row.addWidget(self._spin_autosave_interval)
+        as_row.addStretch()
+        as_layout.addLayout(as_row)
+
+        layout.addWidget(as_group)
+
         # -- Tabs group --
         tb_group = QGroupBox("Tabs")
         tb_layout = QVBoxLayout(tb_group)
@@ -1253,6 +1296,15 @@ class SettingsDialog(QDialog):
         self._chk_confirm_close_buffer.setChecked(s.get("confirm_close_buffer"))
         self._chk_confirm_unsaved.setChecked(s.get("confirm_unsaved_on_exit"))
 
+        # Autosave & crash recovery.
+        self._chk_autosave_enabled.setChecked(s.get("autosave_enabled"))
+        self._chk_autosave_to_file.setChecked(s.get("autosave_to_file"))
+        try:
+            interval = int(s.get("autosave_interval_secs"))
+        except (TypeError, ValueError):
+            interval = 15
+        self._spin_autosave_interval.setValue(max(5, min(interval, 600)))
+
         # Tab Bar.
         self._chk_show_tab_bar.setChecked(s.get("show_tab_bar"))
         self._chk_show_close_btn.setChecked(s.get("show_close_button_on_tab"))
@@ -1350,6 +1402,11 @@ class SettingsDialog(QDialog):
         s.set("always_show_editor_output", self._chk_always_show.isChecked())
         s.set("confirm_close_buffer", self._chk_confirm_close_buffer.isChecked())
         s.set("confirm_unsaved_on_exit", self._chk_confirm_unsaved.isChecked())
+
+        # Autosave & crash recovery.
+        s.set("autosave_enabled", self._chk_autosave_enabled.isChecked())
+        s.set("autosave_to_file", self._chk_autosave_to_file.isChecked())
+        s.set("autosave_interval_secs", self._spin_autosave_interval.value())
 
         # Tab Bar.
         s.set("show_tab_bar", self._chk_show_tab_bar.isChecked())

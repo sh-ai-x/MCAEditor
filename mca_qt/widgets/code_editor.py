@@ -1648,20 +1648,40 @@ class MCACodeEditor(QPlainTextEdit):
 
         Preserves the current line's indentation and adds an extra
         indent level after colons (Python) or opening braces (MEL).
+
+        Only the text to the *left* of the cursor is considered.  Using
+        the whole line meant pressing Enter at the start of a ``def`` or
+        ``class`` line indented that line -- the block-opener check saw
+        the trailing colon even though the cursor was nowhere near it, so
+        a blank line inserted above a definition shoved the definition
+        one level to the right.
         """
         cursor = self.textCursor()
-        block_text = cursor.block().text()
 
-        # Capture current indentation.
+        if cursor.hasSelection():
+            # The selection is about to be replaced, so the new line
+            # starts where the selection starts -- that position decides
+            # the indentation, not wherever the cursor happens to sit.
+            probe = QTextCursor(self.document())
+            probe.setPosition(cursor.selectionStart())
+            block_text = probe.block().text()
+            column = probe.positionInBlock()
+        else:
+            block_text = cursor.block().text()
+            column = cursor.positionInBlock()
+
+        text_before = block_text[:column]
+
+        # Capture the indentation of the text that stays on this line.
         indent = ""
-        for ch in block_text:
+        for ch in text_before:
             if ch in " \t":
                 indent += ch
             else:
                 break
 
         # Check if we need to increase indent after a block opener.
-        stripped = block_text.rstrip()
+        stripped = text_before.rstrip()
         if self._language == "python" and stripped.endswith(":"):
             # Python: increase indent after colon.
             if self._use_spaces:

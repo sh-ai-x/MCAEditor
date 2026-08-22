@@ -63,6 +63,19 @@ class MCASettings:
         "confirm_unsaved_on_exit": True,     # Show unsaved-files dialog on exit.
         "restore_session": True,
 
+        # --- Autosave / Crash Recovery ---
+        # Recovery snapshots are shadow copies of modified tabs kept in
+        # mca_preferences/<dcc>/recovery/.  They never touch the user's real
+        # file, so they are safe to leave on by default; on the next launch a
+        # snapshot that differs from its file is restored into the tab as
+        # unsaved work rather than being silently discarded.
+        "autosave_enabled": True,            # Write crash-recovery snapshots.
+        "autosave_interval_secs": 15,        # Seconds between autosave passes.
+        # Opt-in: also write modified tabs straight to their real file on the
+        # same timer.  Off by default because it silently overwrites source
+        # files and re-triggers module auto-reload.
+        "autosave_to_file": False,
+
         # --- General (Tab Bar) ---
         "show_tab_bar": True,                # Display the tab bar above the editor.
         "show_close_button_on_tab": True,    # Show per-tab close buttons.
