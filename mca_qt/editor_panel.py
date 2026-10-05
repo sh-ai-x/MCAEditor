@@ -1282,8 +1282,6 @@ class MCAEditorPanel(QWidget):
         help_menu.addSeparator()
 
         # --- About / licensing ---
-        self._create_action(help_menu, "Licensing...",
-                            callback=self._show_licensing)
         self._create_action(help_menu, "About MCA Editor",
                             callback=self._show_about)
 
@@ -6268,11 +6266,6 @@ class MCAEditorPanel(QWidget):
         # Pre-select "General Feedback" in the category combo.
         dialog._category_combo.setCurrentIndex(2)
         dialog.exec()
-
-    def _show_licensing(self):
-        """Open the new 3-tab licensing dialog from Help > Licensing."""
-        from mca_qt.widgets.licensing_dialog import LicensingDialog
-        LicensingDialog.open_from_menu(parent=self, settings=self._settings)
 
     def _show_about(self):
         """Display the About dialog with version and feature info."""

@@ -34,19 +34,6 @@ from mca_core.venv_manager import setup_venv, get_venv_python
 # Module-level logger.
 logger = logging.getLogger(__name__)
 
-# --- Activation Module (optional, safe import) ------------------------------
-# The activation module wraps license.py with the API surface needed for
-# online activation.  If it's not compiled/available yet, the existing
-# license gate in show_mca_editor() still works as a fallback.
-try:
-    from mca_core.activation import (
-        validate_on_launch,
-        get_trial_status as activation_trial_status,
-    )
-    HAS_ACTIVATION = True
-except ImportError:
-    HAS_ACTIVATION = False
-
 # --- Silence MCA INFO/DEBUG Logging in the UI --------------------------------
 # Every mca_* module uses logging.getLogger(__name__), which means their
 # loggers are children of "mca_core", "mca_qt", and "mca_maya".  By
@@ -287,54 +274,6 @@ def _open_editor_window():
 
 # --- License Check on Startup -----------------------------------------------
 
-def _run_license_check():
-    """
-    Validate the license on startup and decide what to do.
-
-    Called via ``maya.utils.executeDeferred`` from ``initializePlugin()``.
-    Replaces the old ``_queue_auto_open()`` as the first-stage deferred
-    call.
-
-    Decision tree:
-        1. No activation module -> fall through to existing behavior
-        2. Licensed -> open editor if ``editor_was_open``
-        3. Trial active -> open editor + show banner if <= 7 days
-        4. Trial expired + no license -> show licensing dialog
-    """
-    if not HAS_ACTIVATION:
-        # activation.py not compiled yet — fall through to existing
-        # behavior.  The inline license gate in show_mca_editor() still
-        # works (license.py).
-        logger.debug("_run_license_check: HAS_ACTIVATION=False, using legacy path")
-        _queue_auto_open_inner()
-        return
-
-    # Validate via the activation module.
-    result = validate_on_launch(PLUGIN_VERSION, product="maya")
-
-    if result.success:
-        # Licensed — open editor normally (respecting editor_was_open).
-        _queue_auto_open_inner()
-        if result.status == "offline":
-            cmds.inViewMessage(msg=result.message, pos="topCenter", fade=True)
-        return
-
-    # Not licensed — check trial status.
-    trial = activation_trial_status()
-
-    if trial["active"]:
-        # Trial still running — open editor with trial indicator in status bar.
-        _queue_auto_open_inner()
-        _queue_trial_banner(trial["days_remaining"])
-        return
-
-    # Trial expired + no valid license — show licensing dialog, block editor.
-    # Defer to evalDeferred(lowestPriority=True) so the dialog doesn't pop
-    # up DURING Maya startup — a modal dialog at executeDeferred timing
-    # halts the Maya loading sequence (workspace restore, UI layout, etc.).
-    _queue_licensing_dialog(reason=result.status, message=result.message)
-
-
 def _queue_auto_open_inner():
     """
     Check ``editor_was_open`` and queue ``_open_editor_window()`` at
@@ -353,133 +292,6 @@ def _queue_auto_open_inner():
             lowestPriority=True,
         )
 
-
-# Module-level storage for the deferred licensing dialog callback.
-# Same pattern as _pending_trial_banner_fn — the closure captures reason
-# and message, then evalDeferred calls _run_pending_licensing_dialog().
-_pending_licensing_dialog_fn = None
-
-
-def _queue_licensing_dialog(reason, message):
-    """
-    Defer the licensing dialog to ``evalDeferred(lowestPriority=True)``.
-
-    A modal dialog shown during ``executeDeferred`` timing blocks Maya's
-    startup sequence (workspace restore, UI layout, etc.).  Deferring to
-    lowest priority lets Maya finish loading first.
-
-    Uses the same module-level closure pattern as
-    :func:`_queue_trial_banner` so that the string-based evalDeferred
-    can call back into Python with the captured arguments.
-
-    :param str reason: Machine-readable reason code (e.g. ``"not_activated"``).
-    :param str message: Human-readable message for the dialog header.
-    """
-    global _pending_licensing_dialog_fn
-    _pending_licensing_dialog_fn = lambda: _show_licensing_dialog(reason, message)
-    cmds.evalDeferred(
-        "from mca_maya.plugin_main import _run_pending_licensing_dialog; "
-        "_run_pending_licensing_dialog()",
-        lowestPriority=True,
-    )
-
-
-def _run_pending_licensing_dialog():
-    """
-    Execute the stored licensing dialog callback.
-
-    Called via ``evalDeferred`` from ``_queue_licensing_dialog()``.
-    """
-    global _pending_licensing_dialog_fn
-    if _pending_licensing_dialog_fn is not None:
-        _pending_licensing_dialog_fn()
-        _pending_licensing_dialog_fn = None
-
-
-def _show_licensing_dialog(reason, message):
-    """
-    Show the licensing dialog modally, blocking editor startup.
-
-    Imports and opens :class:`LicensingDialog` from the new licensing
-    dialog module.  The dialog's ``_on_success()`` method handles
-    opening the editor after successful activation.
-
-    :param str reason: Machine-readable reason code (e.g. ``"not_activated"``).
-    :param str message: Human-readable message for the dialog header.
-    """
-    try:
-        from mca_qt.widgets.licensing_dialog import LicensingDialog
-        from mca_core.config.settings import MCASettings
-
-        _app = "MCAEditor-Maya{}".format(_maya_version) if _maya_version else "MCAEditor"
-        settings = MCASettings(app_name=_app)
-
-        # Get the Maya main window as parent for proper modality.
-        parent = None
-        try:
-            from mca_maya.maya_window import get_maya_main_window
-            parent = get_maya_main_window()
-        except Exception:
-            pass
-
-        dlg = LicensingDialog(
-            parent=parent,
-            modal=True,
-            reason=reason,
-            message=message,
-            settings=settings,
-        )
-        dlg.exec()
-    except Exception as exc:
-        logger.warning("Could not show licensing dialog: %s", exc)
-
-
-def _queue_trial_banner(days_remaining):
-    """
-    Queue a deferred call to show the trial banner on the editor panel.
-
-    The banner is shown after the editor window is created, so this
-    must run at lowest priority (after ``_open_editor_window``).
-
-    :param int days_remaining: Days remaining in the trial period.
-    """
-    def _show_banner():
-        """Find the editor window and show the trial indicator."""
-        try:
-            from mca_maya import maya_window as _mw
-            window = _mw._mca_editor_window
-            if window is not None and hasattr(window, 'show_trial_indicator'):
-                window.show_trial_indicator(days_remaining)
-        except Exception as exc:
-            logger.debug("Could not show trial indicator: %s", exc)
-
-    # Store the closure at module level so the deferred string can call it.
-    global _pending_trial_banner_fn
-    _pending_trial_banner_fn = _show_banner
-    cmds.evalDeferred(
-        "from mca_maya.plugin_main import _run_pending_trial_banner; "
-        "_run_pending_trial_banner()",
-        lowestPriority=True,
-    )
-
-# Module-level reference for the deferred trial banner callback.
-_pending_trial_banner_fn = None
-
-
-def _run_pending_trial_banner():
-    """
-    Execute the stored trial banner callback.
-
-    Called via ``evalDeferred`` from ``_queue_trial_banner()``.
-    The callback is a closure that captures ``days_remaining``.
-    """
-    global _pending_trial_banner_fn
-    if _pending_trial_banner_fn is not None:
-        _pending_trial_banner_fn()
-        _pending_trial_banner_fn = None
-
-
-# --- First-Launch Splash Screen ---------------------------------------------
 
 def _first_launch_setup():
     """
@@ -779,14 +591,13 @@ def initializePlugin(plugin):
     # --- License check + auto-open editor ------------------------------------
     # Two-stage deferred so the editor opens AFTER Maya's main window:
     #   1. executeDeferred (_run_license_check) — validates license, checks
-    #      trial status, and decides whether to open the editor or show
     #      the licensing dialog
     #   2. evalDeferred (string, lowestPriority) — opens editor after ALL
     #      other startup tasks including workspace restore and UI layout
     #
     # cleanup_editor() deliberately does NOT clear editor_was_open, so
     # if the editor is still open at Maya shutdown, it will reopen.
-    maya.utils.executeDeferred(_run_license_check)
+    maya.utils.executeDeferred(_queue_auto_open_inner)
 
     logger.info("%s v%s loaded", PLUGIN_NAME, PLUGIN_VERSION)
     om2.MGlobal.displayInfo("{} v{} loaded".format(PLUGIN_NAME, PLUGIN_VERSION))

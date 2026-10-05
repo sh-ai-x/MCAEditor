@@ -1288,16 +1288,6 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
         self._index_label.setStyleSheet(label_style)
         bar_layout.addWidget(self._index_label)
 
-        # Trial days remaining indicator — checks license status at build
-        # time and shows the indicator if the user is on a trial (no key).
-        # Yellow for > 5 days, red for <= 5 days.
-        self._trial_indicator = QLabel("")
-        self._trial_indicator.setVisible(False)
-        bar_layout.addWidget(self._trial_indicator)
-
-        # Check trial status now and show indicator if applicable.
-        self._check_trial_for_status_bar()
-
         # Status message area (stretches to fill remaining space between
         # the left-side info labels and the right-side position/lang labels).
         self._status_message_label = QLabel("")
@@ -1378,61 +1368,6 @@ class MCAMayaWindow(MayaQWidgetDockableMixin, QWidget):
     def _toggle_status_bar(self):
         """Toggle visibility of the bottom blue status bar."""
         self._status_bar.setVisible(not self._status_bar.isVisible())
-
-    def show_trial_indicator(self, days_remaining):
-        """
-        Show the trial days-remaining indicator in the status bar.
-
-        Uses yellow text for > 5 days remaining and red for <= 5 days
-        to create urgency as the trial nears expiration.
-
-        :param int days_remaining: Days left in the trial period.
-        """
-        if days_remaining <= 5:
-            color = "#ff4444"
-        else:
-            color = "#ffcc00"
-
-        self._trial_indicator.setText(
-            "TRIAL: {} days left".format(days_remaining)
-        )
-        self._trial_indicator.setStyleSheet(
-            "color: {}; padding: 0 8px; font-size: 11px; font-weight: bold;"
-            .format(color)
-        )
-        self._trial_indicator.setVisible(True)
-
-    def _check_trial_for_status_bar(self):
-        """
-        Check license/trial status and show the trial indicator if needed.
-
-        Called once during ``_build_status_bar()``.  If the user has a
-        valid license key, the indicator stays hidden.  If on trial,
-        shows the days remaining with urgency-based coloring.
-        """
-        try:
-            from mca_core.license import check_license
-            from mca_core.config.settings import MCASettings
-            import maya.cmds as _cmds
-
-            # Get Maya version directly — avoids cross-module global import
-            # issues with compiled .pyd modules.
-            maya_ver = _cmds.about(version=True)
-            _app = "MCAEditor-Maya{}".format(maya_ver) if maya_ver else "MCAEditor"
-            settings = MCASettings(app_name=_app)
-            status = check_license(settings)
-
-            # Show indicator when on trial OR when trial expired (no license).
-            # Hide it when the user is licensed (e.g. after mid-session activation).
-            if status["licensed"]:
-                self._trial_indicator.setVisible(False)
-            elif status["trial"]:
-                self.show_trial_indicator(status["days_remaining"])
-            elif status["needs_key"]:
-                # Trial expired — show 0 days to make it obvious.
-                self.show_trial_indicator(0)
-        except Exception as exc:
-            logger.warning("Trial status bar check failed: %s", exc)
 
     def _on_counts_changed(self, errors, warnings):
         """
@@ -1657,36 +1592,6 @@ def show_mca_editor():
         cmds.deleteUI(WORKSPACE_CONTROL_NAME)
         logger.info("Deleted stale workspace control: %s", WORKSPACE_CONTROL_NAME)
 
-    # --- License gate ---
-    # Check license status before creating the editor.  If the trial has
-    # expired and no valid key exists, show the license dialog.  If the
-    # user cancels, abort opening — don't kill Maya, just don't show the
-    # editor.
-    from mca_core.license import check_license
-    from mca_qt.widgets.license_dialog import LicenseDialog
-
-    # Use version-specific settings for the license check too.
-    from mca_maya.plugin_main import _maya_version as _mv
-    _lc_tag = "Maya{}".format(_mv) if _mv else None
-    _lc_app = "MCAEditor-{}".format(_lc_tag) if _lc_tag else "MCAEditor"
-    _license_settings = MCASettings(app_name=_lc_app)
-    license_status = check_license(_license_settings)
-
-    if license_status["needs_key"]:
-        # Trial expired, no valid key — must enter one to proceed.
-        dialog = LicenseDialog(_license_settings)
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            # User cancelled — don't open the editor, but don't kill Maya.
-            logger.info("License dialog cancelled — editor not opened")
-            return
-        # Re-check after dialog in case they entered a valid key.
-        license_status = check_license(_license_settings)
-
-    # Capture the license message for the status bar (trial or licensed).
-    _license_message = license_status.get("message", "")
-    _show_license_notice = license_status.get("trial", False)
-
     # Kick off MCP server deployment in the background (idempotent).
     # This is also done in plugin_main.initializePlugin(), but when the
     # editor is launched via show_mca_editor() directly (without the
@@ -1751,11 +1656,7 @@ def show_mca_editor():
     QTimer.singleShot(0, _reveal_first_show)
 
     # Record that the editor is now open so it auto-opens on next Maya launch.
-    MCASettings(app_name=_lc_app).set("editor_was_open", True)
-
-    # Show trial notice on the Maya status bar if in trial mode.
-    if _show_license_notice and _license_message:
-        _mca_editor_window._on_status_message(_license_message, 10000)
+    MCASettings(app_name=_app_name).set("editor_was_open", True)
 
     # --- One-time update check -----------------------------------------------
     # Check if a newer version is available (background thread, non-blocking).

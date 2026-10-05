@@ -66,3 +66,12 @@ website/site/
 
 # --- MkDocs social-plugin build cache (regenerated on every build) ---
 .cache/
+
+# --- Secrets: .env the FILE, not just .env/ the directory ---
+.env
+.env.*
+!.env.example
+
+# --- Never again: issued keys and any local key store ---
+lifetime_keys.txt
+*.key

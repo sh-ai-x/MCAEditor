@@ -905,9 +905,6 @@ class MCAMainWindow(QMainWindow):
 
         help_menu.addSeparator()
 
-        licensing = help_menu.addAction("Licensing...")
-        licensing.setStatusTip("View licensing information for MCA Editor")
-        licensing.triggered.connect(self._show_licensing)
 
         about_action = help_menu.addAction("About MCA Editor")
         about_action.setStatusTip("Show version and build information")

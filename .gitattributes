@@ -1,0 +1,11 @@
+# Normalise line endings so a clone on another OS does not show every file as
+# modified. This repo had 114 files differing by nothing but CRLF/LF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
+*.mll binary
+*.pyd binary

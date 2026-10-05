@@ -460,7 +460,7 @@ def _set_owner_window(qt_hwnd, owner_hwnd):
 # Step 5: Create the MCA Editor with Blender as owner window
 # ============================================================================
 
-def _launch_editor(show_license_dialog=True):
+def _launch_editor():
     """
     Create the MCA Editor panel as a free-floating Qt window above Blender.
 
@@ -468,10 +468,6 @@ def _launch_editor(show_license_dialog=True):
     only — not above every application on the desktop. Falls back to
     WindowStaysOnTopHint if no Blender HWND can be found.
 
-    :param bool show_license_dialog: If True, show the licensing dialog
-        when the license is expired. Set to False for auto_launch so that
-        an expired license silently skips instead of popping up a dialog
-        during Blender startup.
     :return: True if the editor was created successfully.
     :rtype: bool
     """
@@ -519,85 +515,6 @@ def _launch_editor(show_license_dialog=True):
 
     # Pass dcc_version so QSettings is isolated from Maya's / UE's settings.
     settings = MCASettings(dcc_version="Blender")
-
-    # --- License gate -------------------------------------------------------
-    _license_message = ""
-    _has_activation = False
-
-    try:
-        from mca_core.activation import (
-            validate_on_launch,
-            get_trial_status as activation_trial_status,
-        )
-        _has_activation = True
-    except ImportError:
-        _bl_log("activation module not available — using offline license check")
-
-    if _has_activation:
-        # Server-based activation path.
-        from mca_core import __version__ as _plugin_version
-        _bl_log("Running activation check (product=blender)...")
-        result = validate_on_launch(_plugin_version, product="blender")
-
-        if result.success:
-            _bl_log("License valid: {} (status={})".format(result.message, result.status))
-        else:
-            trial = activation_trial_status(product="blender")
-            if trial["active"]:
-                _license_message = "Trial ({} days remaining)".format(trial["days_remaining"])
-                _bl_log("Trial mode: {}".format(_license_message))
-            else:
-                if not show_license_dialog:
-                    _bl_log("License expired — skipping auto-launch (no dialog)")
-                    return False
-                from mca_qt.widgets.licensing_dialog import LicensingDialog
-                _bl_log("Trial expired — showing licensing dialog")
-                dlg = LicensingDialog(
-                    parent=None, modal=True,
-                    reason=result.status, message=result.message,
-                    settings=settings,
-                )
-                dlg.exec()
-                from mca_core.license import check_license
-                license_status = check_license(settings)
-                if license_status["needs_key"]:
-                    _bl_log_warning("No valid license after dialog — aborting")
-                    return False
-                _bl_log("License activated via dialog")
-    else:
-        # Offline-only fallback.
-        from mca_core.license import check_license
-        license_status = check_license(settings)
-
-        if license_status["needs_key"]:
-            if not show_license_dialog:
-                _bl_log("License expired — skipping auto-launch (no dialog)")
-                return False
-            from mca_qt.widgets.licensing_dialog import LicensingDialog
-            _bl_log("Trial expired — showing licensing dialog")
-            dlg = LicensingDialog(
-                parent=None, modal=True,
-                reason="not_activated",
-                message=license_status["message"],
-                settings=settings,
-            )
-            dlg.exec()
-            license_status = check_license(settings)
-            if license_status["needs_key"]:
-                _bl_log_warning("No valid license after dialog — aborting")
-                return False
-
-        if license_status["trial"]:
-            _license_message = license_status["message"]
-            _bl_log("Trial mode: {}".format(_license_message))
-        elif license_status["licensed"]:
-            _bl_log("License valid: {}".format(license_status["message"]))
-
-    # --- Create adapter manager with internal Blender adapter ---------------
-    adapter_manager = AdapterManager(register_builtin=False)
-    internal_adapter = InternalBlenderAdapter()
-    adapter_manager.register_adapter_instance("blender_internal", internal_adapter)
-    _bl_log("Internal Blender adapter registered")
 
     # Create with dcc_version="Blender" for session isolation.
     from PySide6.QtWidgets import QVBoxLayout, QMenuBar, QWidget
@@ -649,12 +566,6 @@ def _launch_editor(show_license_dialog=True):
 
     # Remove MEL-related UI elements and add Blender doc links.
     _strip_mel_from_ui(panel, _menubar)
-
-    # --- Show license/trial notice on the status bar -------------------------
-    if _license_message:
-        from PySide6.QtCore import QTimer
-        _msg = _license_message
-        QTimer.singleShot(500, lambda: panel._show_status(_msg, 10000))
 
     # --- Install stdout/stderr tees -----------------------------------------
     _original_stdout = sys.stdout
@@ -1128,7 +1039,7 @@ def auto_launch():
         was_open, _ = _load_persistent_state()
         if was_open:
             _bl_log("Auto-launching editor (was open in previous Blender session)")
-            return _launch_editor(show_license_dialog=False)
+            return _launch_editor()
         else:
             _bl_log("Auto-launch skipped (editor was not open in previous session)")
             return False

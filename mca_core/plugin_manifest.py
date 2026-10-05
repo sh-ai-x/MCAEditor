@@ -3,7 +3,7 @@ MCA Core - Plugin Manifest Verification.
 
 Handles loading and verifying ``plugin_manifest.json`` files for the
 plugin monetization system.  Each manifest contains metadata about the
-plugin's pricing model and is signed with an HMAC-SHA256 signature so
+plugin's identity and is signed with an HMAC-SHA256 signature so
 the editor can reject tampered manifests.
 
 A plugin WITHOUT a ``plugin_manifest.json`` is treated as a legacy
@@ -53,11 +53,7 @@ class PluginManifest:
         self.display_name = ""          # Human-readable name for UI display.
         self.version = ""               # Semantic version of the plugin.
         self.author = ""                # Author / publisher name.
-        self.developer_id = ""          # Developer account ID in the marketplace.
-        # Pricing is a nested dict matching the JSON schema:
-        #   {"model": "free"|"paid"|"subscription",
-        #    "gumroad_permalink": "...", "purchase_url": "..."}
-        self.pricing = {}
+        self.developer_id = ""          # Developer account ID, if the plugin declares one.
         self.entry_point = ""           # Python entry point file (e.g. "__init__.py").
         self.min_mca_version = ""       # Minimum MCA Editor version required.
         self.mca_signature = ""         # Base64-encoded HMAC-SHA256 signature.
@@ -105,14 +101,6 @@ def load(plugin_dir):
     manifest.author = data.get("author", "")
     manifest.developer_id = data.get("developer_id", "")
 
-    # Pricing lives in a nested object in the JSON schema.
-    pricing_data = data.get("pricing", {})
-    manifest.pricing = {
-        "model": pricing_data.get("model", ""),
-        "gumroad_permalink": pricing_data.get("gumroad_permalink", ""),
-        "purchase_url": pricing_data.get("purchase_url", ""),
-    }
-
     manifest.entry_point = data.get("entry_point", "")
     manifest.min_mca_version = data.get("min_mca_version", "")
     manifest.mca_signature = data.get("mca_signature", "")
@@ -139,8 +127,6 @@ def _canonical_json(manifest):
     :rtype: str
     """
     # Build a dict of all signable fields (everything except the signature).
-    # The "pricing" key is a nested dict — json.dumps with sort_keys handles
-    # nested dicts deterministically.
     fields = {
         "manifest_version": manifest.manifest_version,
         "plugin_id": manifest.plugin_id,
@@ -148,7 +134,6 @@ def _canonical_json(manifest):
         "version": manifest.version,
         "author": manifest.author,
         "developer_id": manifest.developer_id,
-        "pricing": manifest.pricing,
         "entry_point": manifest.entry_point,
         "min_mca_version": manifest.min_mca_version,
     }

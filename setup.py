@@ -140,8 +140,6 @@ def collect_extensions():
         os.path.join("mca_qt", "widgets", "ai_panel.py"),                 # QFrame/QWidget + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "connection_dialog.py"),        # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "create_project_dialog.py"),    # QDialog + PySide2 Shiboken2
-        os.path.join("mca_qt", "widgets", "license_dialog.py"),           # QDialog + PySide2 Shiboken2
-        os.path.join("mca_qt", "widgets", "licensing_dialog.py"),        # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "new_tab_dialog.py"),           # QDialog + PySide2 Shiboken2
         os.path.join("mca_qt", "widgets", "project_settings_dialog.py"),  # QDialog + PySide2 Shiboken2
         # --- AI Chat plugin ---
@@ -213,7 +211,7 @@ def collect_extensions():
     extensions = []
     for filepath in py_files:
         # Convert file path to dotted module name.
-        # e.g. "mca_core/license.py" → "mca_core.license"
+        # e.g. "mca_core/settings.py" → "mca_core.settings"
         mod_name = filepath.replace(os.sep, ".").replace("/", ".")[:-3]
         ext = Extension(
             mod_name,

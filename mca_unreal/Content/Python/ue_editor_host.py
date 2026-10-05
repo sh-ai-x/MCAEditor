@@ -608,7 +608,7 @@ def _ensure_remote_execution():
 # Step 5: Create the MCA Editor with UE as owner window
 # ============================================================================
 
-def _launch_editor(ue_hwnd=0, show_license_dialog=True):
+def _launch_editor(ue_hwnd=0):
     """
     Create the MCA Editor panel as a free-floating Qt window above UE.
 
@@ -617,10 +617,6 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
     WindowStaysOnTopHint if no UE HWND is provided.
 
     :param int ue_hwnd: Native HWND of UE's main window (0 = fallback).
-    :param bool show_license_dialog: If True, show the licensing dialog
-        when the license is expired.  Set to False for auto_launch so that
-        an expired license silently skips instead of popping up a dialog
-        during UE startup.
     :return: True if the editor was created successfully.
     :rtype: bool
     """
@@ -669,98 +665,6 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
     # Pass dcc_version so QSettings is isolated from Maya's settings.
     # This gives UE its own window state, recent files, last project, etc.
     settings = MCASettings(dcc_version="UE5")
-
-    # --- License gate -------------------------------------------------------
-    # Use the same activation module as Maya for server-based license
-    # validation.  Falls back to offline-only check_license() if the
-    # activation module is unavailable (e.g. not yet compiled).
-    _license_message = ""
-    _has_activation = False
-
-    try:
-        from mca_core.activation import (
-            validate_on_launch,
-            get_trial_status as activation_trial_status,
-        )
-        _has_activation = True
-    except ImportError:
-        _ue_log("activation module not available — using offline license check")
-
-    if _has_activation:
-        # --- Server-based activation path (same as Maya) ---
-        from mca_core import __version__ as _plugin_version
-        _ue_log("Running activation check (product=unreal)...")
-        result = validate_on_launch(_plugin_version, product="unreal")
-
-        if result.success:
-            # Licensed — proceed normally.
-            _ue_log("License valid: {} (status={})".format(result.message, result.status))
-        else:
-            # Not licensed — check trial.
-            trial = activation_trial_status(product="unreal")
-
-            if trial["active"]:
-                # Trial still running — proceed with trial message.
-                _license_message = "Trial ({} days remaining)".format(
-                    trial["days_remaining"]
-                )
-                _ue_log("Trial mode: {}".format(_license_message))
-            else:
-                # Trial expired + no valid license.
-                if not show_license_dialog:
-                    # auto_launch — silently skip, don't popup a dialog.
-                    _ue_log("License expired — skipping auto-launch (no dialog)")
-                    return False
-
-                # User clicked the toolbar button — show licensing dialog.
-                from mca_qt.widgets.licensing_dialog import LicensingDialog
-                _ue_log("Trial expired — showing licensing dialog")
-                dlg = LicensingDialog(
-                    parent=None,
-                    modal=True,
-                    reason=result.status,
-                    message=result.message,
-                    settings=settings,
-                )
-                dlg.exec()
-                # Re-check after dialog — key may have been entered.
-                from mca_core.license import check_license
-                license_status = check_license(settings)
-                if license_status["needs_key"]:
-                    _ue_log_warning("No valid license after dialog — aborting")
-                    return False
-                _ue_log("License activated via dialog")
-    else:
-        # --- Offline-only fallback (activation.py not available) ---
-        from mca_core.license import check_license
-        license_status = check_license(settings)
-
-        if license_status["needs_key"]:
-            if not show_license_dialog:
-                # auto_launch — silently skip, don't popup a dialog.
-                _ue_log("License expired — skipping auto-launch (no dialog)")
-                return False
-
-            from mca_qt.widgets.licensing_dialog import LicensingDialog
-            _ue_log("Trial expired — showing licensing dialog")
-            dlg = LicensingDialog(
-                parent=None,
-                modal=True,
-                reason="not_activated",
-                message=license_status["message"],
-                settings=settings,
-            )
-            dlg.exec()
-            license_status = check_license(settings)
-            if license_status["needs_key"]:
-                _ue_log_warning("No valid license after dialog — aborting")
-                return False
-
-        if license_status["trial"]:
-            _license_message = license_status["message"]
-            _ue_log("Trial mode: {}".format(_license_message))
-        elif license_status["licensed"]:
-            _ue_log("License valid: {}".format(license_status["message"]))
 
     # Create with dcc_version="UE5" for session isolation, no adapter
     # manager (execution goes through _execute_locally which uses exec()).
@@ -821,15 +725,6 @@ def _launch_editor(ue_hwnd=0, show_license_dialog=True):
 
     # Remove all MEL/Maya-related UI elements and close MEL tabs.
     _strip_mel_from_ui(panel)
-
-    # --- Show license/trial notice on the status bar -------------------------
-    # Display the trial countdown or license status as a transient message
-    # so the user sees it immediately after launch.  Use a short delay so the
-    # status bar callback has been wired up by _build_status_bar() above.
-    if _license_message:
-        from PySide6.QtCore import QTimer
-        _msg = _license_message
-        QTimer.singleShot(500, lambda: panel._show_status(_msg, 10000))
 
     # --- Start UE log tailer ------------------------------------------------
     # Pipe UE's Output Log into the MCA Editor output panel.
@@ -1342,7 +1237,7 @@ def auto_launch(ue_hwnd=0):
         was_open, _ = _load_persistent_state()
         if was_open:
             _ue_log("Auto-launching editor (was open in previous UE session)")
-            return _launch_editor(ue_hwnd=ue_hwnd, show_license_dialog=False)
+            return _launch_editor(ue_hwnd=ue_hwnd)
         else:
             _ue_log("Auto-launch skipped (editor was not open in previous session)")
             return False

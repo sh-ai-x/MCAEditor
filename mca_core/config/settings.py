@@ -204,12 +204,6 @@ class MCASettings:
 
         # --- Plugins ---
         "disabled_plugins": [],  # Plugin IDs to skip on load.
-        "plugin_license_server_url": "https://activate.mcaeditor.com",  # Activation server for paid plugins.
-
-        # --- Licensing ---
-        "license_key": "",               # Stored license key string (MCA-XXXX-XXXX-XXXX-XXXX).
-        "first_launch_date": "",         # ISO datetime of first launch (trial start).
-        "trial_version": "",             # Version that started the current trial period.
 
         # --- Session Persistence ---
         "editor_was_open": False,        # Whether the editor was open when Maya last shut down.

@@ -102,8 +102,6 @@ DIST_PYC_FILES = [
     os.path.join("mca_qt", "widgets", "ai_panel.py"),
     os.path.join("mca_qt", "widgets", "connection_dialog.py"),
     os.path.join("mca_qt", "widgets", "create_project_dialog.py"),
-    os.path.join("mca_qt", "widgets", "license_dialog.py"),
-    os.path.join("mca_qt", "widgets", "licensing_dialog.py"),
     os.path.join("mca_qt", "widgets", "new_tab_dialog.py"),
     os.path.join("mca_qt", "widgets", "project_settings_dialog.py"),
     # --- AI Chat plugin ---

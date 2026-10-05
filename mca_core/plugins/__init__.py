@@ -696,7 +696,7 @@ class PluginManager:
         # --- Monetization manifest gate -----------------------------------------
         # Check for a plugin_manifest.json alongside the regular plugin.json.
         # If absent, this is a legacy/free plugin and we skip straight to loading.
-        from mca_core import plugin_manifest, plugin_license
+        from mca_core import plugin_manifest
         from mca_core import __version__
 
         pm = plugin_manifest.load(plugin_path)
@@ -717,22 +717,7 @@ class PluginManager:
                 )
                 return False
 
-            # Paid plugins require a license check (currently a stub).
-            # "subscription" is treated as "paid" until subscription support ships.
-            pricing_model = pm.pricing.get("model", "")
-            if pricing_model in ("paid", "subscription"):
-                is_licensed, reason = plugin_license.check(pm)
-                if not is_licensed:
-                    logger.info(
-                        "Plugin '%s' not loaded: %s", plugin_id, reason
-                    )
-                    return False
-
-            # Free or unrecognized pricing model — proceed normally.
-            logger.debug(
-                "Plugin '%s' passed manifest checks (pricing=%s)",
-                plugin_id, pricing_model,
-            )
+            logger.debug("Plugin '%s' passed manifest checks", plugin_id)
 
         # --- Standard plugin loading (unchanged) --------------------------------
         entry_point = manifest.get("entry_point", "__init__.py")
