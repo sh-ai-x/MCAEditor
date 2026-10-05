@@ -38,25 +38,11 @@ MCA scans this directory automatically every time the editor opens. The plugin a
 
 ---
 
-## Free vs Paid Plugins
+## Installing a Plugin
 
-**Free plugins** load automatically with no setup required. Drop the folder in and you're done.
+Plugins load automatically with no setup required. Drop the folder into your plugins directory and restart the editor.
 
-**Paid plugins** include a signed `plugin_manifest.json` in their folder. When MCA detects a paid plugin for the first time, it prompts you to enter a license key. You receive this key by email after purchasing the plugin on Gumroad.
-
-!!! tip "Where to find your key"
-    After purchasing a plugin on Gumroad, check your email for the receipt — it contains your license key. You can also find it in your [Gumroad Library](https://app.gumroad.com/library).
-
----
-
-## Entering a License Key
-
-1. Install the plugin by dropping its folder into your plugins directory
-2. Open MCA Editor — the plugin license dialog appears automatically
-3. Paste the license key from your Gumroad receipt
-4. Click **Activate**
-
-Once activated, the plugin loads immediately and is ready to use.
+A plugin may ship a `plugin_manifest.json` declaring its id, version and minimum MCA version. MCA checks that manifest for compatibility before loading. There is no licence check — every plugin loads if it is compatible.
 
 ---
 
@@ -70,7 +56,7 @@ If you're offline and the cache has expired, the plugin won't load until you rec
 
 ## Finding Plugins
 
-Browse available plugins at [mcaeditor.com/plugins](https://mcaeditor.com/plugins). Each listing includes a description, screenshots, and a link to purchase or download.
+Browse available plugins at [mcaeditor.com/plugins](https://mcaeditor.com/plugins). Each listing includes a description, screenshots, and a link to the plugin.
 
 ---
 
@@ -111,10 +97,3 @@ To remove a plugin, close MCA Editor and delete the plugin's folder from your pl
 
     Download the latest version from [mcaeditor.com](https://mcaeditor.com).
 
-??? question "License key not accepted"
-    - Make sure you are entering the key exactly as it appears in your Gumroad receipt email
-    - Check that you purchased the correct product — each plugin has its own key
-    - If the problem persists, contact the plugin developer to verify the key is still active
-
-??? question "\"License check failed\" error"
-    MCA needs to verify your license key online. Check your internet connection and try again. If you were previously working offline, the 14-day grace period may have expired.

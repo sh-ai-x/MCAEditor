@@ -49,12 +49,6 @@ If the connection drops, go to **File > Connect to Maya** to reconnect.
 
 ---
 
-## Trial Period
-
-MCA Editor includes a **14-day free trial**. After the trial, you'll need a license key to continue using the editor. You can enter your key in **Help > Licensing**.
-
----
-
 ## Next Steps
 
 - Learn about [Script Mode](../editor-guide/script-mode.md) for quick scripting

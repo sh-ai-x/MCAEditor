@@ -27,13 +27,11 @@ Built something useful? Get it listed here.
 
 The plugin directory is open to both free and paid plugins. Listings are manually reviewed to ensure a baseline of quality. There is no fee to submit.
 
-**Paid plugins** require setting MCA as a Gumroad affiliate at 10% or more — this is what keeps the directory free for everyone. See the [publishing guide](./plugin-development/publishing.md) for the full process.
-
 To submit, email [info@mechart.org](mailto:info@mechart.org) with:
 
 - Plugin name and a short description (2-3 sentences)
 - What it does and who it's for
 - A screenshot or two showing it running inside MCA
-- Your download or purchase link
+- A link to your plugin (a GitHub repository is ideal)
 
 We'll follow up within a few business days.

@@ -12,7 +12,6 @@ Have a question, found a bug, or want to request a feature? We'd love to hear fr
 
 ## What to reach out about
 
-- **License questions** — activations, upgrades, studio pricing
 - **Bug reports** — include your Maya/UE version, OS, and steps to reproduce
 - **Feature requests** — what would make MCA Editor better for your workflow
 - **Plugin development** — questions about building or publishing plugins
@@ -22,6 +21,5 @@ Have a question, found a bug, or want to request a feature? We'd love to hear fr
 
 ## Useful links
 
-- [Manage your activations](https://api.mcaeditor.com/manage)
-- [Retrieve your license key](https://api.mcaeditor.com/license)
+- [Source and issue tracker on GitHub](https://github.com/ncomes/MCAEditor)
 - [Download the latest version](download.md)

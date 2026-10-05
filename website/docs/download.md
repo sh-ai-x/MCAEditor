@@ -1,6 +1,6 @@
 ---
 title: Download
-description: "Download MCA Editor for Maya 2024-2026 (Windows and macOS) and Unreal Engine 5.5-5.7. Free 14-day trial."
+description: "Download MCA Editor for Maya 2024-2026 (Windows and macOS) and Unreal Engine 5.5-5.7. Free and open source."
 ---
 
 # Download MCA Editor
@@ -55,12 +55,11 @@ description: "Download MCA Editor for Maya 2024-2026 (Windows and macOS) and Unr
 
 ---
 
-## Free Trial
+## Free and open source
 
-The download files above work as a **14-day free trial** — no license key needed to get started.
-Once you're ready, [get a license](pricing.md) or [retrieve your existing key](https://api.mcaeditor.com/license).
+MCA Editor is free. There is no licence key, no trial period and no activation — download it and use it.
 
-Already activated on too many machines? [Manage your activations](https://api.mcaeditor.com/manage).
+The full source is on [GitHub](https://github.com/ncomes/MCAEditor) under the MIT licence. Issues and pull requests are welcome.
 
 ---
 
