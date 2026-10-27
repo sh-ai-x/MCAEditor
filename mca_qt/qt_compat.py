@@ -61,7 +61,7 @@ if PYSIDE_VERSION == 6:
     # QtCore
     from PySide6.QtCore import (
         Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
-        QEvent, QObject, QThread,
+        QEvent, QObject, QThread, QProcess,
     )
 
     # QKeyCombination exists natively in PySide6.
@@ -101,7 +101,7 @@ else:
     # QtCore
     from PySide2.QtCore import (
         Qt, QSize, QPoint, Signal, QRect, QTimer, QFileSystemWatcher,
-        QEvent, QObject, QThread,
+        QEvent, QObject, QThread, QProcess,
     )
 
     # QtGui
@@ -310,6 +310,14 @@ else:
         # --- QPlainTextEdit enums ---
         _patch_enum_group(QPlainTextEdit, "LineWrapMode", [
             "NoWrap", "WidgetWidth",
+        ])
+
+        # --- QProcess enums ---
+        _patch_enum_group(QProcess, "ProcessChannelMode", [
+            "SeparateChannels", "MergedChannels", "ForwardedChannels",
+        ])
+        _patch_enum_group(QProcess, "ProcessState", [
+            "NotRunning", "Starting", "Running",
         ])
 
         # --- QMessageBox enums ---

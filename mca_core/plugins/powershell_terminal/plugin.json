@@ -1,0 +1,9 @@
+{
+    "id": "com.mechart.powershell-terminal",
+    "name": "PowerShell Terminal",
+    "version": "1.0.0",
+    "author": "MechArt Studios",
+    "description": "Run PowerShell commands from a right-sidebar panel (plain text I/O, no PTY).",
+    "entry_point": "__init__.py",
+    "min_editor_version": "0.1.5"
+}
