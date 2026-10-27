@@ -1656,7 +1656,7 @@ def show_mca_editor():
     QTimer.singleShot(0, _reveal_first_show)
 
     # Record that the editor is now open so it auto-opens on next Maya launch.
-    MCASettings(app_name=_app_name).set("editor_was_open", True)
+    _mca_editor_window._settings.set("editor_was_open", True)
 
     # --- One-time update check -----------------------------------------------
     # Check if a newer version is available (background thread, non-blocking).
