@@ -1,9 +1,9 @@
 {
     "id": "com.mechart.powershell-terminal",
-    "name": "PowerShell Terminal",
-    "version": "1.0.0",
+    "name": "Terminal",
+    "version": "2.0.0",
     "author": "MechArt Studios",
-    "description": "Run PowerShell commands from a right-sidebar panel (plain text I/O, no PTY).",
+    "description": "Embedded PowerShell and WSL consoles (real Win32 console windows, reparented into the editor) rooted at the editor's scripts folder.",
     "entry_point": "__init__.py",
     "min_editor_version": "0.1.5"
 }
