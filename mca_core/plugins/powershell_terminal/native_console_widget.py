@@ -41,7 +41,7 @@ import platform
 import subprocess
 from ctypes import wintypes
 
-from mca_qt.qt_compat import QWidget, QTimer
+from mca_qt.qt_compat import QWidget, QTimer, QSize
 
 # Module-level logger.
 logger = logging.getLogger(__name__)
@@ -327,6 +327,31 @@ class EmbeddedConsoleWidget(QWidget):
         self._resize_console()
 
         logger.info("Embedded console hwnd 0x%x for %r", hwnd, self._command)
+
+    def sizeHint(self):
+        """
+        Report a modest preferred size.
+
+        The reparented native console is invisible to Qt's layout
+        system (it was attached with raw SetParent, not
+        createWindowContainer), so this has no real content to measure
+        -- but QSplitter still consults it when first allocating space
+        to this pane, and the base QWidget default is small enough
+        that leaving it unset is fine in isolation. Returning an
+        explicit, modest size here removes any ambiguity if this widget
+        ever ends up nested somewhere layout math is sensitive to it.
+
+        :rtype: QSize
+        """
+        return QSize(400, 300)
+
+    def minimumSizeHint(self):
+        """
+        Report a modest minimum size.
+
+        :rtype: QSize
+        """
+        return QSize(200, 150)
 
     def resizeEvent(self, event):
         """Keep the embedded console filling this widget on resize."""
